@@ -377,11 +377,19 @@ app.post('/api/auth/change-password', authMiddleware, async (req: Request, res: 
     return res.status(400).json({ error: 'New password must be between 4 and 128 characters long.' });
   }
 
-  if (currentPassword) {
-    const valid = await bcrypt.compare(currentPassword, user.passwordHash);
-    if (!valid) {
-      return res.status(400).json({ error: 'Current password is incorrect.' });
-    }
+  // Current password is ALWAYS required - previously it could be omitted entirely,
+  // which let anyone holding a session token silently take over the account.
+  if (!currentPassword || typeof currentPassword !== 'string') {
+    return res.status(400).json({ error: 'Current password is required.' });
+  }
+
+  const valid = await bcrypt.compare(currentPassword, user.passwordHash);
+  if (!valid) {
+    return res.status(400).json({ error: 'Current password is incorrect.' });
+  }
+
+  if (currentPassword === newPassword) {
+    return res.status(400).json({ error: 'New password must be different from the current password.' });
   }
 
   user.passwordHash = await bcrypt.hash(newPassword, 10);
@@ -655,6 +663,72 @@ app.get('/api/products/:id', authMiddleware, (req: Request, res: Response) => {
   res.json(product);
 });
 
+/** Returns an error message when a SKU / barcode is duplicated inside the payload or already used by another product. */
+function validateVariantCodes(variants: any[], excludeProductId?: string): string | null {
+  const seenSku = new Set<string>();
+  const seenBarcode = new Set<string>();
+
+  for (const v of variants) {
+    const sku = v?.sku ? String(v.sku).trim().toLowerCase() : '';
+    const barcode = v?.barcode ? String(v.barcode).trim().toLowerCase() : '';
+
+    if (sku) {
+      if (seenSku.has(sku)) return `Duplicate SKU "${v.sku}" used twice in this product.`;
+      seenSku.add(sku);
+    }
+    if (barcode) {
+      if (seenBarcode.has(barcode)) return `Duplicate barcode "${v.barcode}" used twice in this product.`;
+      seenBarcode.add(barcode);
+    }
+
+    for (const p of db.raw.products) {
+      if (excludeProductId && p.id === excludeProductId) continue;
+      for (const existing of p.variants) {
+        if (sku && existing.sku && existing.sku.trim().toLowerCase() === sku) {
+          return `SKU "${v.sku}" is already used by "${p.name}" (${existing.size}).`;
+        }
+        if (barcode && existing.barcode && existing.barcode.trim().toLowerCase() === barcode) {
+          return `Barcode "${v.barcode}" is already used by "${p.name}" (${existing.size}).`;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** Builds a SKU that is guaranteed not to collide with any existing variant SKU. */
+function makeUniqueSku(base: string, taken: Set<string>): string {
+  const clean = (base || 'SKU').trim().slice(0, 120).replace(/\s+/g, '-').toUpperCase() || 'SKU';
+  const existing = new Set<string>(taken);
+  for (const p of db.raw.products) {
+    for (const v of p.variants) {
+      if (v.sku) existing.add(v.sku.trim().toUpperCase());
+    }
+  }
+  if (!existing.has(clean)) return clean;
+  let i = 2;
+  while (existing.has(`${clean}-${i}`) && i < 10000) i++;
+  return `${clean}-${i}`;
+}
+
+/** Validates prices so a variant can never be saved with an unusable/NaN/zero selling price. */
+function validateVariantPrices(variants: any[]): string | null {
+  for (const v of variants) {
+    const selling = Number(v?.sellingPrice);
+    const cost = Number(v?.costPrice ?? 0);
+    if (!Number.isFinite(selling) || selling <= 0) {
+      return `Selling price for "${v?.size || 'variant'}" must be a number greater than 0.`;
+    }
+    if (!Number.isFinite(cost) || cost < 0) {
+      return `Cost price for "${v?.size || 'variant'}" cannot be negative.`;
+    }
+    if (selling > 100000000 || cost > 100000000) {
+      return `Price for "${v?.size || 'variant'}" is out of range.`;
+    }
+  }
+  return null;
+}
+
 app.post('/api/products', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   const user = (req as any).user as User;
   const { name, categoryId, companyId, description, image, isKitchenItem, taxRate, variants } = req.body;
@@ -668,7 +742,14 @@ app.post('/api/products', authMiddleware, requireRole('super_admin'), (req: Requ
     return res.status(400).json({ error: 'Invalid category ID' });
   }
 
+  const priceError = validateVariantPrices(variants);
+  if (priceError) return res.status(400).json({ error: priceError });
+
+  const codeError = validateVariantCodes(variants);
+  if (codeError) return res.status(400).json({ error: codeError });
+
   const productId = `prod-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  const usedSkus = new Set<string>();
   const formattedVariants: ProductVariant[] = variants.map((v: any, index: number) => {
     const variantId = `var-${productId.replace('prod-', '')}-${index + 1}-${crypto.randomBytes(2).toString('hex')}`;
     const initialStock = Math.max(0, Number(v.stock || 0));
@@ -683,7 +764,13 @@ app.post('/api/products', authMiddleware, requireRole('super_admin'), (req: Requ
       id: variantId,
       productId,
       size: String(v.size || 'Standard').trim().slice(0, 64),
-      sku: (v.sku || `${name.substring(0, 3).toUpperCase()}-${v.size}-${index + 1}`).trim().slice(0, 128),
+      sku: (() => {
+        const sku = v.sku
+          ? String(v.sku).trim().slice(0, 128)
+          : makeUniqueSku(`${name.substring(0, 3)}-${v.size || 'STD'}-${index + 1}`, usedSkus);
+        usedSkus.add(sku.toUpperCase());
+        return sku;
+      })(),
       barcode: v.barcode ? String(v.barcode).trim().slice(0, 128) : undefined,
       costPrice,
       sellingPrice,
@@ -750,6 +837,13 @@ app.put('/api/products/:id', authMiddleware, requireRole('super_admin'), (req: R
   if (isActive !== undefined) product.isActive = Boolean(isActive);
 
   if (Array.isArray(variants) && variants.length > 0) {
+    const priceError = validateVariantPrices(variants);
+    if (priceError) return res.status(400).json({ error: priceError });
+
+    const codeError = validateVariantCodes(variants, product.id);
+    if (codeError) return res.status(400).json({ error: codeError });
+
+    const updatedSkus = new Set<string>();
     const updatedVariants: ProductVariant[] = variants.map((v: any, index: number) => {
       const existingVar = product.variants.find(oldV => oldV.id === v.id);
       const varId = v.id || `var-${product.id.replace('prod-', '')}-${Date.now()}-${index}-${crypto.randomBytes(2).toString('hex')}`;
@@ -782,7 +876,13 @@ app.put('/api/products/:id', authMiddleware, requireRole('super_admin'), (req: R
         id: varId,
         productId: product.id,
         size: String(v.size || 'Standard').trim().slice(0, 64),
-        sku: (v.sku || `${product.name.substring(0, 3).toUpperCase()}-${v.size}`).trim().slice(0, 128),
+        sku: (() => {
+          const sku = v.sku
+            ? String(v.sku).trim().slice(0, 128)
+            : (existingVar?.sku || makeUniqueSku(`${product.name.substring(0, 3)}-${v.size || 'STD'}`, updatedSkus));
+          updatedSkus.add(sku.toUpperCase());
+          return sku;
+        })(),
         barcode: v.barcode ? String(v.barcode).trim().slice(0, 128) : undefined,
         costPrice: Math.max(0, Number(v.costPrice || 0)),
         sellingPrice: Math.max(0, Number(v.sellingPrice || 0)),
@@ -871,6 +971,111 @@ function findVariantById(variantId: string): { product: Product; variant: Produc
     if (v) return { product: p, variant: v };
   }
   return null;
+}
+
+// ==========================================
+// ORDER ITEM SANITIZATION & PRICING (SERVER AUTHORITATIVE)
+// ==========================================
+
+/**
+ * Validates and rebuilds order items from the server-side catalogue.
+ * Prevents:
+ *  - negative / zero / fractional quantities (which used to INCREASE stock on checkout)
+ *  - unknown variant IDs silently ending up on a bill
+ *  - client-supplied prices overriding the real selling price
+ */
+function sanitizeOrderItems(rawItems: unknown): { items: OrderItem[]; error?: string } {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) {
+    return { items: [], error: 'Order must contain at least one item.' };
+  }
+  if (rawItems.length > 500) {
+    return { items: [], error: 'Too many items in a single order (max 500).' };
+  }
+
+  const items: OrderItem[] = [];
+
+  for (const raw of rawItems as any[]) {
+    if (!raw || typeof raw !== 'object') {
+      return { items: [], error: 'Invalid order item received.' };
+    }
+
+    const variantId = typeof raw.variantId === 'string' ? raw.variantId : '';
+    if (!variantId) {
+      return { items: [], error: 'Every order item must reference a product variant.' };
+    }
+
+    const found = findVariantById(variantId);
+    if (!found) {
+      return { items: [], error: `Product variant no longer exists (${variantId}). Please remove it from the cart and try again.` };
+    }
+
+    const quantity = Number(raw.quantity);
+    if (!Number.isFinite(quantity) || !Number.isInteger(quantity) || quantity < 1 || quantity > 10000) {
+      return { items: [], error: `Invalid quantity for ${found.product.name} (${found.variant.size}). Quantity must be a whole number between 1 and 10,000.` };
+    }
+
+    const unitPrice = Math.max(0, Number(found.variant.sellingPrice) || 0);
+    const lineDiscount = Math.max(0, Math.min(unitPrice * quantity, Number(raw.discount) || 0));
+    const lineTotal = Number((unitPrice * quantity - lineDiscount).toFixed(2));
+
+    items.push({
+      id: typeof raw.id === 'string' && raw.id ? raw.id.slice(0, 64) : `item-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
+      productId: found.product.id,
+      productName: String(found.product.name).slice(0, 191),
+      variantId: found.variant.id,
+      size: String(found.variant.size).slice(0, 64),
+      unitPrice,
+      costPrice: Math.max(0, Number(found.variant.costPrice) || 0),
+      quantity,
+      discount: lineDiscount,
+      tax: 0,
+      total: lineTotal,
+      notes: raw.notes ? String(raw.notes).slice(0, 500) : undefined,
+      isKitchenItem: Boolean(found.product.isKitchenItem)
+    });
+  }
+
+  return { items };
+}
+
+/** Recomputes all money values on the server so a tampered/stale client cannot decide the price. */
+function computeOrderTotals(
+  items: OrderItem[],
+  opts: { discountPercentage?: unknown; discount?: unknown }
+) {
+  const settings = db.raw.settings;
+  const subtotal = Number(items.reduce((sum, i) => sum + i.unitPrice * i.quantity, 0).toFixed(2));
+
+  const maxDiscountPct = Number.isFinite(Number(settings.maxDiscountPercentage))
+    ? Math.max(0, Math.min(100, Number(settings.maxDiscountPercentage)))
+    : 100;
+
+  const rawPct = Number(opts.discountPercentage);
+  const rawAmt = Number(opts.discount);
+
+  let discountPercentage = 0;
+  let discount = 0;
+
+  if (Number.isFinite(rawPct) && rawPct > 0) {
+    discountPercentage = Math.min(rawPct, maxDiscountPct, 100);
+    discount = (subtotal * discountPercentage) / 100;
+  } else if (Number.isFinite(rawAmt) && rawAmt > 0) {
+    const maxDiscountAmount = (subtotal * maxDiscountPct) / 100;
+    discount = Math.min(rawAmt, subtotal, maxDiscountAmount);
+    discountPercentage = subtotal > 0 ? Number(((discount / subtotal) * 100).toFixed(2)) : 0;
+  }
+
+  discount = Number(discount.toFixed(2));
+
+  const taxableAmount = Math.max(0, Number((subtotal - discount).toFixed(2)));
+  const serviceChargeRate = Math.max(0, Math.min(100, Number(settings.serviceChargeRate) || 0));
+  const taxRate = Math.max(0, Math.min(100, Number(settings.taxRate) || 0));
+
+  const serviceCharge = Number(((taxableAmount * serviceChargeRate) / 100).toFixed(2));
+  const tax = Number(((taxableAmount * taxRate) / 100).toFixed(2));
+  const grandTotal = Number((taxableAmount + serviceCharge + tax).toFixed(2));
+
+  return { subtotal, discount, discountPercentage, serviceCharge, serviceChargeRate, tax, taxRate, grandTotal };
 }
 
 app.post('/api/inventory/stock-in', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
@@ -1065,27 +1270,34 @@ app.get('/api/orders/held', authMiddleware, (req: Request, res: Response) => {
 
 app.post('/api/orders/hold', authMiddleware, (req: Request, res: Response) => {
   const user = (req as any).user as User;
-  const { items, orderType, tableNumber, customerName, customerPhone, subtotal, discount, discountPercentage, tax, grandTotal, notes, existingHeldId } = req.body;
+  const { items, orderType, tableNumber, customerName, customerPhone, discount, discountPercentage, notes, existingHeldId } = req.body;
 
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'Cannot hold an empty cart.' });
   }
+
+  const sanitizedHold = sanitizeOrderItems(items);
+  if (sanitizedHold.error) {
+    return res.status(400).json({ error: sanitizedHold.error });
+  }
+  const holdItems = sanitizedHold.items;
+  const holdTotals = computeOrderTotals(holdItems, { discount, discountPercentage });
 
   if (existingHeldId) {
     const existingIndex = db.raw.heldBills.findIndex(h => h.id === existingHeldId);
     if (existingIndex !== -1) {
       const updated: HeldBill = {
         ...db.raw.heldBills[existingIndex],
-        items,
+        items: holdItems,
         orderType: orderType || 'dine_in',
         tableNumber: tableNumber ? String(tableNumber).slice(0, 64) : undefined,
         customerName: customerName ? String(customerName).slice(0, 128) : undefined,
         customerPhone: customerPhone ? String(customerPhone).slice(0, 32) : undefined,
-        subtotal: Math.max(0, Number(subtotal || 0)),
-        discount: Math.max(0, Number(discount || 0)),
-        discountPercentage: Math.max(0, Math.min(100, Number(discountPercentage || 0))),
-        tax: Math.max(0, Number(tax || 0)),
-        grandTotal: Math.max(0, Number(grandTotal || 0)),
+        subtotal: holdTotals.subtotal,
+        discount: holdTotals.discount,
+        discountPercentage: holdTotals.discountPercentage,
+        tax: holdTotals.tax,
+        grandTotal: holdTotals.grandTotal,
         notes: notes ? String(notes).slice(0, 1000) : undefined,
         updatedAt: new Date().toISOString()
       };
@@ -1096,23 +1308,23 @@ app.post('/api/orders/hold', authMiddleware, (req: Request, res: Response) => {
     }
   }
 
-  // FIXED: Use HOLD- prefix, not BILL- to preserve invoice sequence
-  const heldCount = db.raw.counters.billSeq; // Use current seq without incrementing for held? Actually use separate counter
+  // Held bills use their own sequence so every hold gets a unique reference
+  // (previously every hold reused the current bill sequence => duplicate HOLD-xxxx numbers)
   const heldBill: HeldBill = {
     id: `held-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
-    billNumber: `HOLD-${heldCount}`,
+    billNumber: db.getNextHoldNumber(),
     tableNumber: tableNumber ? String(tableNumber).slice(0, 64) : undefined,
     customerName: customerName ? String(customerName).slice(0, 128) : undefined,
     customerPhone: customerPhone ? String(customerPhone).slice(0, 32) : undefined,
     cashierId: user.id,
     cashierName: user.name,
     orderType: orderType || 'dine_in',
-    items,
-    subtotal: Math.max(0, Number(subtotal || 0)),
-    discount: Math.max(0, Number(discount || 0)),
-    discountPercentage: Math.max(0, Math.min(100, Number(discountPercentage || 0))),
-    tax: Math.max(0, Number(tax || 0)),
-    grandTotal: Math.max(0, Number(grandTotal || 0)),
+    items: holdItems,
+    subtotal: holdTotals.subtotal,
+    discount: holdTotals.discount,
+    discountPercentage: holdTotals.discountPercentage,
+    tax: holdTotals.tax,
+    grandTotal: holdTotals.grandTotal,
     notes: notes ? String(notes).slice(0, 1000) : undefined,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -1121,7 +1333,7 @@ app.post('/api/orders/hold', authMiddleware, (req: Request, res: Response) => {
   db.raw.heldBills.push(heldBill);
   db.save();
 
-  db.logAudit(user.id, user.name, user.role, 'HOLD_BILL', 'BILL', heldBill.id, `Held bill ${heldBill.billNumber} with ${items.length} items (Total: Rs. ${heldBill.grandTotal})`);
+  db.logAudit(user.id, user.name, user.role, 'HOLD_BILL', 'BILL', heldBill.id, `Held bill ${heldBill.billNumber} with ${holdItems.length} items (Total: Rs. ${heldBill.grandTotal})`);
 
   res.status(201).json(heldBill);
 });
@@ -1155,6 +1367,11 @@ app.post('/api/kot', authMiddleware, (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Cannot create KOT with no items.' });
   }
 
+  const sanitizedKot = sanitizeOrderItems(items);
+  if (sanitizedKot.error) {
+    return res.status(400).json({ error: sanitizedKot.error });
+  }
+
   const newKot: KOT = {
     id: `kot-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
     kotNumber: db.getNextKOTNumber(),
@@ -1163,7 +1380,7 @@ app.post('/api/kot', authMiddleware, (req: Request, res: Response) => {
     orderType: orderType || 'dine_in',
     cashierId: user.id,
     cashierName: user.name,
-    items,
+    items: sanitizedKot.items,
     status: 'pending',
     notes: notes ? String(notes).slice(0, 1000) : undefined,
     createdAt: new Date().toISOString(),
@@ -1232,15 +1449,9 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
     tableNumber,
     customerName,
     customerPhone,
-    subtotal,
     discount,
     discountPercentage,
-    tax,
-    taxRate,
-    serviceCharge,
-    grandTotal,
     amountReceived,
-    changeAmount,
     paymentMethod,
     paymentDetails,
     notes,
@@ -1251,29 +1462,49 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
     return res.status(400).json({ error: 'Cannot checkout with an empty cart.' });
   }
 
-  const numReceived = Number(amountReceived || grandTotal);
-  const numGrandTotal = Number(grandTotal || 0);
+  // Rebuild items from the catalogue (blocks tampered prices, unknown variants, bad quantities)
+  const sanitized = sanitizeOrderItems(items);
+  if (sanitized.error) {
+    return res.status(400).json({ error: sanitized.error });
+  }
+  const safeItems = sanitized.items;
 
-  if (isNaN(numReceived) || numReceived < 0) {
+  // Must stay in sync with the PaymentMethod union in src/types.ts
+  const validPaymentMethods = ['cash', 'card', 'bank_transfer', 'other', 'split'];
+  const safePaymentMethod = validPaymentMethods.includes(paymentMethod) ? paymentMethod : 'cash';
+
+  // Server recomputes every money value - never trust the client
+  const totals = computeOrderTotals(safeItems, { discount, discountPercentage });
+  const numGrandTotal = totals.grandTotal;
+
+  const numReceived = amountReceived === undefined || amountReceived === null || amountReceived === ''
+    ? numGrandTotal
+    : Number(amountReceived);
+
+  if (!Number.isFinite(numReceived) || numReceived < 0) {
     return res.status(400).json({ error: 'Invalid amount received' });
   }
 
-  if (paymentMethod === 'cash' && numReceived < numGrandTotal) {
-    return res.status(400).json({ error: 'Received amount cannot be less than Grand Total.' });
+  if (safePaymentMethod === 'cash' && numReceived + 0.01 < numGrandTotal) {
+    return res.status(400).json({ error: `Received amount cannot be less than Grand Total (Rs. ${numGrandTotal.toFixed(2)}).` });
   }
 
   // For non-cash, ensure amountReceived >= grandTotal or at least grandTotal if split not fully implemented
-  if (paymentMethod !== 'cash' && paymentMethod !== 'split' && numReceived < numGrandTotal) {
-    return res.status(400).json({ error: 'Payment amount cannot be less than Grand Total for this payment method.' });
+  if (safePaymentMethod !== 'cash' && safePaymentMethod !== 'split' && numReceived + 0.01 < numGrandTotal) {
+    return res.status(400).json({ error: `Payment amount cannot be less than Grand Total (Rs. ${numGrandTotal.toFixed(2)}) for this payment method.` });
   }
 
-  // Stock check
+  // Stock check (aggregate per variant so the same variant sent twice cannot oversell)
   if (!db.raw.settings.allowNegativeStock) {
-    for (const item of items) {
-      const found = findVariantById(item.variantId);
-      if (found && found.variant.stock < item.quantity) {
+    const requested = new Map<string, number>();
+    for (const item of safeItems) {
+      requested.set(item.variantId, (requested.get(item.variantId) || 0) + item.quantity);
+    }
+    for (const [variantId, qty] of requested) {
+      const found = findVariantById(variantId);
+      if (found && found.variant.stock < qty) {
         return res.status(400).json({
-          error: `Insufficient stock for ${item.productName} (${item.size}). Available: ${found.variant.stock}, Requested: ${item.quantity}.`
+          error: `Insufficient stock for ${found.product.name} (${found.variant.size}). Available: ${found.variant.stock}, Requested: ${qty}.`
         });
       }
     }
@@ -1283,7 +1514,7 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
   const billNumber = db.getNextBillNumber();
   const invoiceNumber = db.getNextInvoiceNumber();
 
-  for (const item of items) {
+  for (const item of safeItems) {
     const found = findVariantById(item.variantId);
     if (found) {
       const beforeQty = found.variant.stock;
@@ -1306,21 +1537,7 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
     }
   }
 
-  const snapshotItems: OrderItem[] = items.map((item: any) => ({
-    id: item.id || `item-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-    productId: item.productId,
-    productName: String(item.productName).slice(0, 191),
-    variantId: item.variantId,
-    size: String(item.size).slice(0, 64),
-    unitPrice: Number(item.unitPrice),
-    costPrice: Number(item.costPrice || 0),
-    quantity: Math.max(1, Number(item.quantity)),
-    discount: Math.max(0, Number(item.discount || 0)),
-    tax: Math.max(0, Number(item.tax || 0)),
-    total: Number(item.total),
-    notes: item.notes ? String(item.notes).slice(0, 500) : undefined,
-    isKitchenItem: Boolean(item.isKitchenItem)
-  }));
+  const snapshotItems: OrderItem[] = safeItems;
 
   const newBill: Bill = {
     id: billId,
@@ -1333,16 +1550,16 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
     cashierId: user.id,
     cashierName: user.name,
     items: snapshotItems,
-    subtotal: Math.max(0, Number(subtotal || 0)),
-    discount: Math.max(0, Number(discount || 0)),
-    discountPercentage: Math.max(0, Math.min(100, Number(discountPercentage || 0))),
-    tax: Math.max(0, Number(tax || 0)),
-    taxRate: Math.max(0, Math.min(100, Number(taxRate || 0))),
-    serviceCharge: Math.max(0, Number(serviceCharge || 0)),
+    subtotal: totals.subtotal,
+    discount: totals.discount,
+    discountPercentage: totals.discountPercentage,
+    tax: totals.tax,
+    taxRate: totals.taxRate,
+    serviceCharge: totals.serviceCharge,
     grandTotal: numGrandTotal,
     amountReceived: numReceived,
-    changeAmount: Number((changeAmount || Math.max(0, numReceived - numGrandTotal)).toFixed(2)),
-    paymentMethod: paymentMethod || 'cash',
+    changeAmount: Number(Math.max(0, numReceived - numGrandTotal).toFixed(2)),
+    paymentMethod: safePaymentMethod,
     paymentDetails: paymentDetails || undefined,
     status: 'paid',
     notes: notes ? String(notes).slice(0, 1000) : undefined,
@@ -1419,17 +1636,51 @@ app.post('/api/bills/:id/void', authMiddleware, requireRole('super_admin'), (req
 // REPORTS & ANALYTICS
 // ==========================================
 
-app.get('/api/reports/analytics', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
-  const { startDate, endDate, cashierId } = req.query;
+/** Resolves a `period` shortcut (today / week / month / year) into a date range. */
+function resolvePeriodRange(period?: string): { start?: number; end?: number } {
+  if (!period || period === 'all' || period === 'custom') return {};
+  const now = new Date();
+  const end = now.getTime();
+  switch (period) {
+    case 'today':
+      return { start: new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(), end };
+    case 'week': {
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      d.setDate(d.getDate() - 6);
+      return { start: d.getTime(), end };
+    }
+    case 'month':
+      return { start: new Date(now.getFullYear(), now.getMonth(), 1).getTime(), end };
+    case 'year':
+      return { start: new Date(now.getFullYear(), 0, 1).getTime(), end };
+    default:
+      return {};
+  }
+}
+
+const reportsSummaryHandler = (req: Request, res: Response) => {
+  const { startDate, endDate, cashierId, period } = req.query;
 
   let filteredBills = db.raw.bills.filter(b => b.status === 'paid');
+
+  // `period=today|week|month|year` used by the Reports screen.
+  const range = resolvePeriodRange(typeof period === 'string' ? period : undefined);
+  if (range.start !== undefined) {
+    filteredBills = filteredBills.filter(b => new Date(b.createdAt).getTime() >= range.start!);
+  }
+  if (range.end !== undefined) {
+    filteredBills = filteredBills.filter(b => new Date(b.createdAt).getTime() <= range.end!);
+  }
 
   if (startDate) {
     const start = new Date(startDate as string).getTime();
     if (!isNaN(start)) filteredBills = filteredBills.filter(b => new Date(b.createdAt).getTime() >= start);
   }
   if (endDate) {
-    const end = new Date(endDate as string).getTime();
+    // A plain YYYY-MM-DD end date must include the whole day
+    const raw = String(endDate);
+    const parsed = new Date(raw);
+    const end = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? parsed.getTime() + 86399999 : parsed.getTime();
     if (!isNaN(end)) filteredBills = filteredBills.filter(b => new Date(b.createdAt).getTime() <= end);
   }
   if (cashierId && cashierId !== 'all') {
@@ -1510,7 +1761,11 @@ app.get('/api/reports/analytics', authMiddleware, requireRole('super_admin'), (r
     cashierBreakdown: Object.values(cashierSalesMap),
     bills: filteredBills
   });
-});
+};
+
+// Both paths are supported: the Reports screen calls /summary, older clients call /analytics
+app.get('/api/reports/analytics', authMiddleware, requireRole('super_admin'), reportsSummaryHandler);
+app.get('/api/reports/summary', authMiddleware, requireRole('super_admin'), reportsSummaryHandler);
 
 // Daily Stock Sheet - IMPROVED LOGIC
 app.get('/api/reports/daily-stock-sheet', authMiddleware, (req: Request, res: Response) => {
@@ -1774,6 +2029,15 @@ app.put('/api/rooms/:id', authMiddleware, (req: Request, res: Response) => {
 
     const { roomNumber, roomType, floor, capacity, ratePerDay, rateHalfDay, amenities, status, notes, isActive } = req.body;
 
+    // Cashiers may only flip housekeeping status (available / cleaning / maintenance ...).
+    // Rates, room numbers and other master data stay Super Admin only.
+    if (user.role !== 'super_admin') {
+      const adminOnlyFields = [roomNumber, roomType, floor, capacity, ratePerDay, rateHalfDay, amenities, isActive];
+      if (adminOnlyFields.some(f => f !== undefined)) {
+        return res.status(403).json({ error: 'Access Denied: Only a Super Admin can edit room details or rates.' });
+      }
+    }
+
     if (roomNumber && typeof roomNumber === 'string' && roomNumber.trim().toLowerCase() !== room.roomNumber.toLowerCase()) {
       const existing = db.raw.rooms.find(r => r.id !== id && r.roomNumber.trim().toLowerCase() === roomNumber.trim().toLowerCase());
       if (existing) {
@@ -1884,6 +2148,21 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
       return res.status(400).json({ error: `Room ${room.roomNumber} is currently occupied.` });
     }
 
+    if (room.status === 'maintenance') {
+      return res.status(400).json({ error: `Room ${room.roomNumber} is under maintenance and cannot be booked.` });
+    }
+
+    // Guard against double-booking a room that already has an active (confirmed / checked-in)
+    // booking - previously the second booking silently orphaned the first one.
+    const activeBooking = (db.raw.roomBookings || []).find(
+      b => b.roomId === room.id && (b.status === 'confirmed' || b.status === 'checked_in')
+    );
+    if (activeBooking) {
+      return res.status(400).json({
+        error: `Room ${room.roomNumber} already has an active booking (${activeBooking.bookingNumber}). Check out or cancel it first.`
+      });
+    }
+
     // Validate dates
     const checkIn = checkInDate ? new Date(checkInDate) : new Date();
     const checkOut = checkOutDate ? new Date(checkOutDate) : new Date(Date.now() + 86400000);
@@ -1978,19 +2257,29 @@ app.put('/api/room-bookings/:id/checkout', authMiddleware, (req: Request, res: R
       return res.status(400).json({ error: 'This booking is already checked out.' });
     }
 
-    if (additionalCharges && Number(additionalCharges) > 0) {
-      const add = Math.max(0, Number(additionalCharges));
-      booking.extraCharges += add;
-      booking.grandTotal += add;
-      booking.balanceDue += add;
+    if (booking.status === 'cancelled') {
+      return res.status(400).json({ error: 'This booking was cancelled and cannot be checked out.' });
     }
 
-    const finalPay = Math.max(0, Number(finalPaymentAmount) || booking.balanceDue);
-    if (finalPay > booking.balanceDue) {
-      return res.status(400).json({ error: 'Final payment cannot exceed balance due' });
+    // Validate everything BEFORE mutating the booking.
+    // Previously extra charges were applied and then the request could still be rejected,
+    // leaving the booking totals corrupted in memory.
+    const rawAdd = Number(additionalCharges);
+    const add = Number.isFinite(rawAdd) && rawAdd > 0 ? Math.min(rawAdd, 10000000) : 0;
+
+    const newGrandTotal = Number((booking.grandTotal + add).toFixed(2));
+    const newBalanceDue = Number(Math.max(0, newGrandTotal - booking.advancePaid).toFixed(2));
+
+    const rawFinal = Number(finalPaymentAmount);
+    const finalPay = Number.isFinite(rawFinal) && rawFinal > 0 ? Number(rawFinal.toFixed(2)) : newBalanceDue;
+    if (finalPay > newBalanceDue + 0.01) {
+      return res.status(400).json({ error: `Final payment cannot exceed balance due (Rs. ${newBalanceDue.toFixed(2)}).` });
     }
-    booking.advancePaid += finalPay;
-    booking.balanceDue = Math.max(0, booking.grandTotal - booking.advancePaid);
+
+    booking.extraCharges = Number((booking.extraCharges + add).toFixed(2));
+    booking.grandTotal = newGrandTotal;
+    booking.advancePaid = Number((booking.advancePaid + finalPay).toFixed(2));
+    booking.balanceDue = Number(Math.max(0, booking.grandTotal - booking.advancePaid).toFixed(2));
     booking.status = 'checked_out';
     booking.checkedOutAt = new Date().toISOString();
     if (paymentMethod) booking.paymentMethod = paymentMethod;
@@ -2068,7 +2357,7 @@ app.post('/api/room-bookings/:id/payment', authMiddleware, (req: Request, res: R
     }
 
     const payAmt = Number(amount) || 0;
-    if (payAmt <= 0 || payAmt > 1000000) {
+    if (!Number.isFinite(payAmt) || payAmt <= 0 || payAmt > 1000000) {
       return res.status(400).json({ error: 'Payment amount must be between 1 and 1,000,000.' });
     }
     if (payAmt > booking.balanceDue) {
@@ -2292,13 +2581,7 @@ app.put('/api/settings', authMiddleware, requireRole('super_admin'), (req: Reque
   res.json(db.raw.settings);
 });
 
-// Global error handler
-app.use((err: any, req: Request, res: Response, next: NextFunction) => {
-  console.error('[ERROR]', err);
-  res.status(500).json({ error: 'Internal server error. Please try again.' });
-});
-
-// 404 handler for API
+// 404 handler for API (must come before the SPA/vite fallback)
 app.use('/api/*', (req, res) => {
   res.status(404).json({ error: 'API endpoint not found' });
 });
@@ -2310,8 +2593,11 @@ app.use('/api/*', (req, res) => {
 async function start() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { 
+      server: {
         middlewareMode: true,
+        // Accept proxied preview hosts (Arena / Codespaces / ngrok style tunnels),
+        // otherwise vite answers every request with "Blocked request. This host is not allowed."
+        allowedHosts: true,
         hmr: {
           overlay: true,
         },
@@ -2330,6 +2616,14 @@ async function start() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  // Global error handler - MUST be registered last, after every route/middleware,
+  // otherwise Express never routes errors to it.
+  app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+    console.error('[ERROR]', err);
+    if (res.headersSent) return next(err);
+    res.status(500).json({ error: 'Internal server error. Please try again.' });
+  });
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Royal Hotel POS] Running on http://0.0.0.0:${PORT}`);

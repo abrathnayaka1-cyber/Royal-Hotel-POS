@@ -14,10 +14,9 @@ export default defineConfig(() => {
     server: {
       host: '0.0.0.0',
       port: 5173,
-      // Allow preview host for Arena / Codespaces
-      hmr: {
-        host: 'localhost',
-      },
+      // Allow proxied preview hosts (Arena / Codespaces / tunnels).
+      // Without this vite replies "Blocked request. This host is not allowed."
+      allowedHosts: true as const,
       // Proxy not needed because server.ts uses vite middleware, but keep for standalone vite dev
       proxy: {
         '/api': {
@@ -29,6 +28,7 @@ export default defineConfig(() => {
     preview: {
       host: '0.0.0.0',
       port: 4173,
+      allowedHosts: true as const,
     },
   };
 });

@@ -345,6 +345,12 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSelectedProductForVariant(null);
   };
 
+  /** Stock left for a variant taking what is already in the cart into account. */
+  const availableStockFor = (variant: ProductVariant): number => {
+    const inCart = cart.find(i => i.variantId === variant.id)?.quantity || 0;
+    return variant.stock - inCart;
+  };
+
   const addToCart = (
     product: Product,
     variant: ProductVariant,
@@ -352,6 +358,22 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     itemNotes?: string
   ) => {
     if (quantity <= 0) return;
+
+    // Block overselling in the UI as well - the card click used to add
+    // out-of-stock single-variant products straight to the cart.
+    const allowNegativeStock = settings?.allowNegativeStock === true;
+    if (!allowNegativeStock) {
+      const remaining = availableStockFor(variant);
+      if (remaining < quantity) {
+        window.alert(
+          remaining <= 0
+            ? `${product.name} (${variant.size}) is out of stock.`
+            : `Only ${remaining} x ${product.name} (${variant.size}) left in stock.`
+        );
+        closeVariantModal();
+        return;
+      }
+    }
     
     setCart(prevCart => {
       const existingIndex = prevCart.findIndex(item => item.variantId === variant.id);
@@ -398,6 +420,20 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (quantity <= 0) {
       removeFromCart(variantId);
       return;
+    }
+
+    // Never allow the cart quantity to exceed the stock on hand
+    const allowNegativeStock = settings?.allowNegativeStock === true;
+    if (!allowNegativeStock) {
+      let stockOnHand: number | null = null;
+      for (const p of products) {
+        const v = p.variants.find(x => x.id === variantId);
+        if (v) { stockOnHand = v.stock; break; }
+      }
+      if (stockOnHand !== null && quantity > stockOnHand) {
+        window.alert(`Only ${stockOnHand} unit(s) available in stock.`);
+        quantity = Math.max(1, stockOnHand);
+      }
     }
 
     setCart(prevCart =>

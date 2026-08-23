@@ -272,6 +272,7 @@ export interface DatabaseSchema {
     invoiceSeq: number;
     kotSeq: number;
     bookingSeq: number;
+    holdSeq?: number;
   };
 }
 
@@ -764,6 +765,8 @@ const initialRooms: Room[] = [
 // Initial Users - Only Super Admin seeded. Zero default cashiers.
 import bcrypt from 'bcryptjs';
 
+const DEFAULT_ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || 'Araliya2000';
+
 const initialUsers: User[] = [
   {
     id: 'user-admin',
@@ -771,7 +774,7 @@ const initialUsers: User[] = [
     email: 'admin@pos.local',
     username: 'Admin',
     role: 'super_admin',
-    passwordHash: bcrypt.hashSync('Araliya2000', 10),
+    passwordHash: bcrypt.hashSync(DEFAULT_ADMIN_PASSWORD, 10),
     isActive: true,
     createdAt: new Date().toISOString(),
   }
@@ -797,11 +800,15 @@ export class Database {
           // Ensure Admin user exists with correct credentials (Admin / Araliya2000)
           const adminUserIndex = parsed.users.findIndex((u: User) => u.role === 'super_admin' || u.username.toLowerCase() === 'admin');
           if (adminUserIndex !== -1) {
-            parsed.users[adminUserIndex].name = 'Super Admin';
-            parsed.users[adminUserIndex].username = 'Admin';
-            parsed.users[adminUserIndex].passwordHash = bcrypt.hashSync('Araliya2000', 10);
-            parsed.users[adminUserIndex].isActive = true;
-            parsed.users[adminUserIndex].role = 'super_admin';
+            // Only guarantee that a usable super admin account exists.
+            // The stored password hash is NEVER overwritten here - doing so silently
+            // reverted every password change on the next server restart.
+            const admin = parsed.users[adminUserIndex];
+            admin.role = 'super_admin';
+            admin.isActive = true;
+            if (!admin.name) admin.name = 'Super Admin';
+            if (!admin.username) admin.username = 'Admin';
+            if (!admin.passwordHash) admin.passwordHash = bcrypt.hashSync(DEFAULT_ADMIN_PASSWORD, 10);
           } else {
             parsed.users.unshift({
               id: 'user-admin',
@@ -809,7 +816,7 @@ export class Database {
               email: 'admin@pos.local',
               username: 'Admin',
               role: 'super_admin',
-              passwordHash: bcrypt.hashSync('Araliya2000', 10),
+              passwordHash: bcrypt.hashSync(DEFAULT_ADMIN_PASSWORD, 10),
               isActive: true,
               createdAt: new Date().toISOString(),
             });
@@ -827,7 +834,7 @@ export class Database {
 
           // Ensure counters has bookingSeq
           if (!parsed.counters) {
-            parsed.counters = { billSeq: 1001, invoiceSeq: 5001, kotSeq: 101, bookingSeq: 2001 };
+            parsed.counters = { billSeq: 1001, invoiceSeq: 5001, kotSeq: 101, bookingSeq: 2001, holdSeq: 1 };
           } else if (!parsed.counters.bookingSeq) {
             parsed.counters.bookingSeq = 2001;
           }
@@ -875,7 +882,8 @@ export class Database {
         billSeq: 1001,
         invoiceSeq: 5001,
         kotSeq: 101,
-        bookingSeq: 2001
+        bookingSeq: 2001,
+        holdSeq: 1
       }
     };
 
@@ -966,6 +974,15 @@ export class Database {
     return `${this.data.settings.kotPrefix}${seq}`;
   }
 
+  public getNextHoldNumber(): string {
+    if (!this.data.counters.holdSeq) {
+      this.data.counters.holdSeq = 1;
+    }
+    const seq = this.data.counters.holdSeq++;
+    this.save();
+    return `HOLD-${seq}`;
+  }
+
   public getNextBookingNumber(): string {
     if (!this.data.counters.bookingSeq) {
       this.data.counters.bookingSeq = 2001;
@@ -1014,7 +1031,7 @@ export class Database {
     // Prune old backups keeping last 30
     try {
       const files = fs.readdirSync(BACKUP_DIR)
-        .filter(f => f.startsWith('pos_backup_') && f.endsWith('.json'))
+        .filter(f => f.startsWith('royal_hotel_backup_') && f.endsWith('.json'))
         .map(f => ({ name: f, time: fs.statSync(path.join(BACKUP_DIR, f)).mtime.getTime() }))
         .sort((a, b) => b.time - a.time);
 
