@@ -1,0 +1,6 @@
+{
+  "name": "Bar & Restaurant POS",
+  "description": "Commercial-grade Web POS system with Bar & Restaurant ordering, multi-size bottle variants, hotel room management & booking tickets, physical daily stock sheet register reconciliation, inventory, stock movement, KOT, hold bills, billing, invoicing, payments, reporting, audit logs, and role-based access control.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
