@@ -1,7 +1,8 @@
 {
-  "name": "royal-green-garden-pos",
+  "name": "royal-hotel-pos",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "description": "Royal Hotel POS - Commercial Bar, Restaurant, Hotel Room Booking & Inventory Management System",
   "type": "module",
   "main": "server.js",
   "engines": {
@@ -13,10 +14,20 @@
     "start": "node dist/server.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write \"src/**/*.{ts,tsx,js,jsx}\""
   },
+  "keywords": [
+    "pos",
+    "hotel",
+    "restaurant",
+    "bar",
+    "inventory",
+    "room-booking",
+    "billing"
+  ],
   "dependencies": {
-    "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.1.14",
     "@types/bcryptjs": "^3.0.0",
     "@types/canvas-confetti": "^1.9.0",
@@ -31,6 +42,8 @@
     "dotenv": "^17.2.3",
     "esbuild": "^0.25.0",
     "express": "^4.21.2",
+    "express-rate-limit": "^7.4.0",
+    "helmet": "^8.0.0",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.8",
     "lucide-react": "^0.546.0",
@@ -42,7 +55,11 @@
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.3",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "zod": "^3.23.8"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4"
+  }
 }

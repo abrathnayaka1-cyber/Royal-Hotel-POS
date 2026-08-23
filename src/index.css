@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  }
+
+  /* Universal high-contrast inputs in dark & light themes */
+  input, select, textarea {
+    color: var(--tw-prose-body, inherit);
+  }
+
+  .dark input, .dark select, .dark textarea {
+    color: #ffffff !important;
+  }
+
+  .dark input::placeholder, .dark textarea::placeholder {
+    color: #94a3b8 !important;
+  }
+}
+
+/* Custom Clean Scrollbars to prevent thick ugly scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.4);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.7);
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.5);
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.8);
+}
+
+/* Thermal POS Monospace Typography */
+.font-receipt {
+  font-family: 'JetBrains Mono', 'Courier New', Courier, 'Lucida Console', Monaco, monospace;
+}
+
+@media print {
+  /* Suppress screen navigation, headers, backgrounds and interactive buttons */
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-size: 12pt;
+  }
+
+  /* Hide app navigation and controls when printing */
+  header, nav, button, .no-print, [role="dialog"] > div:first-child {
+    display: none !important;
+  }
+
+  /* Printable area visibility */
+  #printable-receipt, #print-area {
+    display: block !important;
+    visibility: visible !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+}
+
