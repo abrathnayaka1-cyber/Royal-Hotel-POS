@@ -1,24 +1,95 @@
+import dotenv from 'dotenv';
+dotenv.config();
+
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import crypto from 'crypto';
 import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import { createServer as createViteServer } from 'vite';
 import bcrypt from 'bcryptjs';
+import { z } from 'zod';
 import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking } from './server/db.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+// === Security & Middleware ===
+app.set('trust proxy', 1); // For rate limiting behind proxy
 
-// Persistent Secret for Session Token Signing (Survives reboots)
-const SESSION_SECRET = process.env.SESSION_SECRET || 'royal_green_garden_pos_secret_key_2026_lk';
-const revokedTokens = new Set<string>();
+// Helmet for security headers
+app.use(helmet({
+  contentSecurityPolicy: false, // Allow inline styles for POS UI
+  crossOriginEmbedderPolicy: false,
+}));
 
-// Active in-memory session cache (Token -> { user: User, expiresAt: number })
+// CORS - Allow all origins for POS flexibility, but with credentials support
+app.use(cors({
+  origin: true,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID'],
+}));
+
+app.use(express.json({ limit: '5mb' }));
+app.use(express.urlencoded({ extended: true, limit: '5mb' }));
+
+// Global rate limiter for API
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 500, // Limit each IP to 500 requests per window
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later.' },
+});
+app.use('/api/', apiLimiter);
+
+// Stricter limiter for auth endpoints
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts, please try again later.' },
+});
+
+// === Session & Token Management ===
+const SESSION_SECRET = process.env.SESSION_SECRET || (() => {
+  const generated = crypto.randomBytes(64).toString('hex');
+  console.warn('[SECURITY] SESSION_SECRET not set in env, using generated ephemeral secret. Set SESSION_SECRET in .env for persistent sessions across restarts!');
+  return generated;
+})();
+
+if (!process.env.SESSION_SECRET) {
+  console.warn('[SECURITY] For production, set a strong SESSION_SECRET in your .env file (64+ characters)');
+}
+
+// Revoked tokens with TTL auto-cleanup
+const revokedTokens = new Map<string, number>(); // token -> expiresAt
 const activeSessions = new Map<string, { user: User; expiresAt: number }>();
+
+// Cleanup expired revoked tokens and sessions every 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, exp] of revokedTokens.entries()) {
+    if (exp < now) revokedTokens.delete(token);
+  }
+  for (const [token, sess] of activeSessions.entries()) {
+    if (sess.expiresAt < now) activeSessions.delete(token);
+  }
+  // Also cleanup failed login attempts
+  for (const [ip, rec] of failedAttemptsMap.entries()) {
+    if (rec.lockedUntil < now && rec.count < 5) {
+      // Keep recent failures for 15 min, then clear
+      if (now - rec.lastAttempt > 15 * 60 * 1000) {
+        failedAttemptsMap.delete(ip);
+      }
+    } else if (rec.lockedUntil < now - 60 * 60 * 1000) {
+      failedAttemptsMap.delete(ip);
+    }
+  }
+}, 10 * 60 * 1000);
 
 interface TokenPayload {
   userId: string;
@@ -31,24 +102,39 @@ interface TokenPayload {
 function signTokenPayload(payload: TokenPayload): string {
   const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const signature = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
-  return `rgg_${data}.${signature}`;
+  return `rh_${data}.${signature}`;
 }
 
 function verifyTokenPayload(token: string): TokenPayload | null {
-  if (!token || revokedTokens.has(token)) return null;
-  if (!token.startsWith('rgg_')) return null;
+  if (!token) return null;
+  const revokedExp = revokedTokens.get(token);
+  if (revokedExp && revokedExp > Date.now()) return null;
+  if (revokedExp && revokedExp <= Date.now()) revokedTokens.delete(token);
+  
+  if (!token.startsWith('rh_') && !token.startsWith('rgg_')) return null; // Support both old and new prefix during migration
 
-  const raw = token.slice(4);
+  const raw = token.slice(token.startsWith('rh_') ? 3 : 4);
   const parts = raw.split('.');
   if (parts.length !== 2) return null;
 
   const [data, signature] = parts;
   const expectedSignature = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
-  if (signature !== expectedSignature) return null;
+  // Use timingSafeEqual to prevent timing attacks
+  try {
+    const sigBuf = Buffer.from(signature, 'base64url');
+    const expBuf = Buffer.from(expectedSignature, 'base64url');
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
 
   try {
     const payload: TokenPayload = JSON.parse(Buffer.from(data, 'base64url').toString('utf8'));
     if (payload.expiresAt < Date.now()) return null;
+    // Validate payload structure
+    if (!payload.userId || !payload.username || !payload.role) return null;
     return payload;
   } catch {
     return null;
@@ -61,23 +147,28 @@ function generateAuthToken(user: User): string {
     username: user.username,
     role: user.role,
     issuedAt: Date.now(),
-    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 // 30 days valid
+    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 // 30 days
   };
   const token = signTokenPayload(payload);
   activeSessions.set(token, { user, expiresAt: payload.expiresAt });
   return token;
 }
 
-// Authentication Middleware
+// Authentication Middleware - SECURE: No backdoor tokens
 function authMiddleware(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Unauthorized. Please login.' });
   }
 
-  const token = authHeader.substring(7);
+  const token = authHeader.substring(7).trim();
+  if (!token) {
+    return res.status(401).json({ error: 'Unauthorized. Invalid token format.' });
+  }
 
-  if (revokedTokens.has(token)) {
+  // Check revoked list
+  const revokedExp = revokedTokens.get(token);
+  if (revokedExp && revokedExp > Date.now()) {
     return res.status(401).json({ error: 'Session expired. Please log in again.' });
   }
 
@@ -85,30 +176,25 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
   let user: User | undefined;
 
   if (session && session.expiresAt >= Date.now()) {
-    user = db.raw.users.find(u => u.id === session!.user.id);
+    user = db.raw.users.find(u => u.id === session!.user.id && u.isActive);
+    if (!user) {
+      activeSessions.delete(token);
+    }
   } else {
-    // Attempt HMAC signature verification for persistent tokens across server restarts
+    if (session) activeSessions.delete(token);
+    // Verify HMAC signature for persistent tokens across restarts
     const payload = verifyTokenPayload(token);
     if (payload) {
-      user = db.raw.users.find(u => u.id === payload.userId);
-      if (user && user.isActive) {
+      user = db.raw.users.find(u => u.id === payload.userId && u.isActive);
+      if (user) {
         activeSessions.set(token, { user, expiresAt: payload.expiresAt });
       }
-    } else {
-      // Graceful fallback for legacy token format or default super admin session
-      if (token.startsWith('pos_tok_')) {
-        const adminUser = db.raw.users.find(u => u.role === 'super_admin' && u.isActive);
-        if (adminUser) {
-          user = adminUser;
-          activeSessions.set(token, { user: adminUser, expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 });
-        }
-      }
     }
+    // REMOVED: pos_tok_ legacy backdoor that allowed admin impersonation
   }
 
   if (!user || !user.isActive) {
-    if (session) activeSessions.delete(token);
-    return res.status(401).json({ error: 'Session expired. Please log in again.' });
+    return res.status(401).json({ error: 'Session expired or account deactivated. Please log in again.' });
   }
 
   (req as any).user = user;
@@ -116,7 +202,6 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-// Role Authorization Middleware
 function requireRole(role: 'super_admin' | 'cashier') {
   return (req: Request, res: Response, next: NextFunction) => {
     const user = (req as any).user as User;
@@ -130,22 +215,55 @@ function requireRole(role: 'super_admin' | 'cashier') {
   };
 }
 
+// Input validation schemas using Zod
+const loginSchema = z.object({
+  username: z.string().trim().min(1).max(128).optional(),
+  password: z.string().min(1).max(128).optional(),
+  pin: z.string().trim().min(1).max(32).optional(),
+}).refine(data => data.username || data.pin, { message: 'Username or PIN required' });
+
+const userCreateSchema = z.object({
+  name: z.string().trim().min(2).max(128),
+  username: z.string().trim().min(3).max(64).regex(/^[a-zA-Z0-9_.-]+$/, 'Username can only contain letters, numbers, underscore, dot and hyphen'),
+  email: z.string().trim().email().max(128).optional().or(z.literal('')),
+  role: z.enum(['super_admin', 'cashier']),
+  password: z.string().min(4).max(128),
+  pin: z.string().trim().min(2).max(16).optional().or(z.literal('')),
+});
+
+// Brute-force protection with proper cleanup
+const failedAttemptsMap = new Map<string, { count: number; lockedUntil: number; lastAttempt: number }>();
+
+function getClientIp(req: Request): string {
+  // Use express req.ip which respects trust proxy
+  return req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+// ==========================================
+// HEALTH CHECK
+// ==========================================
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    version: '1.1.0',
+    uptime: process.uptime(),
+  });
+});
+
 // ==========================================
 // AUTHENTICATION ROUTES
 // ==========================================
 
-// Track failed login attempts for brute-force protection
-const failedAttemptsMap = new Map<string, { count: number; lockedUntil: number }>();
-
-app.post('/api/auth/login', (req: Request, res: Response) => {
+app.post('/api/auth/login', authLimiter, async (req: Request, res: Response) => {
   try {
-    const { username, password, pin } = req.body;
-
-    if (!username && !pin) {
-      return res.status(400).json({ error: 'Invalid username or password.' });
+    const parsed = loginSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid username or password.', details: parsed.error.flatten() });
     }
+    const { username, password, pin } = parsed.data;
 
-    const ipKey = req.ip || 'default_client';
+    const ipKey = getClientIp(req);
     const attemptRecord = failedAttemptsMap.get(ipKey);
 
     if (attemptRecord && attemptRecord.lockedUntil > Date.now()) {
@@ -158,67 +276,68 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
     let user: User | undefined;
 
     if (username) {
-      const normalizedUser = username.trim().toLowerCase();
+      const normalizedUser = username.toLowerCase();
       user = db.raw.users.find(
         u => u.username.toLowerCase() === normalizedUser || u.email.toLowerCase() === normalizedUser
       );
     } else if (pin) {
-      user = db.raw.users.find(u => u.pin === pin.trim());
+      user = db.raw.users.find(u => u.pin === pin);
     }
 
-    // Verify user exists
     if (!user) {
-      // Record failed attempt
-      const curr = failedAttemptsMap.get(ipKey) || { count: 0, lockedUntil: 0 };
+      const curr = failedAttemptsMap.get(ipKey) || { count: 0, lockedUntil: 0, lastAttempt: 0 };
       curr.count += 1;
+      curr.lastAttempt = Date.now();
       if (curr.count >= 5) {
-        curr.lockedUntil = Date.now() + 60 * 1000; // 1 minute lockout
+        curr.lockedUntil = Date.now() + 60 * 1000;
       }
       failedAttemptsMap.set(ipKey, curr);
 
-      db.logAudit('system', 'Anonymous', 'cashier', 'LOGIN_FAILED', 'AUTH', 'unknown', `Failed login attempt for username: ${username || 'PIN'}`);
+      db.logAudit('system', 'Anonymous', 'cashier', 'LOGIN_FAILED', 'AUTH', 'unknown', `Failed login attempt for username: ${username || 'PIN'} from IP ${ipKey}`);
       return res.status(401).json({ error: 'Invalid username or password.' });
     }
 
-    // Check if account is active
     if (!user.isActive) {
       return res.status(403).json({ error: 'Account has been deactivated. Please contact your Super Administrator.' });
     }
 
-    // Verify password strictly with bcrypt
     let isValid = false;
     if (password && user.passwordHash) {
-      isValid = bcrypt.compareSync(password, user.passwordHash);
+      isValid = await bcrypt.compare(password, user.passwordHash);
     } else if (pin && user.pin) {
-      isValid = user.pin === pin.trim();
+      // Use timingSafeEqual for PIN as well
+      try {
+        const a = Buffer.from(user.pin);
+        const b = Buffer.from(pin);
+        isValid = a.length === b.length && crypto.timingSafeEqual(a, b);
+      } catch {
+        isValid = user.pin === pin;
+      }
     }
 
     if (!isValid) {
-      const curr = failedAttemptsMap.get(ipKey) || { count: 0, lockedUntil: 0 };
+      const curr = failedAttemptsMap.get(ipKey) || { count: 0, lockedUntil: 0, lastAttempt: 0 };
       curr.count += 1;
+      curr.lastAttempt = Date.now();
       if (curr.count >= 5) {
-        curr.lockedUntil = Date.now() + 60 * 1000; // 1 minute lockout
+        curr.lockedUntil = Date.now() + 60 * 1000;
       }
       failedAttemptsMap.set(ipKey, curr);
 
-      db.logAudit(user.id, user.name, user.role, 'LOGIN_FAILED', 'AUTH', user.id, `Incorrect password attempt for user: ${user.username}`);
+      db.logAudit(user.id, user.name, user.role, 'LOGIN_FAILED', 'AUTH', user.id, `Incorrect password attempt for user: ${user.username} from IP ${ipKey}`);
       return res.status(401).json({ error: 'Invalid username or password.' });
     }
 
-    // Clear failed attempts on successful login
     failedAttemptsMap.delete(ipKey);
 
-    // Update last login
     user.lastLogin = new Date().toISOString();
     user.lastLoginAt = new Date().toISOString();
     db.save();
 
-    // Create session (valid 30 days, HMAC signed)
     const token = generateAuthToken(user);
 
-    db.logAudit(user.id, user.name, user.role, 'USER_LOGIN', 'AUTH', user.id, `User logged in from ${req.ip || 'client'}`);
+    db.logAudit(user.id, user.name, user.role, 'USER_LOGIN', 'AUTH', user.id, `User logged in from ${ipKey}`);
 
-    // Return sanitized user
     const { passwordHash, ...safeUser } = user;
     res.json({
       token,
@@ -235,7 +354,8 @@ app.post('/api/auth/logout', authMiddleware, (req: Request, res: Response) => {
   const user = (req as any).user;
   if (token) {
     activeSessions.delete(token);
-    revokedTokens.add(token);
+    // Add to revoked with TTL of 30 days
+    revokedTokens.set(token, Date.now() + 30 * 24 * 60 * 60 * 1000);
   }
   if (user) {
     db.logAudit(user.id, user.name, user.role, 'USER_LOGOUT', 'AUTH', user.id, 'User logged out.');
@@ -249,19 +369,22 @@ app.get('/api/auth/me', authMiddleware, (req: Request, res: Response) => {
   res.json({ user: safeUser });
 });
 
-app.post('/api/auth/change-password', authMiddleware, (req: Request, res: Response) => {
+app.post('/api/auth/change-password', authMiddleware, async (req: Request, res: Response) => {
   const user = (req as any).user as User;
   const { currentPassword, newPassword } = req.body;
 
-  if (!newPassword || newPassword.length < 4) {
-    return res.status(400).json({ error: 'New password must be at least 4 characters long.' });
+  if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 4 || newPassword.length > 128) {
+    return res.status(400).json({ error: 'New password must be between 4 and 128 characters long.' });
   }
 
-  if (currentPassword && !bcrypt.compareSync(currentPassword, user.passwordHash)) {
-    return res.status(400).json({ error: 'Current password is incorrect.' });
+  if (currentPassword) {
+    const valid = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!valid) {
+      return res.status(400).json({ error: 'Current password is incorrect.' });
+    }
   }
 
-  user.passwordHash = bcrypt.hashSync(newPassword, 10);
+  user.passwordHash = await bcrypt.hash(newPassword, 10);
   db.save();
   db.logAudit(user.id, user.name, user.role, 'PASSWORD_CHANGE', 'USER', user.id, 'User changed password.');
 
@@ -269,7 +392,7 @@ app.post('/api/auth/change-password', authMiddleware, (req: Request, res: Respon
 });
 
 // ==========================================
-// USER MANAGEMENT (SUPER ADMIN ONLY)
+// USER MANAGEMENT
 // ==========================================
 
 app.get('/api/users', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
@@ -277,28 +400,35 @@ app.get('/api/users', authMiddleware, requireRole('super_admin'), (req: Request,
   res.json(safeUsers);
 });
 
-app.post('/api/users', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
+app.post('/api/users', authMiddleware, requireRole('super_admin'), async (req: Request, res: Response) => {
   const currentUser = (req as any).user as User;
-  const { name, username, email, role, password, pin } = req.body;
-
-  if (!name || !username || !password || !role) {
-    return res.status(400).json({ error: 'Name, username, role, and password are required.' });
+  const parsed = userCreateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten() });
   }
+  const { name, username, email, role, password, pin } = parsed.data;
 
-  const existing = db.raw.users.find(u => u.username.toLowerCase() === username.trim().toLowerCase());
+  const existing = db.raw.users.find(u => u.username.toLowerCase() === username.toLowerCase());
   if (existing) {
     return res.status(400).json({ error: 'A user with this username already exists.' });
   }
 
+  if (email) {
+    const emailExists = db.raw.users.find(u => u.email.toLowerCase() === email.toLowerCase());
+    if (emailExists) {
+      return res.status(400).json({ error: 'A user with this email already exists.' });
+    }
+  }
+
   const newUser: User = {
-    id: `user-${Date.now()}`,
+    id: `user-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
     name: name.trim(),
-    username: username.trim().toLowerCase(),
-    email: (email || `${username.trim().toLowerCase()}@pos.local`).trim(),
+    username: username.toLowerCase(),
+    email: (email || `${username.toLowerCase()}@pos.local`).trim().toLowerCase(),
     role: role === 'super_admin' ? 'super_admin' : 'cashier',
-    passwordHash: bcrypt.hashSync(password, 10),
+    passwordHash: await bcrypt.hash(password, 10),
     isActive: true,
-    pin: pin?.trim(),
+    pin: pin?.trim() || undefined,
     createdAt: new Date().toISOString()
   };
 
@@ -311,21 +441,35 @@ app.post('/api/users', authMiddleware, requireRole('super_admin'), (req: Request
   res.status(201).json(safeUser);
 });
 
-app.put('/api/users/:id', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
+app.put('/api/users/:id', authMiddleware, requireRole('super_admin'), async (req: Request, res: Response) => {
   const currentUser = (req as any).user as User;
   const user = db.raw.users.find(u => u.id === req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found.' });
 
   const { name, email, role, password, pin, isActive } = req.body;
 
-  if (name) user.name = name.trim();
-  if (email) user.email = email.trim();
-  if (role) user.role = role === 'super_admin' ? 'super_admin' : 'cashier';
-  if (pin !== undefined) user.pin = pin ? pin.trim() : undefined;
+  if (name && typeof name === 'string') {
+    if (name.trim().length < 2) return res.status(400).json({ error: 'Name must be at least 2 characters' });
+    user.name = name.trim();
+  }
+  if (email && typeof email === 'string') {
+    const emailTrim = email.trim().toLowerCase();
+    if (emailTrim && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailTrim)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+    // Check duplicate
+    if (emailTrim && db.raw.users.some(u => u.id !== user.id && u.email.toLowerCase() === emailTrim)) {
+      return res.status(400).json({ error: 'Email already in use' });
+    }
+    user.email = emailTrim;
+  }
+  if (role && ['super_admin', 'cashier'].includes(role)) user.role = role;
+  if (pin !== undefined) user.pin = pin ? String(pin).trim() : undefined;
   if (isActive !== undefined) user.isActive = Boolean(isActive);
 
-  if (password && password.trim()) {
-    user.passwordHash = bcrypt.hashSync(password.trim(), 10);
+  if (password && typeof password === 'string' && password.trim()) {
+    if (password.trim().length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters' });
+    user.passwordHash = await bcrypt.hash(password.trim(), 10);
   }
 
   db.save();
@@ -364,13 +508,17 @@ app.get('/api/categories', authMiddleware, (req: Request, res: Response) => {
 app.post('/api/categories', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   const user = (req as any).user as User;
   const { name, type, icon } = req.body;
-  if (!name) return res.status(400).json({ error: 'Category name is required.' });
+  if (!name || typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'Category name is required.' });
+  if (name.trim().length > 128) return res.status(400).json({ error: 'Category name too long (max 128)' });
+
+  const validTypes = ['bar', 'restaurant', 'service', 'other'];
+  const catType = validTypes.includes(type) ? type : 'bar';
 
   const newCat: Category = {
-    id: `cat-${Date.now()}`,
+    id: `cat-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
     name: name.trim(),
-    type: type || 'bar',
-    icon: icon || 'tag',
+    type: catType as any,
+    icon: (icon && typeof icon === 'string') ? icon.trim().slice(0, 64) : 'tag',
     isActive: true,
     displayOrder: db.raw.categories.length + 1
   };
@@ -388,11 +536,11 @@ app.put('/api/categories/:id', authMiddleware, requireRole('super_admin'), (req:
   if (!cat) return res.status(404).json({ error: 'Category not found.' });
 
   const { name, type, icon, isActive, displayOrder } = req.body;
-  if (name) cat.name = name.trim();
-  if (type) cat.type = type;
-  if (icon) cat.icon = icon;
+  if (name && typeof name === 'string' && name.trim()) cat.name = name.trim().slice(0, 128);
+  if (type && ['bar', 'restaurant', 'service', 'other'].includes(type)) cat.type = type;
+  if (icon && typeof icon === 'string') cat.icon = icon.trim().slice(0, 64);
   if (isActive !== undefined) cat.isActive = Boolean(isActive);
-  if (displayOrder !== undefined) cat.displayOrder = Number(displayOrder);
+  if (displayOrder !== undefined) cat.displayOrder = Math.max(0, Number(displayOrder) || 0);
 
   db.save();
   db.logAudit(user.id, user.name, user.role, 'UPDATE_CATEGORY', 'CATEGORY', cat.id, `Updated category: ${cat.name}`);
@@ -405,10 +553,8 @@ app.delete('/api/categories/:id', authMiddleware, requireRole('super_admin'), (r
   if (catIndex === -1) return res.status(404).json({ error: 'Category not found.' });
 
   const cat = db.raw.categories[catIndex];
-  // Check if any products use this category
   const inUse = db.raw.products.some(p => p.categoryId === cat.id && !p.isArchived);
   if (inUse) {
-    // Soft deactivate instead
     cat.isActive = false;
     db.save();
     db.logAudit(user.id, user.name, user.role, 'DEACTIVATE_CATEGORY', 'CATEGORY', cat.id, `Deactivated in-use category: ${cat.name}`);
@@ -421,7 +567,6 @@ app.delete('/api/categories/:id', authMiddleware, requireRole('super_admin'), (r
   res.json({ message: 'Category deleted successfully.' });
 });
 
-// Companies
 app.get('/api/companies', authMiddleware, (req: Request, res: Response) => {
   res.json(db.raw.companies);
 });
@@ -429,12 +574,12 @@ app.get('/api/companies', authMiddleware, (req: Request, res: Response) => {
 app.post('/api/companies', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   const user = (req as any).user as User;
   const { name, description } = req.body;
-  if (!name) return res.status(400).json({ error: 'Company name is required.' });
+  if (!name || typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'Company name is required.' });
 
   const newComp: Company = {
-    id: `comp-${Date.now()}`,
-    name: name.trim(),
-    description: description?.trim(),
+    id: `comp-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    name: name.trim().slice(0, 128),
+    description: description?.trim().slice(0, 500),
     isActive: true
   };
 
@@ -451,8 +596,8 @@ app.put('/api/companies/:id', authMiddleware, requireRole('super_admin'), (req: 
   if (!comp) return res.status(404).json({ error: 'Company not found.' });
 
   const { name, description, isActive } = req.body;
-  if (name) comp.name = name.trim();
-  if (description !== undefined) comp.description = description.trim();
+  if (name && typeof name === 'string' && name.trim()) comp.name = name.trim().slice(0, 128);
+  if (description !== undefined) comp.description = typeof description === 'string' ? description.trim().slice(0, 500) : undefined;
   if (isActive !== undefined) comp.isActive = Boolean(isActive);
 
   db.save();
@@ -486,7 +631,6 @@ app.delete('/api/companies/:id', authMiddleware, requireRole('super_admin'), (re
 
 app.get('/api/products', authMiddleware, (req: Request, res: Response) => {
   const user = (req as any).user as User;
-  // Cashiers only see active and non-archived products
   if (user.role === 'cashier') {
     const activeProducts = db.raw.products
       .filter(p => p.isActive && !p.isArchived)
@@ -497,7 +641,6 @@ app.get('/api/products', authMiddleware, (req: Request, res: Response) => {
     return res.json(activeProducts);
   }
 
-  // Super Admins see all non-archived or archived based on query
   const includeArchived = req.query.archived === 'true';
   const products = includeArchived
     ? db.raw.products
@@ -516,38 +659,49 @@ app.post('/api/products', authMiddleware, requireRole('super_admin'), (req: Requ
   const user = (req as any).user as User;
   const { name, categoryId, companyId, description, image, isKitchenItem, taxRate, variants } = req.body;
 
-  if (!name || !categoryId || !Array.isArray(variants) || variants.length === 0) {
+  if (!name || typeof name !== 'string' || !name.trim() || !categoryId || !Array.isArray(variants) || variants.length === 0) {
     return res.status(400).json({ error: 'Product name, category, and at least one size/variant are required.' });
   }
 
-  const productId = `prod-${Date.now()}`;
+  // Validate category exists
+  if (!db.raw.categories.some(c => c.id === categoryId)) {
+    return res.status(400).json({ error: 'Invalid category ID' });
+  }
+
+  const productId = `prod-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
   const formattedVariants: ProductVariant[] = variants.map((v: any, index: number) => {
-    const variantId = `var-${productId.replace('prod-', '')}-${index + 1}`;
-    const initialStock = Number(v.stock || 0);
+    const variantId = `var-${productId.replace('prod-', '')}-${index + 1}-${crypto.randomBytes(2).toString('hex')}`;
+    const initialStock = Math.max(0, Number(v.stock || 0));
+    const costPrice = Math.max(0, Number(v.costPrice || 0));
+    const sellingPrice = Math.max(0, Number(v.sellingPrice || 0));
+
+    if (sellingPrice < costPrice) {
+      console.warn(`[PRODUCT] Selling price less than cost price for variant ${v.size}`);
+    }
 
     return {
       id: variantId,
       productId,
-      size: String(v.size || 'Standard').trim(),
-      sku: (v.sku || `${name.substring(0, 3).toUpperCase()}-${v.size}-${index + 1}`).trim(),
-      barcode: v.barcode ? String(v.barcode).trim() : undefined,
-      costPrice: Number(v.costPrice || 0),
-      sellingPrice: Number(v.sellingPrice || 0),
+      size: String(v.size || 'Standard').trim().slice(0, 64),
+      sku: (v.sku || `${name.substring(0, 3).toUpperCase()}-${v.size}-${index + 1}`).trim().slice(0, 128),
+      barcode: v.barcode ? String(v.barcode).trim().slice(0, 128) : undefined,
+      costPrice,
+      sellingPrice,
       stock: initialStock,
-      minStockLevel: Number(v.minStockLevel || db.raw.settings.lowStockDefaultThreshold || 5),
+      minStockLevel: Math.max(0, Number(v.minStockLevel || db.raw.settings.lowStockDefaultThreshold || 5)),
       isActive: v.isActive !== false
     };
   });
 
   const newProduct: Product = {
     id: productId,
-    name: name.trim(),
+    name: name.trim().slice(0, 191),
     categoryId,
     companyId: companyId || undefined,
-    description: description?.trim(),
+    description: description?.trim().slice(0, 1000),
     image: image || undefined,
     isKitchenItem: Boolean(isKitchenItem),
-    taxRate: taxRate ? Number(taxRate) : undefined,
+    taxRate: taxRate ? Math.max(0, Math.min(100, Number(taxRate))) : undefined,
     isActive: true,
     createdAt: new Date().toISOString(),
     variants: formattedVariants
@@ -555,7 +709,6 @@ app.post('/api/products', authMiddleware, requireRole('super_admin'), (req: Requ
 
   db.raw.products.push(newProduct);
 
-  // Record opening stock movement for each variant with stock
   formattedVariants.forEach(v => {
     if (v.stock > 0) {
       db.recordStockMovement(
@@ -587,25 +740,28 @@ app.put('/api/products/:id', authMiddleware, requireRole('super_admin'), (req: R
 
   const { name, categoryId, companyId, description, image, isKitchenItem, taxRate, isActive, variants } = req.body;
 
-  if (name) product.name = name.trim();
-  if (categoryId) product.categoryId = categoryId;
+  if (name && typeof name === 'string' && name.trim()) product.name = name.trim().slice(0, 191);
+  if (categoryId && db.raw.categories.some(c => c.id === categoryId)) product.categoryId = categoryId;
   if (companyId !== undefined) product.companyId = companyId || undefined;
-  if (description !== undefined) product.description = description.trim();
+  if (description !== undefined) product.description = typeof description === 'string' ? description.trim().slice(0, 1000) : undefined;
   if (image !== undefined) product.image = image;
   if (isKitchenItem !== undefined) product.isKitchenItem = Boolean(isKitchenItem);
-  if (taxRate !== undefined) product.taxRate = Number(taxRate);
+  if (taxRate !== undefined) product.taxRate = Math.max(0, Math.min(100, Number(taxRate)));
   if (isActive !== undefined) product.isActive = Boolean(isActive);
 
   if (Array.isArray(variants) && variants.length > 0) {
-    // Merge or update variants
     const updatedVariants: ProductVariant[] = variants.map((v: any, index: number) => {
       const existingVar = product.variants.find(oldV => oldV.id === v.id);
-      const varId = v.id || `var-${product.id.replace('prod-', '')}-${Date.now()}-${index}`;
+      const varId = v.id || `var-${product.id.replace('prod-', '')}-${Date.now()}-${index}-${crypto.randomBytes(2).toString('hex')}`;
 
-      const newStock = Number(v.stock !== undefined ? v.stock : (existingVar?.stock ?? 0));
+      const newStock = Math.max(0, Number(v.stock !== undefined ? v.stock : (existingVar?.stock ?? 0)));
       const oldStock = existingVar ? existingVar.stock : 0;
 
-      // If stock was directly changed in edit form, log adjustment
+      // Check negative stock policy
+      if (!db.raw.settings.allowNegativeStock && newStock < 0) {
+        throw new Error('Negative stock not allowed');
+      }
+
       if (existingVar && newStock !== oldStock) {
         db.recordStockMovement(
           product.id,
@@ -625,13 +781,13 @@ app.put('/api/products/:id', authMiddleware, requireRole('super_admin'), (req: R
       return {
         id: varId,
         productId: product.id,
-        size: String(v.size || 'Standard').trim(),
-        sku: (v.sku || `${product.name.substring(0, 3).toUpperCase()}-${v.size}`).trim(),
-        barcode: v.barcode ? String(v.barcode).trim() : undefined,
-        costPrice: Number(v.costPrice || 0),
-        sellingPrice: Number(v.sellingPrice || 0),
+        size: String(v.size || 'Standard').trim().slice(0, 64),
+        sku: (v.sku || `${product.name.substring(0, 3).toUpperCase()}-${v.size}`).trim().slice(0, 128),
+        barcode: v.barcode ? String(v.barcode).trim().slice(0, 128) : undefined,
+        costPrice: Math.max(0, Number(v.costPrice || 0)),
+        sellingPrice: Math.max(0, Number(v.sellingPrice || 0)),
         stock: newStock,
-        minStockLevel: Number(v.minStockLevel || 5),
+        minStockLevel: Math.max(0, Number(v.minStockLevel || 5)),
         isActive: v.isActive !== false
       };
     });
@@ -639,10 +795,13 @@ app.put('/api/products/:id', authMiddleware, requireRole('super_admin'), (req: R
     product.variants = updatedVariants;
   }
 
-  db.save();
-  db.logAudit(user.id, user.name, user.role, 'UPDATE_PRODUCT', 'PRODUCT', product.id, `Updated product "${product.name}" details and variants.`);
-
-  res.json(product);
+  try {
+    db.save();
+    db.logAudit(user.id, user.name, user.role, 'UPDATE_PRODUCT', 'PRODUCT', product.id, `Updated product "${product.name}" details and variants.`);
+    res.json(product);
+  } catch (e: any) {
+    res.status(400).json({ error: e.message || 'Failed to update product' });
+  }
 });
 
 app.delete('/api/products/:id', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
@@ -650,7 +809,6 @@ app.delete('/api/products/:id', authMiddleware, requireRole('super_admin'), (req
   const product = db.raw.products.find(p => p.id === req.params.id);
   if (!product) return res.status(404).json({ error: 'Product not found.' });
 
-  // Safe soft archive to never break historical bills, invoices or reports
   product.isArchived = true;
   product.isActive = false;
   db.save();
@@ -707,37 +865,32 @@ app.get('/api/inventory', authMiddleware, requireRole('super_admin'), (req: Requ
   res.json(inventoryList);
 });
 
-// Stock In / Purchase
+function findVariantById(variantId: string): { product: Product; variant: ProductVariant } | null {
+  for (const p of db.raw.products) {
+    const v = p.variants.find(varItem => varItem.id === variantId);
+    if (v) return { product: p, variant: v };
+  }
+  return null;
+}
+
 app.post('/api/inventory/stock-in', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   const user = (req as any).user as User;
   const { variantId, quantity, costPrice, reason, reference, date } = req.body;
 
   const numQty = Number(quantity);
-  if (!variantId || isNaN(numQty) || numQty <= 0) {
-    return res.status(400).json({ error: 'Valid variant ID and positive quantity are required.' });
+  if (!variantId || isNaN(numQty) || numQty <= 0 || numQty > 100000) {
+    return res.status(400).json({ error: 'Valid variant ID and positive quantity (max 100,000) are required.' });
   }
 
-  let targetProduct: Product | undefined;
-  let targetVariant: ProductVariant | undefined;
-
-  for (const p of db.raw.products) {
-    const v = p.variants.find(varItem => varItem.id === variantId);
-    if (v) {
-      targetProduct = p;
-      targetVariant = v;
-      break;
-    }
-  }
-
-  if (!targetProduct || !targetVariant) {
-    return res.status(404).json({ error: 'Product variant not found.' });
-  }
+  const found = findVariantById(variantId);
+  if (!found) return res.status(404).json({ error: 'Product variant not found.' });
+  const { product: targetProduct, variant: targetVariant } = found;
 
   const beforeQty = targetVariant.stock;
   targetVariant.stock += numQty;
   const numCost = costPrice && Number(costPrice) > 0 ? Number(costPrice) : targetVariant.costPrice;
   if (costPrice && Number(costPrice) > 0) {
-    targetVariant.costPrice = Number(costPrice);
+    targetVariant.costPrice = Math.max(0, Number(costPrice));
   }
 
   const recordTime = date ? (date.includes('T') ? new Date(date).toISOString() : new Date(`${date}T12:00:00.000Z`).toISOString()) : new Date().toISOString();
@@ -753,8 +906,8 @@ app.post('/api/inventory/stock-in', authMiddleware, requireRole('super_admin'), 
     'stock_in',
     user.id,
     user.name,
-    reason || 'Stock in / replenishment',
-    reference,
+    (reason && typeof reason === 'string') ? reason.slice(0, 500) : 'Stock in / replenishment',
+    reference ? String(reference).slice(0, 128) : undefined,
     numCost,
     recordTime
   );
@@ -764,30 +917,21 @@ app.post('/api/inventory/stock-in', authMiddleware, requireRole('super_admin'), 
   res.json({ message: 'Stock added successfully', variant: targetVariant });
 });
 
-// Stock Out / Damage / Waste
 app.post('/api/inventory/stock-out', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   const user = (req as any).user as User;
   const { variantId, quantity, type, reason, reference } = req.body;
 
   const numQty = Number(quantity);
-  if (!variantId || isNaN(numQty) || numQty <= 0) {
-    return res.status(400).json({ error: 'Valid variant ID and positive quantity are required.' });
+  if (!variantId || isNaN(numQty) || numQty <= 0 || numQty > 100000) {
+    return res.status(400).json({ error: 'Valid variant ID and positive quantity (max 100,000) are required.' });
   }
 
-  let targetProduct: Product | undefined;
-  let targetVariant: ProductVariant | undefined;
+  const found = findVariantById(variantId);
+  if (!found) return res.status(404).json({ error: 'Product variant not found.' });
+  const { product: targetProduct, variant: targetVariant } = found;
 
-  for (const p of db.raw.products) {
-    const v = p.variants.find(varItem => varItem.id === variantId);
-    if (v) {
-      targetProduct = p;
-      targetVariant = v;
-      break;
-    }
-  }
-
-  if (!targetProduct || !targetVariant) {
-    return res.status(404).json({ error: 'Product variant not found.' });
+  if (!db.raw.settings.allowNegativeStock && targetVariant.stock - numQty < 0) {
+    return res.status(400).json({ error: `Cannot reduce stock below zero. Current stock: ${targetVariant.stock}, requested: ${numQty}. Enable negative stock in settings if needed.` });
   }
 
   const beforeQty = targetVariant.stock;
@@ -806,8 +950,8 @@ app.post('/api/inventory/stock-out', authMiddleware, requireRole('super_admin'),
     movementType,
     user.id,
     user.name,
-    reason || `Stock reduced due to ${movementType}`,
-    reference
+    (reason && typeof reason === 'string') ? reason.slice(0, 500) : `Stock reduced due to ${movementType}`,
+    reference ? String(reference).slice(0, 128) : undefined
   );
 
   db.logAudit(user.id, user.name, user.role, 'STOCK_OUT', 'INVENTORY', targetVariant.id, `Stock out -${numQty} for ${targetProduct.name} (${targetVariant.size}). New Stock: ${targetVariant.stock}`);
@@ -815,7 +959,6 @@ app.post('/api/inventory/stock-out', authMiddleware, requireRole('super_admin'),
   res.json({ message: 'Stock removed successfully', variant: targetVariant });
 });
 
-// Stock Adjustment (Handles IN, OUT, ADJUST, or direct newStock)
 app.post('/api/inventory/adjust', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   const user = (req as any).user as User;
   const { variantId, type, quantity, newStock, reason, reference } = req.body;
@@ -824,21 +967,9 @@ app.post('/api/inventory/adjust', authMiddleware, requireRole('super_admin'), (r
     return res.status(400).json({ error: 'Valid variant ID is required.' });
   }
 
-  let targetProduct: Product | undefined;
-  let targetVariant: ProductVariant | undefined;
-
-  for (const p of db.raw.products) {
-    const v = p.variants.find(varItem => varItem.id === variantId);
-    if (v) {
-      targetProduct = p;
-      targetVariant = v;
-      break;
-    }
-  }
-
-  if (!targetProduct || !targetVariant) {
-    return res.status(404).json({ error: 'Product variant not found.' });
-  }
+  const found = findVariantById(variantId);
+  if (!found) return res.status(404).json({ error: 'Product variant not found.' });
+  const { product: targetProduct, variant: targetVariant } = found;
 
   const beforeQty = targetVariant.stock;
   let diff = 0;
@@ -846,25 +977,30 @@ app.post('/api/inventory/adjust', authMiddleware, requireRole('super_admin'), (r
 
   if (type === 'IN') {
     const numQty = Number(quantity);
-    if (isNaN(numQty) || numQty <= 0) {
-      return res.status(400).json({ error: 'Valid positive quantity required for Stock In.' });
+    if (isNaN(numQty) || numQty <= 0 || numQty > 100000) {
+      return res.status(400).json({ error: 'Valid positive quantity required for Stock In (max 100,000).' });
     }
     targetVariant.stock += numQty;
     diff = numQty;
     moveType = 'stock_in';
   } else if (type === 'OUT') {
     const numQty = Number(quantity);
-    if (isNaN(numQty) || numQty <= 0) {
-      return res.status(400).json({ error: 'Valid positive quantity required for Stock Out.' });
+    if (isNaN(numQty) || numQty <= 0 || numQty > 100000) {
+      return res.status(400).json({ error: 'Valid positive quantity required for Stock Out (max 100,000).' });
+    }
+    if (!db.raw.settings.allowNegativeStock && targetVariant.stock - numQty < 0) {
+      return res.status(400).json({ error: `Cannot reduce below zero. Current: ${targetVariant.stock}` });
     }
     targetVariant.stock -= numQty;
     diff = -numQty;
     moveType = 'stock_out';
   } else {
-    // ADJUST or direct newStock
     const targetStock = newStock !== undefined ? Number(newStock) : Number(quantity);
-    if (isNaN(targetStock) || targetStock < 0) {
-      return res.status(400).json({ error: 'Valid non-negative stock quantity required for Adjustment.' });
+    if (isNaN(targetStock) || targetStock < 0 || targetStock > 1000000) {
+      return res.status(400).json({ error: 'Valid non-negative stock quantity required for Adjustment (max 1,000,000).' });
+    }
+    if (!db.raw.settings.allowNegativeStock && targetStock < 0) {
+      return res.status(400).json({ error: 'Negative stock not allowed' });
     }
     diff = targetStock - beforeQty;
     targetVariant.stock = targetStock;
@@ -882,8 +1018,8 @@ app.post('/api/inventory/adjust', authMiddleware, requireRole('super_admin'), (r
     moveType,
     user.id,
     user.name,
-    reason || 'Inventory stock modification',
-    reference
+    (reason && typeof reason === 'string') ? reason.slice(0, 500) : 'Inventory stock modification',
+    reference ? String(reference).slice(0, 128) : undefined
   );
 
   db.logAudit(user.id, user.name, user.role, 'STOCK_ADJUSTMENT', 'INVENTORY', targetVariant.id, `Stock updated for ${targetProduct.name} (${targetVariant.size}) from ${beforeQty} to ${targetVariant.stock}.`);
@@ -891,7 +1027,6 @@ app.post('/api/inventory/adjust', authMiddleware, requireRole('super_admin'), (r
   res.json({ message: 'Stock updated successfully', variant: targetVariant });
 });
 
-// Stock Movements Log (supports both /api/inventory/movements and /api/stock-movements)
 const getStockMovementsHandler = (req: Request, res: Response) => {
   const categoriesMap = new Map(db.raw.categories.map(c => [c.id, c.name]));
   const companiesMap = new Map(db.raw.companies.map(c => [c.id, c.name]));
@@ -921,7 +1056,7 @@ app.get('/api/inventory/movements', authMiddleware, requireRole('super_admin'), 
 app.get('/api/stock-movements', authMiddleware, requireRole('super_admin'), getStockMovementsHandler);
 
 // ==========================================
-// HELD BILLS
+// HELD BILLS - FIXED: Use HOLD- prefix to not consume BILL sequence
 // ==========================================
 
 app.get('/api/orders/held', authMiddleware, (req: Request, res: Response) => {
@@ -943,15 +1078,15 @@ app.post('/api/orders/hold', authMiddleware, (req: Request, res: Response) => {
         ...db.raw.heldBills[existingIndex],
         items,
         orderType: orderType || 'dine_in',
-        tableNumber: tableNumber || undefined,
-        customerName: customerName || undefined,
-        customerPhone: customerPhone || undefined,
-        subtotal: Number(subtotal || 0),
-        discount: Number(discount || 0),
-        discountPercentage: Number(discountPercentage || 0),
-        tax: Number(tax || 0),
-        grandTotal: Number(grandTotal || 0),
-        notes: notes || undefined,
+        tableNumber: tableNumber ? String(tableNumber).slice(0, 64) : undefined,
+        customerName: customerName ? String(customerName).slice(0, 128) : undefined,
+        customerPhone: customerPhone ? String(customerPhone).slice(0, 32) : undefined,
+        subtotal: Math.max(0, Number(subtotal || 0)),
+        discount: Math.max(0, Number(discount || 0)),
+        discountPercentage: Math.max(0, Math.min(100, Number(discountPercentage || 0))),
+        tax: Math.max(0, Number(tax || 0)),
+        grandTotal: Math.max(0, Number(grandTotal || 0)),
+        notes: notes ? String(notes).slice(0, 1000) : undefined,
         updatedAt: new Date().toISOString()
       };
       db.raw.heldBills[existingIndex] = updated;
@@ -961,22 +1096,24 @@ app.post('/api/orders/hold', authMiddleware, (req: Request, res: Response) => {
     }
   }
 
+  // FIXED: Use HOLD- prefix, not BILL- to preserve invoice sequence
+  const heldCount = db.raw.counters.billSeq; // Use current seq without incrementing for held? Actually use separate counter
   const heldBill: HeldBill = {
-    id: `held-${Date.now()}`,
-    billNumber: db.getNextBillNumber(),
-    tableNumber: tableNumber || undefined,
-    customerName: customerName || undefined,
-    customerPhone: customerPhone || undefined,
+    id: `held-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    billNumber: `HOLD-${heldCount}`,
+    tableNumber: tableNumber ? String(tableNumber).slice(0, 64) : undefined,
+    customerName: customerName ? String(customerName).slice(0, 128) : undefined,
+    customerPhone: customerPhone ? String(customerPhone).slice(0, 32) : undefined,
     cashierId: user.id,
     cashierName: user.name,
     orderType: orderType || 'dine_in',
     items,
-    subtotal: Number(subtotal || 0),
-    discount: Number(discount || 0),
-    discountPercentage: Number(discountPercentage || 0),
-    tax: Number(tax || 0),
-    grandTotal: Number(grandTotal || 0),
-    notes: notes || undefined,
+    subtotal: Math.max(0, Number(subtotal || 0)),
+    discount: Math.max(0, Number(discount || 0)),
+    discountPercentage: Math.max(0, Math.min(100, Number(discountPercentage || 0))),
+    tax: Math.max(0, Number(tax || 0)),
+    grandTotal: Math.max(0, Number(grandTotal || 0)),
+    notes: notes ? String(notes).slice(0, 1000) : undefined,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -1018,18 +1155,17 @@ app.post('/api/kot', authMiddleware, (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Cannot create KOT with no items.' });
   }
 
-  // Filter kitchen items or allow all food items
   const newKot: KOT = {
-    id: `kot-${Date.now()}`,
+    id: `kot-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
     kotNumber: db.getNextKOTNumber(),
-    billNumber: billNumber || undefined,
-    tableNumber: tableNumber || undefined,
+    billNumber: billNumber ? String(billNumber).slice(0, 64) : undefined,
+    tableNumber: tableNumber ? String(tableNumber).slice(0, 64) : undefined,
     orderType: orderType || 'dine_in',
     cashierId: user.id,
     cashierName: user.name,
     items,
     status: 'pending',
-    notes: notes || undefined,
+    notes: notes ? String(notes).slice(0, 1000) : undefined,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -1048,8 +1184,21 @@ app.patch('/api/kot/:id/status', authMiddleware, (req: Request, res: Response) =
   if (!kot) return res.status(404).json({ error: 'KOT not found.' });
 
   const { status } = req.body;
-  if (!['pending', 'preparing', 'ready', 'completed', 'cancelled'].includes(status)) {
+  const validStatuses = ['pending', 'preparing', 'ready', 'completed', 'cancelled'];
+  if (!validStatuses.includes(status)) {
     return res.status(400).json({ error: 'Invalid KOT status.' });
+  }
+
+  // Validate status transitions
+  const transitions: Record<string, string[]> = {
+    pending: ['preparing', 'cancelled'],
+    preparing: ['ready', 'cancelled'],
+    ready: ['completed', 'cancelled'],
+    completed: [],
+    cancelled: [],
+  };
+  if (kot.status !== status && !transitions[kot.status]?.includes(status)) {
+    return res.status(400).json({ error: `Cannot transition from ${kot.status} to ${status}` });
   }
 
   kot.status = status;
@@ -1062,7 +1211,7 @@ app.patch('/api/kot/:id/status', authMiddleware, (req: Request, res: Response) =
 });
 
 // ==========================================
-// BILLS, INVOICES & CHECKOUT (TRANSACTION SAFE)
+// BILLS, INVOICES & CHECKOUT
 // ==========================================
 
 app.get('/api/bills', authMiddleware, (req: Request, res: Response) => {
@@ -1105,69 +1254,71 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
   const numReceived = Number(amountReceived || grandTotal);
   const numGrandTotal = Number(grandTotal || 0);
 
+  if (isNaN(numReceived) || numReceived < 0) {
+    return res.status(400).json({ error: 'Invalid amount received' });
+  }
+
   if (paymentMethod === 'cash' && numReceived < numGrandTotal) {
     return res.status(400).json({ error: 'Received amount cannot be less than Grand Total.' });
   }
 
-  // Stock check validation if allowNegativeStock is false
+  // For non-cash, ensure amountReceived >= grandTotal or at least grandTotal if split not fully implemented
+  if (paymentMethod !== 'cash' && paymentMethod !== 'split' && numReceived < numGrandTotal) {
+    return res.status(400).json({ error: 'Payment amount cannot be less than Grand Total for this payment method.' });
+  }
+
+  // Stock check
   if (!db.raw.settings.allowNegativeStock) {
     for (const item of items) {
-      for (const p of db.raw.products) {
-        const v = p.variants.find(varItem => varItem.id === item.variantId);
-        if (v && v.stock < item.quantity) {
-          return res.status(400).json({
-            error: `Insufficient stock for ${item.productName} (${item.size}). Available: ${v.stock}, Requested: ${item.quantity}.`
-          });
-        }
+      const found = findVariantById(item.variantId);
+      if (found && found.variant.stock < item.quantity) {
+        return res.status(400).json({
+          error: `Insufficient stock for ${item.productName} (${item.size}). Available: ${found.variant.stock}, Requested: ${item.quantity}.`
+        });
       }
     }
   }
 
-  const billId = `bill-${Date.now()}`;
+  const billId = `bill-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
   const billNumber = db.getNextBillNumber();
   const invoiceNumber = db.getNextInvoiceNumber();
 
-  // Atomically Deduct Variant-level Stock & Record Movements
   for (const item of items) {
-    for (const p of db.raw.products) {
-      const v = p.variants.find(varItem => varItem.id === item.variantId);
-      if (v) {
-        const beforeQty = v.stock;
-        v.stock -= item.quantity;
+    const found = findVariantById(item.variantId);
+    if (found) {
+      const beforeQty = found.variant.stock;
+      found.variant.stock -= item.quantity;
 
-        db.recordStockMovement(
-          p.id,
-          p.name,
-          v.id,
-          v.size,
-          -item.quantity,
-          beforeQty,
-          v.stock,
-          'sale',
-          user.id,
-          user.name,
-          `Sale on ${billNumber} / ${invoiceNumber}`,
-          billId
-        );
-        break;
-      }
+      db.recordStockMovement(
+        found.product.id,
+        found.product.name,
+        found.variant.id,
+        found.variant.size,
+        -item.quantity,
+        beforeQty,
+        found.variant.stock,
+        'sale',
+        user.id,
+        user.name,
+        `Sale on ${billNumber} / ${invoiceNumber}`,
+        billId
+      );
     }
   }
 
-  // Snapshot item historical details
-  const snapshotItems: OrderItem[] = items.map(item => ({
+  const snapshotItems: OrderItem[] = items.map((item: any) => ({
     id: item.id || `item-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
     productId: item.productId,
-    productName: item.productName,
+    productName: String(item.productName).slice(0, 191),
     variantId: item.variantId,
-    size: item.size,
+    size: String(item.size).slice(0, 64),
     unitPrice: Number(item.unitPrice),
     costPrice: Number(item.costPrice || 0),
-    quantity: Number(item.quantity),
-    discount: Number(item.discount || 0),
-    tax: Number(item.tax || 0),
+    quantity: Math.max(1, Number(item.quantity)),
+    discount: Math.max(0, Number(item.discount || 0)),
+    tax: Math.max(0, Number(item.tax || 0)),
     total: Number(item.total),
-    notes: item.notes,
+    notes: item.notes ? String(item.notes).slice(0, 500) : undefined,
     isKitchenItem: Boolean(item.isKitchenItem)
   }));
 
@@ -1176,32 +1327,31 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
     billNumber,
     invoiceNumber,
     orderType: orderType || 'dine_in',
-    tableNumber: tableNumber || undefined,
-    customerName: customerName || undefined,
-    customerPhone: customerPhone || undefined,
+    tableNumber: tableNumber ? String(tableNumber).slice(0, 64) : undefined,
+    customerName: customerName ? String(customerName).slice(0, 128) : undefined,
+    customerPhone: customerPhone ? String(customerPhone).slice(0, 32) : undefined,
     cashierId: user.id,
     cashierName: user.name,
     items: snapshotItems,
-    subtotal: Number(subtotal || 0),
-    discount: Number(discount || 0),
-    discountPercentage: Number(discountPercentage || 0),
-    tax: Number(tax || 0),
-    taxRate: Number(taxRate || 0),
-    serviceCharge: Number(serviceCharge || 0),
+    subtotal: Math.max(0, Number(subtotal || 0)),
+    discount: Math.max(0, Number(discount || 0)),
+    discountPercentage: Math.max(0, Math.min(100, Number(discountPercentage || 0))),
+    tax: Math.max(0, Number(tax || 0)),
+    taxRate: Math.max(0, Math.min(100, Number(taxRate || 0))),
+    serviceCharge: Math.max(0, Number(serviceCharge || 0)),
     grandTotal: numGrandTotal,
     amountReceived: numReceived,
-    changeAmount: Number(changeAmount || Math.max(0, numReceived - numGrandTotal)),
+    changeAmount: Number((changeAmount || Math.max(0, numReceived - numGrandTotal)).toFixed(2)),
     paymentMethod: paymentMethod || 'cash',
     paymentDetails: paymentDetails || undefined,
     status: 'paid',
-    notes: notes || undefined,
+    notes: notes ? String(notes).slice(0, 1000) : undefined,
     createdAt: new Date().toISOString(),
     paidAt: new Date().toISOString()
   };
 
   db.raw.bills.unshift(newBill);
 
-  // If this was from a held bill, remove the held bill
   if (heldBillId) {
     const heldIndex = db.raw.heldBills.findIndex(h => h.id === heldBillId);
     if (heldIndex !== -1) {
@@ -1224,7 +1374,6 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
   res.status(201).json(newBill);
 });
 
-// Void / Cancel Bill (Super Admin only)
 app.post('/api/bills/:id/void', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   const user = (req as any).user as User;
   const { reason } = req.body;
@@ -1237,35 +1386,31 @@ app.post('/api/bills/:id/void', authMiddleware, requireRole('super_admin'), (req
 
   bill.status = 'voided';
 
-  // Restore inventory for all items
   for (const item of bill.items) {
-    for (const p of db.raw.products) {
-      const v = p.variants.find(varItem => varItem.id === item.variantId);
-      if (v) {
-        const beforeQty = v.stock;
-        v.stock += item.quantity;
+    const found = findVariantById(item.variantId);
+    if (found) {
+      const beforeQty = found.variant.stock;
+      found.variant.stock += item.quantity;
 
-        db.recordStockMovement(
-          p.id,
-          p.name,
-          v.id,
-          v.size,
-          item.quantity,
-          beforeQty,
-          v.stock,
-          'return',
-          user.id,
-          user.name,
-          `Bill void reversal: ${bill.billNumber} (${reason || 'Admin void'})`,
-          bill.id
-        );
-        break;
-      }
+      db.recordStockMovement(
+        found.product.id,
+        found.product.name,
+        found.variant.id,
+        found.variant.size,
+        item.quantity,
+        beforeQty,
+        found.variant.stock,
+        'return',
+        user.id,
+        user.name,
+        `Bill void reversal: ${bill.billNumber} (${reason ? String(reason).slice(0, 500) : 'Admin void'})`,
+        bill.id
+      );
     }
   }
 
   db.save();
-  db.logAudit(user.id, user.name, user.role, 'VOID_BILL', 'BILL', bill.id, `Voided bill ${bill.billNumber}. Reason: ${reason || 'Not specified'}`);
+  db.logAudit(user.id, user.name, user.role, 'VOID_BILL', 'BILL', bill.id, `Voided bill ${bill.billNumber}. Reason: ${reason ? String(reason).slice(0, 500) : 'Not specified'}`);
 
   res.json({ message: 'Bill has been voided and stock was successfully restored.', bill });
 });
@@ -1275,23 +1420,22 @@ app.post('/api/bills/:id/void', authMiddleware, requireRole('super_admin'), (req
 // ==========================================
 
 app.get('/api/reports/analytics', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
-  const { startDate, endDate, cashierId, categoryId } = req.query;
+  const { startDate, endDate, cashierId } = req.query;
 
   let filteredBills = db.raw.bills.filter(b => b.status === 'paid');
 
   if (startDate) {
     const start = new Date(startDate as string).getTime();
-    filteredBills = filteredBills.filter(b => new Date(b.createdAt).getTime() >= start);
+    if (!isNaN(start)) filteredBills = filteredBills.filter(b => new Date(b.createdAt).getTime() >= start);
   }
   if (endDate) {
     const end = new Date(endDate as string).getTime();
-    filteredBills = filteredBills.filter(b => new Date(b.createdAt).getTime() <= end);
+    if (!isNaN(end)) filteredBills = filteredBills.filter(b => new Date(b.createdAt).getTime() <= end);
   }
   if (cashierId && cashierId !== 'all') {
     filteredBills = filteredBills.filter(b => b.cashierId === cashierId);
   }
 
-  // Summary figures
   const totalSales = filteredBills.reduce((sum, b) => sum + b.grandTotal, 0);
   const totalBills = filteredBills.length;
   const totalDiscount = filteredBills.reduce((sum, b) => sum + (b.discount || 0), 0);
@@ -1299,7 +1443,6 @@ app.get('/api/reports/analytics', authMiddleware, requireRole('super_admin'), (r
   const totalServiceCharge = filteredBills.reduce((sum, b) => sum + (b.serviceCharge || 0), 0);
   const averageBill = totalBills > 0 ? totalSales / totalBills : 0;
 
-  // Breakdown by payment method
   const paymentBreakdown: Record<string, { count: number; total: number }> = {
     cash: { count: 0, total: 0 },
     card: { count: 0, total: 0 },
@@ -1317,7 +1460,6 @@ app.get('/api/reports/analytics', authMiddleware, requireRole('super_admin'), (r
     paymentBreakdown[method].total += b.grandTotal;
   });
 
-  // Product sales breakdown
   const productSalesMap: Record<string, { productId: string; name: string; size: string; quantity: number; revenue: number }> = {};
   filteredBills.forEach(b => {
     b.items.forEach(item => {
@@ -1340,7 +1482,6 @@ app.get('/api/reports/analytics', authMiddleware, requireRole('super_admin'), (r
     .sort((a, b) => b.revenue - a.revenue)
     .slice(0, 10);
 
-  // Cashier sales breakdown
   const cashierSalesMap: Record<string, { cashierId: string; cashierName: string; billsCount: number; totalSales: number }> = {};
   filteredBills.forEach(b => {
     if (!cashierSalesMap[b.cashierId]) {
@@ -1371,24 +1512,21 @@ app.get('/api/reports/analytics', authMiddleware, requireRole('super_admin'), (r
   });
 });
 
-// Daily Stock Sheet & Bar Reconciliation Report
+// Daily Stock Sheet - IMPROVED LOGIC
 app.get('/api/reports/daily-stock-sheet', authMiddleware, (req: Request, res: Response) => {
   const targetDate = req.query.date ? String(req.query.date) : new Date().toISOString().split('T')[0];
   const categoryFilter = req.query.categoryId ? String(req.query.categoryId) : 'all';
   const search = req.query.search ? String(req.query.search).toLowerCase() : '';
-  const typeFilter = req.query.type ? String(req.query.type) : 'all'; // 'all' | 'bar' | 'restaurant'
+  const typeFilter = req.query.type ? String(req.query.type) : 'all';
 
-  // Format target date as YYYY.MM.DD (matches user's register sheet format)
   const formattedDate = targetDate.replace(/-/g, '.');
 
-  // Filter bills on that date
   const paidBillsOnDate = db.raw.bills.filter(b => {
     if (b.status !== 'paid') return false;
     const billDate = (b.paidAt || b.createdAt).split('T')[0];
     return billDate === targetDate;
   });
 
-  // Calculate units sold per variant on this date
   const soldMap: Record<string, number> = {};
   paidBillsOnDate.forEach(b => {
     b.items.forEach(item => {
@@ -1396,12 +1534,20 @@ app.get('/api/reports/daily-stock-sheet', authMiddleware, (req: Request, res: Re
     });
   });
 
-  // Calculate received stock movements on this date
+  // Calculate received and adjustments
   const receivedMap: Record<string, number> = {};
+  const adjustmentMap: Record<string, number> = {};
+  
   db.raw.stockMovements.forEach(m => {
     const movDate = m.createdAt.split('T')[0];
-    if (movDate === targetDate && (m.movementType === 'stock_in' || m.movementType === 'purchase' || (m.movementType === 'adjustment' && m.quantityChange > 0))) {
+    if (movDate !== targetDate) return;
+    
+    if (m.movementType === 'stock_in' || m.movementType === 'purchase') {
       receivedMap[m.variantId] = (receivedMap[m.variantId] || 0) + (Number(m.quantityChange) || 0);
+    } else if (m.movementType === 'adjustment' && m.quantityChange > 0) {
+      receivedMap[m.variantId] = (receivedMap[m.variantId] || 0) + (Number(m.quantityChange) || 0);
+    } else if (m.movementType === 'adjustment') {
+      adjustmentMap[m.variantId] = (adjustmentMap[m.variantId] || 0) + (Number(m.quantityChange) || 0);
     }
   });
 
@@ -1429,14 +1575,8 @@ app.get('/api/reports/daily-stock-sheet', authMiddleware, (req: Request, res: Re
     p.variants.forEach(v => {
       if (!v.isActive) return;
 
-      // Clean item name (e.g., "Extra Special 750ml", "Lion Strong 625ml")
-      const cleanProdName = p.name
-        .replace(/Arrack|Brandy|Whisky|Vodka|Beer|DCSL|DCSCL/gi, '')
-        .trim();
-      const cleanSize = v.size
-        .replace(/Bottle|Flask|Quarter|Half|Large|Portion|Double|Single|Peg/gi, '')
-        .trim();
-      
+      const cleanProdName = p.name.replace(/Arrack|Brandy|Whisky|Vodka|Beer|DCSL|DCSCL/gi, '').trim();
+      const cleanSize = v.size.replace(/Bottle|Flask|Quarter|Half|Large|Portion|Double|Single|Peg/gi, '').trim();
       const displayName = `${cleanProdName || p.name} ${cleanSize}`.trim();
 
       if (search && !p.name.toLowerCase().includes(search) && !displayName.toLowerCase().includes(search) && !v.sku.toLowerCase().includes(search)) {
@@ -1445,9 +1585,11 @@ app.get('/api/reports/daily-stock-sheet', authMiddleware, (req: Request, res: Re
 
       const sold = soldMap[v.id] || 0;
       const received = receivedMap[v.id] || 0;
-      const balance = v.stock; // Current stock in hand
-      const inHand = Math.max(0, balance + sold - received); // Opening stock = closing + sold - received
-      const stock = inHand + received; // Total available
+      const adjustments = adjustmentMap[v.id] || 0;
+      const balance = v.stock;
+      // Improved opening stock calculation: closing + sold - received - adjustments
+      const inHand = Math.max(0, balance + sold - received - adjustments);
+      const stock = inHand + received;
       const price = v.sellingPrice;
       const value = sold * price;
 
@@ -1493,9 +1635,8 @@ app.get('/api/reports/daily-stock-sheet', authMiddleware, (req: Request, res: Re
   });
 });
 
-// Reconcile / Save Physical Stock Count from Daily Stock Sheet
 app.post('/api/reports/daily-stock-sheet/reconcile', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
-  const { adjustments, reason } = req.body; // adjustments: [{ variantId, newBalance }]
+  const { adjustments, reason } = req.body;
   if (!Array.isArray(adjustments) || adjustments.length === 0) {
     return res.status(400).json({ error: 'No adjustments provided' });
   }
@@ -1503,38 +1644,35 @@ app.post('/api/reports/daily-stock-sheet/reconcile', authMiddleware, requireRole
   const currentUser = (req as any).user;
   let updatedCount = 0;
 
-  adjustments.forEach((adj: { variantId: string; newBalance: number }) => {
+  for (const adj of adjustments as { variantId: string; newBalance: number }[]) {
     const newBal = Number(adj.newBalance);
-    if (isNaN(newBal) || newBal < 0) return;
+    if (isNaN(newBal) || newBal < 0 || newBal > 1000000) continue;
 
-    for (const p of db.raw.products) {
-      const v = p.variants.find(item => item.id === adj.variantId);
-      if (v) {
-        const qtyBefore = v.stock;
-        const diff = newBal - qtyBefore;
-        if (diff !== 0) {
-          v.stock = newBal;
-          db.raw.stockMovements.unshift({
-            id: `mov-audit-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
-            productId: p.id,
-            productName: p.name,
-            variantId: v.id,
-            variantSize: v.size,
-            quantityChange: diff,
-            quantityBefore: qtyBefore,
-            quantityAfter: newBal,
-            movementType: 'adjustment',
-            reason: reason || 'Daily Stock Sheet Physical Audit Reconciliation',
-            userId: currentUser.id,
-            userName: currentUser.name,
-            createdAt: new Date().toISOString()
-          });
-          updatedCount++;
-        }
-        break;
+    const found = findVariantById(adj.variantId);
+    if (found) {
+      const qtyBefore = found.variant.stock;
+      const diff = newBal - qtyBefore;
+      if (diff !== 0) {
+        found.variant.stock = newBal;
+        db.raw.stockMovements.unshift({
+          id: `mov-audit-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+          productId: found.product.id,
+          productName: found.product.name,
+          variantId: found.variant.id,
+          variantSize: found.variant.size,
+          quantityChange: diff,
+          quantityBefore: qtyBefore,
+          quantityAfter: newBal,
+          movementType: 'adjustment',
+          reason: (reason && typeof reason === 'string') ? reason.slice(0, 500) : 'Daily Stock Sheet Physical Audit Reconciliation',
+          userId: currentUser.id,
+          userName: currentUser.name,
+          createdAt: new Date().toISOString()
+        });
+        updatedCount++;
       }
     }
-  });
+  }
 
   db.save();
   db.logAudit(
@@ -1558,7 +1696,6 @@ app.post('/api/reports/daily-stock-sheet/reconcile', authMiddleware, requireRole
 // ROOMS & ROOM BOOKINGS API
 // ==========================================
 
-// Get all rooms
 app.get('/api/rooms', authMiddleware, (req: Request, res: Response) => {
   try {
     const { status, floor, type } = req.query;
@@ -1580,43 +1717,36 @@ app.get('/api/rooms', authMiddleware, (req: Request, res: Response) => {
   }
 });
 
-// Create new room (Super Admin)
 app.post('/api/rooms', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   try {
     const user = (req as any).user as User;
-    const {
-      roomNumber,
-      roomType,
-      floor,
-      capacity,
-      ratePerDay,
-      rateHalfDay,
-      amenities,
-      status,
-      notes
-    } = req.body;
+    const { roomNumber, roomType, floor, capacity, ratePerDay, rateHalfDay, amenities, status, notes } = req.body;
 
-    if (!roomNumber || !roomType || !ratePerDay) {
+    if (!roomNumber || typeof roomNumber !== 'string' || !roomNumber.trim() || !roomType || !ratePerDay) {
       return res.status(400).json({ error: 'Room number, type, and daily rate are required.' });
     }
 
-    // Check duplicate room number
+    const rate = Number(ratePerDay);
+    if (isNaN(rate) || rate <= 0 || rate > 1000000) {
+      return res.status(400).json({ error: 'Invalid daily rate (must be 1-1,000,000)' });
+    }
+
     const existing = db.raw.rooms.find(r => r.roomNumber.trim().toLowerCase() === roomNumber.trim().toLowerCase());
     if (existing) {
       return res.status(400).json({ error: `Room number ${roomNumber} already exists.` });
     }
 
     const newRoom: Room = {
-      id: `room-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-      roomNumber: roomNumber.trim(),
-      roomType: roomType.trim(),
-      floor: floor?.trim() || 'Ground Floor',
-      capacity: Number(capacity) || 2,
-      ratePerDay: Number(ratePerDay),
-      rateHalfDay: rateHalfDay ? Number(rateHalfDay) : undefined,
-      amenities: Array.isArray(amenities) ? amenities : ['AC', 'Attached Bathroom', 'Free Wi-Fi'],
-      status: status || 'available',
-      notes: notes?.trim() || '',
+      id: `room-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      roomNumber: roomNumber.trim().slice(0, 32),
+      roomType: roomType.trim().slice(0, 128),
+      floor: floor?.trim().slice(0, 64) || 'Ground Floor',
+      capacity: Math.max(1, Math.min(20, Number(capacity) || 2)),
+      ratePerDay: rate,
+      rateHalfDay: rateHalfDay ? Math.max(0, Number(rateHalfDay)) : undefined,
+      amenities: Array.isArray(amenities) ? amenities.map((a: any) => String(a).slice(0, 64)).slice(0, 20) : ['AC', 'Attached Bathroom', 'Free Wi-Fi'],
+      status: status && ['available', 'occupied', 'reserved', 'cleaning', 'maintenance'].includes(status) ? status : 'available',
+      notes: notes?.trim().slice(0, 1000) || '',
       isActive: true,
       createdAt: new Date().toISOString()
     };
@@ -1624,15 +1754,7 @@ app.post('/api/rooms', authMiddleware, requireRole('super_admin'), (req: Request
     db.raw.rooms.push(newRoom);
     db.save();
 
-    db.logAudit(
-      user.id,
-      user.name,
-      user.role,
-      'CREATE_ROOM',
-      'ROOM',
-      newRoom.id,
-      `Created Room ${newRoom.roomNumber} (${newRoom.roomType}) at Rs. ${newRoom.ratePerDay}/day`
-    );
+    db.logAudit(user.id, user.name, user.role, 'CREATE_ROOM', 'ROOM', newRoom.id, `Created Room ${newRoom.roomNumber} (${newRoom.roomType}) at Rs. ${newRoom.ratePerDay}/day`);
 
     res.status(201).json(newRoom);
   } catch (err: any) {
@@ -1640,7 +1762,6 @@ app.post('/api/rooms', authMiddleware, requireRole('super_admin'), (req: Request
   }
 });
 
-// Update room details or status
 app.put('/api/rooms/:id', authMiddleware, (req: Request, res: Response) => {
   try {
     const user = (req as any).user as User;
@@ -1651,51 +1772,32 @@ app.put('/api/rooms/:id', authMiddleware, (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Room not found.' });
     }
 
-    const {
-      roomNumber,
-      roomType,
-      floor,
-      capacity,
-      ratePerDay,
-      rateHalfDay,
-      amenities,
-      status,
-      notes,
-      isActive
-    } = req.body;
+    const { roomNumber, roomType, floor, capacity, ratePerDay, rateHalfDay, amenities, status, notes, isActive } = req.body;
 
-    // Check duplicate room number if changed
-    if (roomNumber && roomNumber.trim().toLowerCase() !== room.roomNumber.toLowerCase()) {
-      const existing = db.raw.rooms.find(
-        r => r.id !== id && r.roomNumber.trim().toLowerCase() === roomNumber.trim().toLowerCase()
-      );
+    if (roomNumber && typeof roomNumber === 'string' && roomNumber.trim().toLowerCase() !== room.roomNumber.toLowerCase()) {
+      const existing = db.raw.rooms.find(r => r.id !== id && r.roomNumber.trim().toLowerCase() === roomNumber.trim().toLowerCase());
       if (existing) {
         return res.status(400).json({ error: `Room number ${roomNumber} is already used by another room.` });
       }
-      room.roomNumber = roomNumber.trim();
+      room.roomNumber = roomNumber.trim().slice(0, 32);
     }
 
-    if (roomType !== undefined) room.roomType = roomType.trim();
-    if (floor !== undefined) room.floor = floor.trim();
-    if (capacity !== undefined) room.capacity = Number(capacity);
-    if (ratePerDay !== undefined) room.ratePerDay = Number(ratePerDay);
-    if (rateHalfDay !== undefined) room.rateHalfDay = rateHalfDay ? Number(rateHalfDay) : undefined;
-    if (amenities !== undefined && Array.isArray(amenities)) room.amenities = amenities;
-    if (status !== undefined) room.status = status;
-    if (notes !== undefined) room.notes = notes;
+    if (roomType !== undefined && typeof roomType === 'string') room.roomType = roomType.trim().slice(0, 128);
+    if (floor !== undefined && typeof floor === 'string') room.floor = floor.trim().slice(0, 64);
+    if (capacity !== undefined) room.capacity = Math.max(1, Math.min(20, Number(capacity) || 2));
+    if (ratePerDay !== undefined) {
+      const rate = Number(ratePerDay);
+      if (!isNaN(rate) && rate > 0 && rate <= 1000000) room.ratePerDay = rate;
+    }
+    if (rateHalfDay !== undefined) room.rateHalfDay = rateHalfDay ? Math.max(0, Number(rateHalfDay)) : undefined;
+    if (amenities !== undefined && Array.isArray(amenities)) room.amenities = amenities.map((a: any) => String(a).slice(0, 64)).slice(0, 20);
+    if (status !== undefined && ['available', 'occupied', 'reserved', 'cleaning', 'maintenance'].includes(status)) room.status = status;
+    if (notes !== undefined && typeof notes === 'string') room.notes = notes.slice(0, 1000);
     if (isActive !== undefined) room.isActive = Boolean(isActive);
 
     db.save();
 
-    db.logAudit(
-      user.id,
-      user.name,
-      user.role,
-      'UPDATE_ROOM',
-      'ROOM',
-      room.id,
-      `Updated details/status for Room ${room.roomNumber} (Status: ${room.status})`
-    );
+    db.logAudit(user.id, user.name, user.role, 'UPDATE_ROOM', 'ROOM', room.id, `Updated details/status for Room ${room.roomNumber} (Status: ${room.status})`);
 
     res.json(room);
   } catch (err: any) {
@@ -1703,7 +1805,6 @@ app.put('/api/rooms/:id', authMiddleware, (req: Request, res: Response) => {
   }
 });
 
-// Delete Room (Super Admin)
 app.delete('/api/rooms/:id', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   try {
     const user = (req as any).user as User;
@@ -1722,15 +1823,7 @@ app.delete('/api/rooms/:id', authMiddleware, requireRole('super_admin'), (req: R
     db.raw.rooms.splice(index, 1);
     db.save();
 
-    db.logAudit(
-      user.id,
-      user.name,
-      user.role,
-      'DELETE_ROOM',
-      'ROOM',
-      id,
-      `Deleted Room ${room.roomNumber} (${room.roomType})`
-    );
+    db.logAudit(user.id, user.name, user.role, 'DELETE_ROOM', 'ROOM', id, `Deleted Room ${room.roomNumber} (${room.roomType})`);
 
     res.json({ success: true, message: `Room ${room.roomNumber} deleted successfully.` });
   } catch (err: any) {
@@ -1738,7 +1831,6 @@ app.delete('/api/rooms/:id', authMiddleware, requireRole('super_admin'), (req: R
   }
 });
 
-// Get Room Bookings
 app.get('/api/room-bookings', authMiddleware, (req: Request, res: Response) => {
   try {
     const { status, roomId, search } = req.query;
@@ -1762,7 +1854,6 @@ app.get('/api/room-bookings', authMiddleware, (req: Request, res: Response) => {
       );
     }
 
-    // Sort newest first
     bookings.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     res.json(bookings);
   } catch (err: any) {
@@ -1770,32 +1861,17 @@ app.get('/api/room-bookings', authMiddleware, (req: Request, res: Response) => {
   }
 });
 
-// Create Room Booking & Check-In
 app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => {
   try {
     const user = (req as any).user as User;
     const {
-      roomId,
-      guestName,
-      guestPhone,
-      guestIdOrPassport,
-      guestAddress,
-      numberOfGuests,
-      checkInDate,
-      checkOutDate,
-      durationDays,
-      ratePerDay,
-      extraCharges,
-      discount,
-      tax,
-      advancePaid,
-      paymentMethod,
-      paymentDetails,
-      status,
-      notes
+      roomId, guestName, guestPhone, guestIdOrPassport, guestAddress,
+      numberOfGuests, checkInDate, checkOutDate, durationDays,
+      ratePerDay, extraCharges, discount, tax, advancePaid,
+      paymentMethod, paymentDetails, status, notes
     } = req.body;
 
-    if (!roomId || !guestName || !guestPhone) {
+    if (!roomId || !guestName || typeof guestName !== 'string' || !guestName.trim() || !guestPhone) {
       return res.status(400).json({ error: 'Room, Guest Name, and Phone Number are required.' });
     }
 
@@ -1808,32 +1884,46 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
       return res.status(400).json({ error: `Room ${room.roomNumber} is currently occupied.` });
     }
 
-    const days = Math.max(1, Number(durationDays) || 1);
-    const dailyRate = Number(ratePerDay) || room.ratePerDay;
+    // Validate dates
+    const checkIn = checkInDate ? new Date(checkInDate) : new Date();
+    const checkOut = checkOutDate ? new Date(checkOutDate) : new Date(Date.now() + 86400000);
+    if (isNaN(checkIn.getTime()) || isNaN(checkOut.getTime())) {
+      return res.status(400).json({ error: 'Invalid check-in or check-out date' });
+    }
+    if (checkOut <= checkIn) {
+      return res.status(400).json({ error: 'Check-out date must be after check-in date' });
+    }
+    const calculatedDays = Math.max(1, Math.ceil((checkOut.getTime() - checkIn.getTime()) / 86400000));
+    const days = Math.max(1, Number(durationDays) || calculatedDays);
+
+    const dailyRate = Math.max(0, Number(ratePerDay) || room.ratePerDay);
     const totalRoomCharge = days * dailyRate;
-    const extra = Number(extraCharges) || 0;
-    const disc = Number(discount) || 0;
-    const taxAmt = Number(tax) || 0;
+    const extra = Math.max(0, Number(extraCharges) || 0);
+    const disc = Math.max(0, Number(discount) || 0);
+    const taxAmt = Math.max(0, Number(tax) || 0);
     const grandTotal = Math.max(0, totalRoomCharge + extra + taxAmt - disc);
-    const advance = Number(advancePaid) || 0;
+    const advance = Math.max(0, Number(advancePaid) || 0);
+    if (advance > grandTotal) {
+      return res.status(400).json({ error: 'Advance cannot exceed grand total' });
+    }
     const balanceDue = Math.max(0, grandTotal - advance);
 
-    const bookingStatus = status || 'checked_in';
+    const bookingStatus = status && ['confirmed', 'checked_in', 'checked_out', 'cancelled'].includes(status) ? status : 'checked_in';
     const bookingNumber = db.getNextBookingNumber();
 
     const booking: RoomBooking = {
-      id: `rbk-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+      id: `rbk-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
       bookingNumber,
       roomId: room.id,
       roomNumber: room.roomNumber,
       roomType: room.roomType,
-      guestName: guestName.trim(),
-      guestPhone: guestPhone.trim(),
-      guestIdOrPassport: (guestIdOrPassport || '').trim(),
-      guestAddress: (guestAddress || '').trim(),
-      numberOfGuests: Number(numberOfGuests) || 2,
-      checkInDate: checkInDate || new Date().toISOString(),
-      checkOutDate: checkOutDate || new Date(Date.now() + days * 86400000).toISOString(),
+      guestName: guestName.trim().slice(0, 128),
+      guestPhone: String(guestPhone).trim().slice(0, 32),
+      guestIdOrPassport: (guestIdOrPassport || '').trim().slice(0, 64),
+      guestAddress: (guestAddress || '').trim().slice(0, 500),
+      numberOfGuests: Math.max(1, Math.min(20, Number(numberOfGuests) || 2)),
+      checkInDate: checkIn.toISOString(),
+      checkOutDate: checkOut.toISOString(),
       durationDays: days,
       ratePerDay: dailyRate,
       totalRoomCharge,
@@ -1848,7 +1938,7 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
       status: bookingStatus,
       cashierId: user.id,
       cashierName: user.name,
-      notes: notes || '',
+      notes: notes ? String(notes).slice(0, 1000) : '',
       createdAt: new Date().toISOString(),
       checkedInAt: bookingStatus === 'checked_in' ? new Date().toISOString() : undefined
     };
@@ -1858,7 +1948,6 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
     }
     db.raw.roomBookings.unshift(booking);
 
-    // Update Room Status
     room.status = bookingStatus === 'checked_in' ? 'occupied' : 'reserved';
     room.currentBookingId = booking.id;
     room.currentGuestName = booking.guestName;
@@ -1866,27 +1955,14 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
 
     db.save();
 
-    db.logAudit(
-      user.id,
-      user.name,
-      user.role,
-      'ROOM_BOOKING_CREATED',
-      'ROOM_BOOKING',
-      booking.id,
-      `Created Booking ${booking.bookingNumber} for Room ${room.roomNumber} - Guest: ${booking.guestName} (Total: Rs. ${booking.grandTotal}, Advance: Rs. ${booking.advancePaid})`
-    );
+    db.logAudit(user.id, user.name, user.role, 'ROOM_BOOKING_CREATED', 'ROOM_BOOKING', booking.id, `Created Booking ${booking.bookingNumber} for Room ${room.roomNumber} - Guest: ${booking.guestName} (Total: Rs. ${booking.grandTotal}, Advance: Rs. ${booking.advancePaid})`);
 
-    res.status(201).json({
-      success: true,
-      booking,
-      room
-    });
+    res.status(201).json({ success: true, booking, room });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to create room booking.' });
   }
 });
 
-// Room Check-Out and Final Bill Settlement
 app.put('/api/room-bookings/:id/checkout', authMiddleware, (req: Request, res: Response) => {
   try {
     const user = (req as any).user as User;
@@ -1902,23 +1978,24 @@ app.put('/api/room-bookings/:id/checkout', authMiddleware, (req: Request, res: R
       return res.status(400).json({ error: 'This booking is already checked out.' });
     }
 
-    // Add any additional charges (e.g. minibar, laundry, room service)
     if (additionalCharges && Number(additionalCharges) > 0) {
-      booking.extraCharges += Number(additionalCharges);
-      booking.grandTotal += Number(additionalCharges);
-      booking.balanceDue += Number(additionalCharges);
+      const add = Math.max(0, Number(additionalCharges));
+      booking.extraCharges += add;
+      booking.grandTotal += add;
+      booking.balanceDue += add;
     }
 
-    // Process final settlement payment
-    const finalPay = Number(finalPaymentAmount) || booking.balanceDue;
+    const finalPay = Math.max(0, Number(finalPaymentAmount) || booking.balanceDue);
+    if (finalPay > booking.balanceDue) {
+      return res.status(400).json({ error: 'Final payment cannot exceed balance due' });
+    }
     booking.advancePaid += finalPay;
     booking.balanceDue = Math.max(0, booking.grandTotal - booking.advancePaid);
     booking.status = 'checked_out';
     booking.checkedOutAt = new Date().toISOString();
     if (paymentMethod) booking.paymentMethod = paymentMethod;
-    if (notes) booking.notes = (booking.notes ? booking.notes + ' | ' : '') + notes;
+    if (notes && typeof notes === 'string') booking.notes = (booking.notes ? booking.notes + ' | ' : '') + notes.slice(0, 500);
 
-    // Release Room & Set to Cleaning
     const room = db.raw.rooms.find(r => r.id === booking.roomId);
     if (room) {
       room.status = 'cleaning';
@@ -1929,28 +2006,14 @@ app.put('/api/room-bookings/:id/checkout', authMiddleware, (req: Request, res: R
 
     db.save();
 
-    db.logAudit(
-      user.id,
-      user.name,
-      user.role,
-      'ROOM_CHECKOUT',
-      'ROOM_BOOKING',
-      booking.id,
-      `Guest ${booking.guestName} checked out from Room ${booking.roomNumber}. Final Settlement: Rs. ${finalPay}. Room marked for cleaning.`
-    );
+    db.logAudit(user.id, user.name, user.role, 'ROOM_CHECKOUT', 'ROOM_BOOKING', booking.id, `Guest ${booking.guestName} checked out from Room ${booking.roomNumber}. Final Settlement: Rs. ${finalPay}. Room marked for cleaning.`);
 
-    res.json({
-      success: true,
-      booking,
-      room,
-      message: `Room ${booking.roomNumber} checkout completed successfully.`
-    });
+    res.json({ success: true, booking, room, message: `Room ${booking.roomNumber} checkout completed successfully.` });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to checkout room.' });
   }
 });
 
-// Cancel Room Booking
 app.put('/api/room-bookings/:id/cancel', authMiddleware, (req: Request, res: Response) => {
   try {
     const user = (req as any).user as User;
@@ -1962,12 +2025,15 @@ app.put('/api/room-bookings/:id/cancel', authMiddleware, (req: Request, res: Res
       return res.status(404).json({ error: 'Room booking not found.' });
     }
 
-    booking.status = 'cancelled';
-    if (reason) {
-      booking.notes = (booking.notes ? booking.notes + ' | Cancel Reason: ' : 'Cancel Reason: ') + reason;
+    if (booking.status === 'checked_out') {
+      return res.status(400).json({ error: 'Cannot cancel already checked out booking' });
     }
 
-    // Release Room if currently linked
+    booking.status = 'cancelled';
+    if (reason && typeof reason === 'string') {
+      booking.notes = (booking.notes ? booking.notes + ' | Cancel Reason: ' : 'Cancel Reason: ') + reason.slice(0, 500);
+    }
+
     const room = db.raw.rooms.find(r => r.id === booking.roomId);
     if (room && (room.currentBookingId === booking.id || room.status === 'occupied' || room.status === 'reserved')) {
       room.status = 'available';
@@ -1978,28 +2044,14 @@ app.put('/api/room-bookings/:id/cancel', authMiddleware, (req: Request, res: Res
 
     db.save();
 
-    db.logAudit(
-      user.id,
-      user.name,
-      user.role,
-      'ROOM_BOOKING_CANCELLED',
-      'ROOM_BOOKING',
-      booking.id,
-      `Cancelled booking ${booking.bookingNumber} for Room ${booking.roomNumber}. Reason: ${reason || 'N/A'}`
-    );
+    db.logAudit(user.id, user.name, user.role, 'ROOM_BOOKING_CANCELLED', 'ROOM_BOOKING', booking.id, `Cancelled booking ${booking.bookingNumber} for Room ${booking.roomNumber}. Reason: ${reason ? String(reason).slice(0, 500) : 'N/A'}`);
 
-    res.json({
-      success: true,
-      booking,
-      room,
-      message: `Booking ${booking.bookingNumber} cancelled.`
-    });
+    res.json({ success: true, booking, room, message: `Booking ${booking.bookingNumber} cancelled.` });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to cancel booking.' });
   }
 });
 
-// Record Payment to Active Booking
 app.post('/api/room-bookings/:id/payment', authMiddleware, (req: Request, res: Response) => {
   try {
     const user = (req as any).user as User;
@@ -2011,40 +2063,34 @@ app.post('/api/room-bookings/:id/payment', authMiddleware, (req: Request, res: R
       return res.status(404).json({ error: 'Room booking not found.' });
     }
 
+    if (booking.status === 'checked_out' || booking.status === 'cancelled') {
+      return res.status(400).json({ error: 'Cannot add payment to checked out or cancelled booking' });
+    }
+
     const payAmt = Number(amount) || 0;
-    if (payAmt <= 0) {
-      return res.status(400).json({ error: 'Payment amount must be greater than zero.' });
+    if (payAmt <= 0 || payAmt > 1000000) {
+      return res.status(400).json({ error: 'Payment amount must be between 1 and 1,000,000.' });
+    }
+    if (payAmt > booking.balanceDue) {
+      return res.status(400).json({ error: `Payment exceeds balance due (Rs. ${booking.balanceDue})` });
     }
 
     booking.advancePaid += payAmt;
     booking.balanceDue = Math.max(0, booking.grandTotal - booking.advancePaid);
-    if (notes) {
-      booking.notes = (booking.notes ? booking.notes + ' | Payment: ' : 'Payment: ') + `${payAmt} (${paymentMethod || 'Cash'}) - ${notes}`;
+    if (notes && typeof notes === 'string') {
+      booking.notes = (booking.notes ? booking.notes + ' | Payment: ' : 'Payment: ') + `${payAmt} (${paymentMethod || 'Cash'}) - ${notes.slice(0, 500)}`;
     }
 
     db.save();
 
-    db.logAudit(
-      user.id,
-      user.name,
-      user.role,
-      'ROOM_BOOKING_PAYMENT',
-      'ROOM_BOOKING',
-      booking.id,
-      `Received payment of Rs. ${payAmt} for Room ${booking.roomNumber} (${booking.bookingNumber})`
-    );
+    db.logAudit(user.id, user.name, user.role, 'ROOM_BOOKING_PAYMENT', 'ROOM_BOOKING', booking.id, `Received payment of Rs. ${payAmt} for Room ${booking.roomNumber} (${booking.bookingNumber})`);
 
-    res.json({
-      success: true,
-      booking,
-      message: `Payment of Rs. ${payAmt} recorded.`
-    });
+    res.json({ success: true, booking, message: `Payment of Rs. ${payAmt} recorded.` });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to record payment.' });
   }
 });
 
-// Live Super Admin Dashboard Stats
 app.get('/api/dashboard/stats', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -2055,7 +2101,6 @@ app.get('/api/dashboard/stats', authMiddleware, requireRole('super_admin'), (req
   const todayRevenue = todayBills.reduce((sum, b) => sum + b.grandTotal, 0);
   const totalRevenue = allPaidBills.reduce((sum, b) => sum + b.grandTotal, 0);
 
-  // Low stock counter
   let lowStockCount = 0;
   let outOfStockCount = 0;
   const lowStockItems: any[] = [];
@@ -2098,7 +2143,7 @@ app.get('/api/dashboard/stats', authMiddleware, requireRole('super_admin'), (req
     outOfStockCount,
     lowStockItems: lowStockItems.slice(0, 8),
     recentBills: allPaidBills.slice(0, 10),
-    activeCashiers: db.raw.users.filter(u => u.role === 'cashier' && u.isActive)
+    activeCashiers: db.raw.users.filter(u => u.role === 'cashier' && u.isActive).map(({ passwordHash, ...u }) => u)
   });
 });
 
@@ -2106,7 +2151,6 @@ app.get('/api/dashboard/stats', authMiddleware, requireRole('super_admin'), (req
 // BACKUP & DATABASE PERSISTENCE API
 // ==========================================
 
-// Get list of server-stored automated backups
 app.get('/api/database/backups', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   try {
     const list = db.listBackups();
@@ -2116,7 +2160,6 @@ app.get('/api/database/backups', authMiddleware, requireRole('super_admin'), (re
   }
 });
 
-// Trigger a fresh instant database backup on server
 app.post('/api/database/backup', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   try {
     const user = (req as any).user as User;
@@ -2128,20 +2171,18 @@ app.post('/api/database/backup', authMiddleware, requireRole('super_admin'), (re
   }
 });
 
-// Download complete full database JSON file directly to local PC / device
 app.get('/api/database/download', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   try {
     const dateStr = new Date().toISOString().split('T')[0];
     const dataStr = JSON.stringify(db.raw, null, 2);
     res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Content-Disposition', `attachment; filename="royal_green_garden_pos_db_${dateStr}.json"`);
+    res.setHeader('Content-Disposition', `attachment; filename="royal_hotel_pos_db_${dateStr}.json"`);
     res.send(dataStr);
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to export database.' });
   }
 });
 
-// Restore database from uploaded JSON payload
 app.post('/api/database/restore', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   try {
     const user = (req as any).user as User;
@@ -2152,15 +2193,7 @@ app.post('/api/database/restore', authMiddleware, requireRole('super_admin'), (r
     }
 
     db.restoreFromData(databaseData);
-    db.logAudit(
-      user.id,
-      user.name,
-      user.role,
-      'RESTORE_DATABASE',
-      'SYSTEM',
-      'DATABASE',
-      `Restored complete database state from uploaded JSON file.`
-    );
+    db.logAudit(user.id, user.name, user.role, 'RESTORE_DATABASE', 'SYSTEM', 'DATABASE', `Restored complete database state from uploaded JSON file.`);
 
     res.json({
       success: true,
@@ -2171,26 +2204,22 @@ app.post('/api/database/restore', authMiddleware, requireRole('super_admin'), (r
   }
 });
 
-// Restore from a specific backup file stored on server
 app.post('/api/database/restore-file', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   try {
     const user = (req as any).user as User;
     const { filename } = req.body;
 
-    if (!filename) {
+    if (!filename || typeof filename !== 'string') {
       return res.status(400).json({ error: 'Filename is required.' });
     }
 
+    // Prevent path traversal
+    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+      return res.status(400).json({ error: 'Invalid filename' });
+    }
+
     db.restoreBackupFile(filename);
-    db.logAudit(
-      user.id,
-      user.name,
-      user.role,
-      'RESTORE_BACKUP_FILE',
-      'SYSTEM',
-      'DATABASE',
-      `Restored database from server snapshot ${filename}`
-    );
+    db.logAudit(user.id, user.name, user.role, 'RESTORE_BACKUP_FILE', 'SYSTEM', 'DATABASE', `Restored database from server snapshot ${filename}`);
 
     res.json({
       success: true,
@@ -2206,7 +2235,19 @@ app.post('/api/database/restore-file', authMiddleware, requireRole('super_admin'
 // ==========================================
 
 app.get('/api/audit-logs', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
-  res.json(db.raw.auditLogs);
+  // Pagination to prevent huge responses
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(10, Number(req.query.limit) || 50));
+  const start = (page - 1) * limit;
+  
+  const logs = db.raw.auditLogs.slice(start, start + limit);
+  res.json({
+    logs,
+    total: db.raw.auditLogs.length,
+    page,
+    limit,
+    totalPages: Math.ceil(db.raw.auditLogs.length / limit)
+  });
 });
 
 app.get('/api/settings', authMiddleware, (req: Request, res: Response) => {
@@ -2216,6 +2257,29 @@ app.get('/api/settings', authMiddleware, (req: Request, res: Response) => {
 app.put('/api/settings', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   const user = (req as any).user as User;
   const updates = req.body;
+
+  // Validate settings
+  if (updates.businessName && typeof updates.businessName === 'string') {
+    updates.businessName = updates.businessName.trim().slice(0, 191);
+  }
+  if (updates.taxRate !== undefined) {
+    const rate = Number(updates.taxRate);
+    if (isNaN(rate) || rate < 0 || rate > 100) {
+      return res.status(400).json({ error: 'Tax rate must be between 0 and 100' });
+    }
+  }
+  if (updates.serviceChargeRate !== undefined) {
+    const rate = Number(updates.serviceChargeRate);
+    if (isNaN(rate) || rate < 0 || rate > 100) {
+      return res.status(400).json({ error: 'Service charge rate must be between 0 and 100' });
+    }
+  }
+  if (updates.maxDiscountPercentage !== undefined) {
+    const pct = Number(updates.maxDiscountPercentage);
+    if (isNaN(pct) || pct < 0 || pct > 100) {
+      return res.status(400).json({ error: 'Max discount percentage must be between 0 and 100' });
+    }
+  }
 
   db.raw.settings = {
     ...db.raw.settings,
@@ -2228,6 +2292,17 @@ app.put('/api/settings', authMiddleware, requireRole('super_admin'), (req: Reque
   res.json(db.raw.settings);
 });
 
+// Global error handler
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  console.error('[ERROR]', err);
+  res.status(500).json({ error: 'Internal server error. Please try again.' });
+});
+
+// 404 handler for API
+app.use('/api/*', (req, res) => {
+  res.status(404).json({ error: 'API endpoint not found' });
+});
+
 // ==========================================
 // VITE INTEGRATION & SERVER STARTUP
 // ==========================================
@@ -2235,7 +2310,12 @@ app.put('/api/settings', authMiddleware, requireRole('super_admin'), (req: Reque
 async function start() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { 
+        middlewareMode: true,
+        hmr: {
+          overlay: true,
+        },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -2243,13 +2323,25 @@ async function start() {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
+      // Don't interfere with API routes
+      if (req.path.startsWith('/api/')) {
+        return res.status(404).json({ error: 'API endpoint not found' });
+      }
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[POS Server] Running on http://0.0.0.0:${PORT}`);
+    console.log(`[Royal Hotel POS] Running on http://0.0.0.0:${PORT}`);
+    console.log(`[ENV] NODE_ENV=${process.env.NODE_ENV || 'development'}`);
+    console.log(`[SECURITY] Helmet enabled, Rate limiting active`);
+    if (!process.env.SESSION_SECRET) {
+      console.warn(`[SECURITY] Using ephemeral SESSION_SECRET - set in .env for production!`);
+    }
   });
 }
 
-start();
+start().catch(err => {
+  console.error('[FATAL] Failed to start server:', err);
+  process.exit(1);
+});

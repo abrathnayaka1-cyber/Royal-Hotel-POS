@@ -1,0 +1,21 @@
+<?php
+/**
+ * Hostinger Web Hosting Database Configuration Template
+ * Rename this file to config.php or populate your environment variables
+ */
+
+return [
+    'db' => [
+        'host'     => getenv('DB_HOST') ?: 'localhost',
+        'port'     => getenv('DB_PORT') ?: '3306',
+        'database' => getenv('DB_NAME') ?: 'u123456789_pos_db',
+        'username' => getenv('DB_USER') ?: 'u123456789_pos_user',
+        'password' => getenv('DB_PASS') ?: 'YourStrongDbPasswordHere',
+        'charset'  => 'utf8mb4',
+    ],
+    'app' => [
+        'name'        => 'Royal Green Garden POS',
+        'env'         => getenv('APP_ENV') ?: 'production',
+        'cors_origin' => '*',
+    ]
+];
