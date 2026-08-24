@@ -3148,17 +3148,30 @@ app.get('/api/reports/daily-stock-sheet', authMiddleware, (req: Request, res: Re
   let totalSold = 0;
   let totalValue = 0;
 
+  let allDepartmentTotal = 0;
+  let allDepartmentBar = 0;
+  let allDepartmentRestaurant = 0;
+
   db.raw.products.forEach(p => {
     if (p.isArchived || !p.isActive) return;
     
     const cat = categoriesMap.get(p.categoryId);
     const compName = p.companyId ? companiesMap.get(p.companyId) || 'In-House / Other' : 'In-House / Other';
-    if (categoryFilter !== 'all' && p.categoryId !== categoryFilter) return;
-    if (typeFilter === 'bar' && (p.isKitchenItem || cat?.type === 'restaurant')) return;
-    if (typeFilter === 'restaurant' && (!p.isKitchenItem && cat?.type !== 'restaurant')) return;
+    const isKitchen = Boolean(p.isKitchenItem || cat?.type === 'restaurant');
 
     p.variants.forEach(v => {
       if (!v.isActive) return;
+
+      allDepartmentTotal++;
+      if (isKitchen) {
+        allDepartmentRestaurant++;
+      } else {
+        allDepartmentBar++;
+      }
+
+      if (categoryFilter !== 'all' && p.categoryId !== categoryFilter) return;
+      if (typeFilter === 'bar' && isKitchen) return;
+      if (typeFilter === 'restaurant' && !isKitchen) return;
 
       const cleanProdName = p.name.replace(/Arrack|Brandy|Whisky|Vodka|Beer|DCSL|DCSCL/gi, '').trim();
       const cleanSize = v.size.replace(/Bottle|Flask|Quarter|Half|Large|Portion|Double|Single|Peg/gi, '').trim();
@@ -3183,10 +3196,13 @@ app.get('/api/reports/daily-stock-sheet', authMiddleware, (req: Request, res: Re
       const price = v.sellingPrice;
       const value = sold * price;
 
-      totalInHand += inHand;
-      totalReceived += received;
-      totalStock += stock;
-      totalBalance += balance;
+      // Countable physical stock: exclude auto-derived shot variants from physical unit totals to avoid double counting bottles
+      if (!isShot) {
+        totalInHand += inHand;
+        totalReceived += received;
+        totalStock += stock;
+        totalBalance += balance;
+      }
       totalSold += sold;
       totalValue += value;
 
@@ -3222,6 +3238,11 @@ app.get('/api/reports/daily-stock-sheet', authMiddleware, (req: Request, res: Re
     totalBalance,
     totalSold,
     totalValue,
+    departmentCounts: {
+      total: allDepartmentTotal,
+      bar: allDepartmentBar,
+      restaurant: allDepartmentRestaurant
+    },
     items
   });
 });
@@ -3723,18 +3744,34 @@ app.get('/api/dashboard/stats', authMiddleware, requireRole('super_admin'), (req
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
 
   const allPaidBills = db.raw.bills.filter(b => b.status === 'paid');
-  const todayBills = allPaidBills.filter(b => new Date(b.createdAt).getTime() >= todayStart);
+  const todayBills = allPaidBills.filter(b => new Date(b.paidAt || b.createdAt).getTime() >= todayStart);
 
   const todayRevenue = todayBills.reduce((sum, b) => sum + b.grandTotal, 0);
   const totalRevenue = allPaidBills.reduce((sum, b) => sum + b.grandTotal, 0);
+
+  const todayPaymentBreakdown: Record<string, { count: number; total: number }> = {
+    cash: { count: 0, total: 0 },
+    card: { count: 0, total: 0 },
+    bank_transfer: { count: 0, total: 0 },
+    other: { count: 0, total: 0 }
+  };
+  todayBills.forEach(b => {
+    const method = b.paymentMethod || 'cash';
+    if (!todayPaymentBreakdown[method]) {
+      todayPaymentBreakdown[method] = { count: 0, total: 0 };
+    }
+    todayPaymentBreakdown[method].count++;
+    todayPaymentBreakdown[method].total += b.grandTotal;
+  });
 
   let lowStockCount = 0;
   let outOfStockCount = 0;
   const lowStockItems: any[] = [];
 
   db.raw.products.forEach(p => {
-    if (p.isArchived) return;
+    if (p.isArchived || !p.isActive) return;
     p.variants.forEach(v => {
+      if (!v.isActive) return;
       // Shot sizes have no independent stock (they pour from the 750ml bottle) — skip alerts
       if (isShotVariant(p, v)) return;
       if (v.stock <= 0) {
@@ -3772,6 +3809,7 @@ app.get('/api/dashboard/stats', authMiddleware, requireRole('super_admin'), (req
     outOfStockCount,
     lowStockItems: lowStockItems.slice(0, 8),
     recentBills: allPaidBills.slice(0, 10),
+    todayPaymentBreakdown,
     activeCashiers: db.raw.users.filter(u => u.role === 'cashier' && u.isActive).map(({ passwordHash, ...u }) => u)
   });
 });

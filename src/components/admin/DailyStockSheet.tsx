@@ -73,10 +73,7 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
     setError(null);
     try {
       const params = new URLSearchParams({
-        date: date,
-        categoryId: selectedCategory,
-        type: selectedType,
-        search: searchQuery
+        date: date
       });
 
       const data = await fetchApi<DailyStockSheetReport>(`/reports/daily-stock-sheet?${params.toString()}`);
@@ -100,7 +97,7 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
 
   useEffect(() => {
     fetchDailySheet(selectedDate);
-  }, [selectedDate, selectedCategory, selectedType]);
+  }, [selectedDate]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -222,40 +219,124 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
     }
   };
 
-  // Export to CSV
+  // Formatted date string for display (e.g. 2026.08.23)
+  const displayFormattedDate = selectedDate.replace(/-/g, '.');
+
+  // Filtered items in memory based on search query, category, and type
+  const displayItems = useMemo(() => {
+    if (!report || !report.items) return [];
+    let items = report.items;
+
+    // Category filter
+    if (selectedCategory !== 'all') {
+      items = items.filter(it => it.categoryName === selectedCategory || (it as any).categoryId === selectedCategory);
+    }
+
+    // Department type filter
+    if (selectedType === 'bar') {
+      items = items.filter(it => !it.isKitchenItem);
+    } else if (selectedType === 'restaurant') {
+      items = items.filter(it => Boolean(it.isKitchenItem));
+    }
+
+    // Search query filter
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      items = items.filter(it => 
+        it.displayName.toLowerCase().includes(q) ||
+        it.productName.toLowerCase().includes(q) ||
+        it.categoryName.toLowerCase().includes(q) ||
+        (it.companyName && it.companyName.toLowerCase().includes(q)) ||
+        (it.size && it.size.toLowerCase().includes(q))
+      );
+    }
+
+    return items;
+  }, [report, selectedCategory, selectedType, searchQuery]);
+
+  // Computed summary totals based on current display items & real-time audit edits
+  const computedTotals = useMemo(() => {
+    let inHand = 0;
+    let received = 0;
+    let stock = 0;
+    let balance = 0;
+    let sold = 0;
+    let value = 0;
+
+    const hasCountable = displayItems.some(i => !i.isShot);
+
+    displayItems.forEach(item => {
+      const curBal = isAuditMode && editedBalances[item.variantId] !== undefined
+        ? editedBalances[item.variantId]
+        : item.balance;
+      const curSold = isAuditMode
+        ? Math.max(0, item.stock - curBal)
+        : item.sold;
+      const curVal = curSold * item.price;
+
+      // Countable physical stock (exclude auto-derived shot variants from physical unit totals unless only shots are viewed)
+      if (!item.isShot || !hasCountable) {
+        inHand += item.inHand;
+        received += item.received;
+        stock += item.stock;
+        balance += curBal;
+      }
+      sold += curSold;
+      value += curVal;
+    });
+
+    return { inHand, received, stock, balance, sold, value };
+  }, [displayItems, isAuditMode, editedBalances]);
+
+  // Department counts across entire catalog for selected date
+  const totalItemCount = report?.departmentCounts?.total ?? (report?.items?.length || 0);
+  const barItemCount = report?.departmentCounts?.bar ?? (report?.items?.filter(i => !i.isKitchenItem).length || 0);
+  const restaurantItemCount = report?.departmentCounts?.restaurant ?? (report?.items?.filter(i => i.isKitchenItem).length || 0);
+
+  // Export to CSV matching active view and audit adjustments
   const handleExportCSV = () => {
-    if (!report || report.items.length === 0) return;
+    if (!displayItems || displayItems.length === 0) return;
 
     const headers = ['No', 'Item Name', 'Size', 'In-Hand (Opening)', 'Received Today', 'Total Stock', 'Balance (Closing)', 'Sold Today', 'Price (Rs.)', 'Sales Value (Rs.)'];
-    const rows = report.items.map(item => [
-      item.no,
-      `"${item.displayName.replace(/"/g, '""')}"`,
-      `"${item.size.replace(/"/g, '""')}"`,
-      item.inHand,
-      item.received,
-      item.stock,
-      item.balance,
-      item.sold,
-      item.price.toFixed(2),
-      item.value.toFixed(2)
-    ]);
+    const rows = displayItems.map(item => {
+      const currentBalance = isAuditMode && editedBalances[item.variantId] !== undefined
+        ? editedBalances[item.variantId]
+        : item.balance;
+      const calculatedSold = isAuditMode 
+        ? Math.max(0, item.stock - currentBalance)
+        : item.sold;
+      const calculatedValue = calculatedSold * item.price;
+
+      return [
+        item.no,
+        `"${item.displayName.replace(/"/g, '""')}"`,
+        `"${item.size.replace(/"/g, '""')}"`,
+        item.inHand,
+        item.received,
+        item.stock,
+        currentBalance,
+        calculatedSold,
+        item.price.toFixed(2),
+        calculatedValue.toFixed(2)
+      ];
+    });
 
     // Add total row
     rows.push([
       'TOTAL',
       'SUMMARY TOTALS',
       '',
-      report.totalInHand,
-      report.totalReceived,
-      report.totalStock,
-      report.totalBalance,
-      report.totalSold,
+      computedTotals.inHand,
+      computedTotals.received,
+      computedTotals.stock,
+      computedTotals.balance,
+      computedTotals.sold,
       '',
-      report.totalValue.toFixed(2)
+      computedTotals.value.toFixed(2)
     ]);
 
     const csvContent = 'data:text/csv;charset=utf-8,' + 
-      `DAILY STOCK & SALES RECONCILIATION - ${report.formattedDate}\n` +
+      `DAILY STOCK & SALES RECONCILIATION - ${report?.formattedDate || displayFormattedDate}\n` +
       headers.join(',') + '\n' + 
       rows.map(e => e.join(',')).join('\n');
 
@@ -272,26 +353,6 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
   const handlePrint = () => {
     window.print();
   };
-
-  // Formatted date string for display (e.g. 2026.08.23)
-  const displayFormattedDate = selectedDate.replace(/-/g, '.');
-
-  // Filtered items in memory if query changed
-  const displayItems = useMemo(() => {
-    if (!report || !report.items) return [];
-    if (!searchQuery) return report.items;
-    const q = searchQuery.toLowerCase();
-    return report.items.filter(it => 
-      it.displayName.toLowerCase().includes(q) ||
-      it.productName.toLowerCase().includes(q) ||
-      it.categoryName.toLowerCase().includes(q)
-    );
-  }, [report, searchQuery]);
-
-  // Department counts
-  const totalItemCount = report?.items?.length || 0;
-  const barItemCount = report?.items?.filter(i => !i.isKitchenItem).length || 0;
-  const restaurantItemCount = report?.items?.filter(i => i.isKitchenItem).length || 0;
 
   return (
     <div id="admin-daily-stock-sheet-view" className="p-6 space-y-6 max-w-7xl mx-auto">
@@ -473,7 +534,7 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
         <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-2xl shadow-xs">
           <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">In-Hand (Open)</span>
           <div className="text-2xl lg:text-3xl font-black text-slate-900 dark:text-white mt-1 font-mono">
-            {report?.totalInHand?.toLocaleString() || '0'}
+            {computedTotals.inHand.toLocaleString()}
           </div>
           <div className="text-xs text-slate-400 mt-0.5">Opening stock</div>
         </div>
@@ -482,7 +543,7 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
         <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-2xl shadow-xs">
           <span className="text-[11px] font-bold uppercase tracking-wider text-blue-500 dark:text-blue-400">Received Today</span>
           <div className="text-2xl lg:text-3xl font-black text-blue-500 dark:text-blue-400 mt-1 font-mono">
-            +{report?.totalReceived?.toLocaleString() || '0'}
+            +{computedTotals.received.toLocaleString()}
           </div>
           <div className="text-xs text-blue-500/80 mt-0.5">Stock In today</div>
         </div>
@@ -491,7 +552,7 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
         <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-2xl shadow-xs">
           <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-500 dark:text-indigo-400">Total Stock</span>
           <div className="text-2xl lg:text-3xl font-black text-indigo-500 dark:text-indigo-400 mt-1 font-mono">
-            {report?.totalStock?.toLocaleString() || '0'}
+            {computedTotals.stock.toLocaleString()}
           </div>
           <div className="text-xs text-indigo-500/80 mt-0.5">In-Hand + Received</div>
         </div>
@@ -500,7 +561,7 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
         <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-2xl shadow-xs">
           <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Closing Balance</span>
           <div className="text-2xl lg:text-3xl font-black text-slate-900 dark:text-white mt-1 font-mono">
-            {report?.totalBalance?.toLocaleString() || '0'}
+            {computedTotals.balance.toLocaleString()}
           </div>
           <div className="text-xs text-slate-400 mt-0.5">Closing stock in-hand</div>
         </div>
@@ -509,7 +570,7 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
         <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-2xl shadow-xs">
           <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-500 dark:text-emerald-400">Units Sold</span>
           <div className="text-2xl lg:text-3xl font-black text-emerald-500 dark:text-emerald-400 mt-1 font-mono">
-            {report?.totalSold?.toLocaleString() || '0'}
+            {computedTotals.sold.toLocaleString()}
           </div>
           <div className="text-xs text-emerald-500/80 mt-0.5">Sales quantity today</div>
         </div>
@@ -518,7 +579,7 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
         <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-2xl shadow-xs">
           <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-500 dark:text-emerald-400">Sales Revenue</span>
           <div className="text-2xl lg:text-3xl font-black text-emerald-500 dark:text-emerald-400 mt-1 font-mono">
-            Rs. {report?.totalValue ? report.totalValue.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 }) : '0'}
+            Rs. {computedTotals.value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}
           </div>
           <div className="text-xs text-emerald-500/80 mt-0.5 font-medium">Sold × Selling Price</div>
         </div>
@@ -806,32 +867,32 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
             </tbody>
 
             {/* Total Summary Footer Row */}
-            {report && report.items.length > 0 && (
+            {displayItems && displayItems.length > 0 && (
               <tfoot>
                 <tr className="bg-slate-50 dark:bg-slate-950/90 border-t-2 border-slate-300 dark:border-slate-800 text-slate-900 dark:text-white font-mono font-bold text-xs">
                   <td colSpan={2} className="py-3.5 px-4 uppercase tracking-wider text-right font-sans font-black text-blue-400">
                     TOTAL SUMMARY
                   </td>
                   <td className="py-3.5 px-3 text-right text-slate-700 dark:text-slate-300">
-                    {report.totalInHand}
+                    {computedTotals.inHand}
                   </td>
                   <td className="py-3.5 px-3 text-right text-blue-500 dark:text-blue-400">
-                    +{report.totalReceived}
+                    +{computedTotals.received}
                   </td>
                   <td className="py-3.5 px-3 text-right text-indigo-500 dark:text-indigo-400">
-                    {report.totalStock}
+                    {computedTotals.stock}
                   </td>
                   <td className="py-3.5 px-3 text-right text-slate-900 dark:text-white">
-                    {report.totalBalance}
+                    {computedTotals.balance}
                   </td>
                   <td className="py-3.5 px-3 text-right text-emerald-500 dark:text-emerald-400 text-sm font-black">
-                    {report.totalSold}
+                    {computedTotals.sold}
                   </td>
                   <td className="py-3.5 px-3 text-right text-slate-400 font-sans text-[10px]">
                     LKR
                   </td>
                   <td className="py-3.5 px-4 text-right text-emerald-500 dark:text-emerald-400 text-sm font-black tracking-tight">
-                    Rs. {report.totalValue.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}
+                    Rs. {computedTotals.value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}
                   </td>
                   {!isAuditMode && <td className="print:hidden"></td>}
                 </tr>

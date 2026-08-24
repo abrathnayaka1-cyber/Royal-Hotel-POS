@@ -81,10 +81,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     $totalSold = 0;
     $totalValue = 0;
 
+    $allDepartmentTotal = 0;
+    $allDepartmentBar = 0;
+    $allDepartmentRestaurant = 0;
+
     foreach ($rows as $row) {
+        $isKitchen = (bool)$row['is_kitchen_item'] || $row['category_type'] === 'restaurant';
+        $allDepartmentTotal++;
+        if ($isKitchen) {
+            $allDepartmentRestaurant++;
+        } else {
+            $allDepartmentBar++;
+        }
+
         if ($categoryFilter !== 'all' && $row['category_id'] !== $categoryFilter) continue;
-        if ($typeFilter === 'bar' && ($row['is_kitchen_item'] || $row['category_type'] === 'restaurant')) continue;
-        if ($typeFilter === 'restaurant' && (!$row['is_kitchen_item'] && $row['category_type'] !== 'restaurant')) continue;
+        if ($typeFilter === 'bar' && $isKitchen) continue;
+        if ($typeFilter === 'restaurant' && !$isKitchen) continue;
 
         $cleanProdName = preg_replace('/(Arrack|Brandy|Whisky|Vodka|Beer|DCSL|DCSCL)/i', '', $row['product_name']);
         $cleanProdName = trim($cleanProdName);
@@ -108,10 +120,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         $price = (float)$row['selling_price'];
         $value = $sold * $price;
 
-        $totalInHand += $inHand;
-        $totalReceived += $received;
-        $totalStock += $stock;
-        $totalBalance += $balance;
+        $isShot = (bool)(isset($row['is_shot']) ? $row['is_shot'] : (preg_match('/(Peg|Shot|25ml|50ml|Single|Double)/i', $row['size'])));
+
+        if (!$isShot) {
+            $totalInHand += $inHand;
+            $totalReceived += $received;
+            $totalStock += $stock;
+            $totalBalance += $balance;
+        }
         $totalSold += $sold;
         $totalValue += $value;
 
@@ -131,7 +147,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             'price' => $price,
             'value' => $value,
             'costPrice' => (float)$row['cost_price'],
-            'isKitchenItem' => (bool)$row['is_kitchen_item']
+            'isKitchenItem' => (bool)$row['is_kitchen_item'],
+            'isShot' => $isShot
         ];
     }
 
@@ -144,6 +161,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         'totalBalance' => $totalBalance,
         'totalSold' => $totalSold,
         'totalValue' => $totalValue,
+        'departmentCounts' => [
+            'total' => $allDepartmentTotal,
+            'bar' => $allDepartmentBar,
+            'restaurant' => $allDepartmentRestaurant
+        ],
         'items' => $items
     ]);
     exit;
