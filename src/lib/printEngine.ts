@@ -570,6 +570,8 @@ export async function printRoomBookingTicket(
   const phone = settings?.phone || '+94 32 226 5500';
   const email = settings?.email || 'royalgreengardenputtalam@gmail.com';
   const footerText = settings?.receiptFooter || 'Thank you for staying at Royal Hotel! Have a wonderful stay.';
+  const itemChargesTotal = (booking.itemCharges || []).reduce((sum, charge) => sum + charge.total, 0);
+  const otherExtraCharges = Math.max(0, booking.extraCharges - itemChargesTotal);
 
   const is58mm = (settings?.thermalWidth || '80mm') === '58mm';
   const pageWidth = is58mm ? '58mm' : '80mm';
@@ -806,10 +808,15 @@ export async function printRoomBookingTicket(
             <td>Room Charge (${booking.durationDays}d):</td>
             <td class="text-right">${formatCurrency(booking.totalRoomCharge, currencySymbol)}</td>
           </tr>
-          ${booking.extraCharges > 0 ? `
+          ${(booking.itemCharges || []).flatMap(charge => charge.items.map(item => `
+          <tr>
+            <td>${escapeHtml(item.productName)} (${escapeHtml(item.size)}) × ${item.quantity}</td>
+            <td class="text-right">${formatCurrency(item.total, currencySymbol)}</td>
+          </tr>`)).join('')}
+          ${otherExtraCharges > 0 ? `
           <tr>
             <td>Extra Services / Bed:</td>
-            <td class="text-right">${formatCurrency(booking.extraCharges, currencySymbol)}</td>
+            <td class="text-right">${formatCurrency(otherExtraCharges, currencySymbol)}</td>
           </tr>` : ''}
           ${booking.tax > 0 ? `
           <tr>

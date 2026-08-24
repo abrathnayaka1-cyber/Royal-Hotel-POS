@@ -144,6 +144,13 @@ export interface RoomBooking {
   createdAt: string;
   checkedInAt?: string;
   checkedOutAt?: string;
+  itemCharges?: Array<{
+    billId: string;
+    billNumber: string;
+    items: OrderItem[];
+    total: number;
+    chargedAt: string;
+  }>;
 }
 
 export interface HeldBill {
@@ -184,8 +191,8 @@ export interface KOT {
   updatedAt: string;
 }
 
-export type PaymentMethod = 'cash' | 'card' | 'bank_transfer' | 'other' | 'split';
-export type BillStatus = 'paid' | 'held' | 'cancelled' | 'voided';
+export type PaymentMethod = 'cash' | 'card' | 'bank_transfer' | 'other' | 'split' | 'room_charge';
+export type BillStatus = 'paid' | 'held' | 'charged_to_room' | 'cancelled' | 'voided';
 
 export interface Bill {
   id: string;
@@ -209,6 +216,8 @@ export interface Bill {
   changeAmount: number;
   paymentMethod: PaymentMethod;
   paymentDetails?: any;
+  roomBookingId?: string;
+  roomNumber?: string;
   status: BillStatus;
   notes?: string;
   createdAt: string;
