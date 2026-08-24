@@ -101,6 +101,11 @@ export const CartPanel: React.FC = () => {
           <h3 className="font-bold text-slate-800 dark:text-white uppercase tracking-wider text-xs sm:text-sm">
             Current Order
           </h3>
+          {totalItemsCount > 0 && (
+            <span className="text-[10px] font-bold px-1.5 py-0.5 bg-blue-100 dark:bg-blue-950 text-blue-800 dark:text-blue-300 rounded">
+              {totalItemsCount} {totalItemsCount === 1 ? 'item' : 'items'}
+            </span>
+          )}
           {heldBills.length > 0 && (
             <button
               onClick={() => setIsHeldBillsModalOpen(true)}

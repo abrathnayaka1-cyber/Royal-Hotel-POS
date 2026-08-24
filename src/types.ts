@@ -317,6 +317,11 @@ export interface DailyStockSheetReport {
   totalBalance: number;
   totalSold: number;
   totalValue: number;
+  departmentCounts?: {
+    total: number;
+    bar: number;
+    restaurant: number;
+  };
   items: DailyStockSheetItem[];
 }
 

@@ -41,6 +41,7 @@ interface DashboardData {
   outOfStockCount: number;
   lowStockItems: any[];
   recentBills: Bill[];
+  todayPaymentBreakdown?: Record<string, { count: number; total: number }>;
   activeCashiers: any[];
 }
 
@@ -81,13 +82,20 @@ export const AdminDashboard: React.FC<{ settings: SystemSettings | null; onNavig
   const avgBillToday =
     data && data.todayBillsCount > 0 ? Math.round(data.todayRevenue / data.todayBillsCount) : 0;
 
-  // Aggregate payment methods for today / recent
-  const paymentData = [
-    { name: 'Cash', value: data?.recentBills.filter(b => b.paymentMethod === 'cash').reduce((s, b) => s + b.grandTotal, 0) || 0 },
-    { name: 'Card', value: data?.recentBills.filter(b => b.paymentMethod === 'card').reduce((s, b) => s + b.grandTotal, 0) || 0 },
-    { name: 'Bank Transfer', value: data?.recentBills.filter(b => b.paymentMethod === 'bank_transfer').reduce((s, b) => s + b.grandTotal, 0) || 0 },
-    { name: 'Other', value: data?.recentBills.filter(b => b.paymentMethod === 'other').reduce((s, b) => s + b.grandTotal, 0) || 0 },
-  ].filter(p => p.value > 0);
+  // Aggregate payment methods for today (or fallback to recent bills)
+  const paymentData = data?.todayPaymentBreakdown
+    ? [
+        { name: 'Cash', value: data.todayPaymentBreakdown.cash?.total || 0 },
+        { name: 'Card', value: data.todayPaymentBreakdown.card?.total || 0 },
+        { name: 'Bank Transfer', value: data.todayPaymentBreakdown.bank_transfer?.total || 0 },
+        { name: 'Other', value: data.todayPaymentBreakdown.other?.total || 0 },
+      ].filter(p => p.value > 0)
+    : [
+        { name: 'Cash', value: data?.recentBills.filter(b => b.paymentMethod === 'cash').reduce((s, b) => s + b.grandTotal, 0) || 0 },
+        { name: 'Card', value: data?.recentBills.filter(b => b.paymentMethod === 'card').reduce((s, b) => s + b.grandTotal, 0) || 0 },
+        { name: 'Bank Transfer', value: data?.recentBills.filter(b => b.paymentMethod === 'bank_transfer').reduce((s, b) => s + b.grandTotal, 0) || 0 },
+        { name: 'Other', value: data?.recentBills.filter(b => b.paymentMethod === 'other').reduce((s, b) => s + b.grandTotal, 0) || 0 },
+      ].filter(p => p.value > 0);
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto">

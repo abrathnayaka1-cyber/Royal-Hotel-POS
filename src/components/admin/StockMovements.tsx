@@ -89,7 +89,8 @@ export const StockMovements: React.FC = () => {
   const totalWastage = filteredMovements
     .filter(m => {
       const t = String((m as any).type || m.movementType || '').toUpperCase();
-      return t.includes('STOCK_OUT') || t.includes('DAMAGED') || t.includes('EXPIRED');
+      const qty = (m as any).quantity !== undefined ? (m as any).quantity : m.quantityChange;
+      return t.includes('STOCK_OUT') || t.includes('DAMAGED') || t.includes('EXPIRED') || (t.includes('ADJUST') && qty < 0);
     })
     .reduce((acc, m) => acc + Math.abs((m as any).quantity !== undefined ? (m as any).quantity : m.quantityChange), 0);
 
