@@ -12,6 +12,7 @@ import { KOTModal } from './KOTModal.tsx';
 import { ReceiptModal } from './ReceiptModal.tsx';
 import { RoomBookingModal } from './RoomBookingModal.tsx';
 import { RoomBookingTicketModal } from './RoomBookingTicketModal.tsx';
+import { DamageReportModal } from './DamageReportModal.tsx';
 import { BarcodeScannerListener } from './BarcodeScannerListener.tsx';
 import { usePOS } from '../../context/POSContext.tsx';
 import { Loader2 } from 'lucide-react';
@@ -78,6 +79,7 @@ export const POSScreen: React.FC = () => {
       <ReceiptModal />
       <RoomBookingModal />
       <RoomBookingTicketModal />
+      <DamageReportModal />
     </div>
   );
 };

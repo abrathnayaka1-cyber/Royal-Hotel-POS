@@ -69,6 +69,8 @@ interface POSContextType {
   closeVariantModal: () => void;
   addToCart: (product: Product, variant: ProductVariant, quantity?: number, itemNotes?: string) => void;
   availableStockFor: (variant: ProductVariant) => number;
+  isDamageModalOpen: boolean;
+  setIsDamageModalOpen: (open: boolean) => void;
   updateCartQuantity: (variantId: string, quantity: number) => void;
   removeFromCart: (variantId: string) => void;
   clearCart: () => void;
@@ -133,6 +135,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [selectedProductForVariant, setSelectedProductForVariant] = useState<Product | null>(null);
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState<boolean>(false);
   const [isHeldBillsModalOpen, setIsHeldBillsModalOpen] = useState<boolean>(false);
+  const [isDamageModalOpen, setIsDamageModalOpen] = useState<boolean>(false);
   const [isReceiptModalOpen, setIsReceiptModalOpen] = useState<boolean>(false);
   const [isKOTModalOpen, setIsKOTModalOpen] = useState<boolean>(false);
 
@@ -724,6 +727,8 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         closeVariantModal,
         addToCart,
         availableStockFor,
+        isDamageModalOpen,
+        setIsDamageModalOpen,
         updateCartQuantity,
         removeFromCart,
         clearCart,

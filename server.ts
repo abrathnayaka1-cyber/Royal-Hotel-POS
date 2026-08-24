@@ -1460,6 +1460,89 @@ app.post('/api/inventory/adjust', authMiddleware, requireRole('super_admin'), (r
   res.json({ message: 'Stock updated successfully', variant: targetVariant });
 });
 
+// ==========================================
+// POS DAMAGE / BREAKAGE REPORTING (CASHIER-ACCESSIBLE)
+// ==========================================
+
+/**
+ * Lets ANY logged-in user (cashier included) note damaged / broken bottles
+ * straight from the POS. Deducts stock with a 'damaged' movement and a full
+ * audit trail so admins can review every report.
+ */
+app.post('/api/inventory/damage-report', authMiddleware, (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const { variantId, quantity, reason, openBottle } = req.body;
+
+  const note = typeof reason === 'string' ? reason.trim().slice(0, 500) : '';
+  if (note.length < 3) {
+    return res.status(400).json({ error: 'Please write a short note describing how the damage/breakage happened.' });
+  }
+
+  const found = findVariantById(typeof variantId === 'string' ? variantId : '');
+  if (!found) return res.status(404).json({ error: 'Product variant not found.' });
+  const { product, variant } = found;
+
+  if (isShotVariant(product, variant)) {
+    return res.status(400).json({ error: 'Shot sizes have no bottles of their own — report the damage on the 750ml Bottle instead.' });
+  }
+
+  // Breaking the currently OPEN bottle of a shot-serving product:
+  // one bottle is lost AND the remaining ml inside it is written off.
+  const bottle = product.servesShots ? getBottleVariant(product) : null;
+  const usedMl = Math.max(0, Number(product.openBottleUsedMl) || 0);
+  const isOpenBottleBreak = Boolean(openBottle) && Boolean(bottle) && bottle!.id === variant.id && usedMl > 0;
+
+  const numQty = isOpenBottleBreak ? 1 : Number(quantity);
+  if (!Number.isFinite(numQty) || !Number.isInteger(numQty) || numQty < 1 || numQty > 1000) {
+    return res.status(400).json({ error: 'Damaged quantity must be a whole number between 1 and 1,000.' });
+  }
+
+  if (!db.raw.settings.allowNegativeStock && variant.stock - numQty < 0) {
+    return res.status(400).json({ error: `Cannot report more than the stock on hand. Current stock: ${variant.stock}, reported: ${numQty}.` });
+  }
+
+  const beforeQty = variant.stock;
+  variant.stock -= numQty;
+
+  let extraDetail = '';
+  if (isOpenBottleBreak) {
+    extraDetail = ` [OPEN bottle broken — ${BOTTLE_ML - usedMl}ml remaining liquid lost]`;
+    product.openBottleUsedMl = 0;
+  }
+
+  db.recordStockMovement(
+    product.id,
+    product.name,
+    variant.id,
+    variant.size,
+    -numQty,
+    beforeQty,
+    variant.stock,
+    'damaged',
+    user.id,
+    user.name,
+    `POS damage/breakage report by ${user.name}: ${note}${extraDetail}`
+  );
+
+  db.save();
+  db.logAudit(
+    user.id,
+    user.name,
+    user.role,
+    'DAMAGE_REPORT',
+    'INVENTORY',
+    variant.id,
+    `Reported ${numQty} damaged x ${product.name} (${variant.size}). Note: ${note}${extraDetail}. New stock: ${variant.stock}`
+  );
+
+  res.status(201).json({
+    message: isOpenBottleBreak
+      ? `Open bottle breakage recorded — 1 x ${variant.size} written off (${BOTTLE_ML - usedMl}ml liquid lost). Admin has been notified via the audit log.`
+      : `${numQty} x ${product.name} (${variant.size}) recorded as damaged. Admin has been notified via the audit log.`,
+    newStock: variant.stock
+  });
+});
+
 const getStockMovementsHandler = (req: Request, res: Response) => {
   const categoriesMap = new Map(db.raw.categories.map(c => [c.id, c.name]));
   const companiesMap = new Map(db.raw.companies.map(c => [c.id, c.name]));

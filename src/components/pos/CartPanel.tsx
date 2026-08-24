@@ -15,7 +15,8 @@ import {
   Car,
   Home,
   MessageSquare,
-  Printer
+  Printer,
+  AlertTriangle
 } from 'lucide-react';
 
 export const CartPanel: React.FC = () => {
@@ -44,6 +45,7 @@ export const CartPanel: React.FC = () => {
     setIsPaymentModalOpen,
     setIsHeldBillsModalOpen,
     setIsKOTModalOpen,
+    setIsDamageModalOpen,
     heldBills,
     settings,
   } = usePOS();
@@ -108,9 +110,20 @@ export const CartPanel: React.FC = () => {
             </button>
           )}
         </div>
-        <span className="bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300 text-xs px-2.5 py-0.5 rounded-md font-extrabold">
-          #ORD-{cart.length > 0 ? (cart.length * 1024 % 9000 + 1000) : '8402'}
-        </span>
+        <div className="flex items-center gap-1.5">
+          <button
+            id="open-damage-report-btn"
+            onClick={() => setIsDamageModalOpen(true)}
+            title="Report damaged / broken bottles (stock write-off note)"
+            className="text-[10px] font-extrabold uppercase px-2 py-0.5 bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300 hover:bg-rose-200 dark:hover:bg-rose-900 rounded cursor-pointer flex items-center gap-1 transition-colors"
+          >
+            <AlertTriangle className="w-3 h-3" />
+            Damage
+          </button>
+          <span className="bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300 text-xs px-2.5 py-0.5 rounded-md font-extrabold">
+            #ORD-{cart.length > 0 ? (cart.length * 1024 % 9000 + 1000) : '8402'}
+          </span>
+        </div>
       </div>
 
       {/* Order Type & Table Quick Bar */}
