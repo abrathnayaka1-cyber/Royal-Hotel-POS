@@ -14,6 +14,7 @@ export const CategoryCompanyManagement: React.FC = () => {
   const [catName, setCatName] = useState<string>('');
   const [catType, setCatType] = useState<CategoryType>('bar');
   const [catDescription, setCatDescription] = useState<string>('');
+  const [catHiddenInPOS, setCatHiddenInPOS] = useState<boolean>(false);
 
   // Company Modal State
   const [isCompModalOpen, setIsCompModalOpen] = useState<boolean>(false);
@@ -53,11 +54,13 @@ export const CategoryCompanyManagement: React.FC = () => {
       setCatName(cat.name);
       setCatType(cat.type);
       setCatDescription(cat.description || '');
+      setCatHiddenInPOS(cat.hiddenInPOS === true);
     } else {
       setEditingCat(null);
       setCatName('');
       setCatType('bar');
       setCatDescription('');
+      setCatHiddenInPOS(false);
     }
     setErrorMsg(null);
     setIsCatModalOpen(true);
@@ -71,12 +74,12 @@ export const CategoryCompanyManagement: React.FC = () => {
       if (editingCat) {
         await fetchApi(`/categories/${editingCat.id}`, {
           method: 'PUT',
-          body: JSON.stringify({ name: catName, type: catType, description: catDescription }),
+          body: JSON.stringify({ name: catName, type: catType, description: catDescription, hiddenInPOS: catHiddenInPOS }),
         });
       } else {
         await fetchApi('/categories', {
           method: 'POST',
-          body: JSON.stringify({ name: catName, type: catType, description: catDescription }),
+          body: JSON.stringify({ name: catName, type: catType, description: catDescription, hiddenInPOS: catHiddenInPOS }),
         });
       }
       setIsCatModalOpen(false);
@@ -190,6 +193,11 @@ export const CategoryCompanyManagement: React.FC = () => {
                       <span className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
                         {cat.type}
                       </span>
+                      {cat.hiddenInPOS && (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase bg-amber-100 dark:bg-amber-950/50 text-amber-700 dark:text-amber-400">
+                          Hidden in POS
+                        </span>
+                      )}
                     </div>
                     {cat.description && (
                       <p className="text-[11px] text-slate-400 mt-0.5">{cat.description}</p>
@@ -316,6 +324,19 @@ export const CategoryCompanyManagement: React.FC = () => {
                   className="w-full text-xs px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
                 />
               </div>
+
+              <label className="flex items-start gap-2.5 p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 rounded-xl cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={catHiddenInPOS}
+                  onChange={e => setCatHiddenInPOS(e.target.checked)}
+                  className="mt-0.5 w-3.5 h-3.5 accent-amber-600"
+                />
+                <span>
+                  <span className="text-xs font-bold text-amber-800 dark:text-amber-300 block">Hide from Cashier POS interface</span>
+                  <span className="text-[11px] text-amber-600 dark:text-amber-500">Category button will not appear on the cashier POS screen. Items stay reachable via FOOD &amp; KITCHEN / type filters &amp; ALL ITEMS. Visible in this Admin panel only.</span>
+                </span>
+              </label>
 
               <div className="flex justify-end gap-2 pt-2">
                 <button

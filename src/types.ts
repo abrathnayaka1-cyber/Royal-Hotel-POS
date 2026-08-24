@@ -23,6 +23,8 @@ export interface Category {
   icon?: string;
   isActive: boolean;
   displayOrder?: number;
+  /** Hidden from the cashier POS sidebar — visible/manageable in Super Admin panel only. */
+  hiddenInPOS?: boolean;
 }
 
 export interface Company {

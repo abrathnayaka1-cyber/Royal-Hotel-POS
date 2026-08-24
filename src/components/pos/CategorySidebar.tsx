@@ -30,7 +30,10 @@ export const CategorySidebar: React.FC = () => {
     return Layers;
   };
 
-  const activeCategories = categories.filter(c => c.isActive);
+  // Categories flagged hiddenInPOS stay out of the cashier interface entirely —
+  // their items remain reachable via the type filters (FOOD & KITCHEN etc.) and
+  // ALL ITEMS, while the category itself is managed in the Super Admin panel only.
+  const activeCategories = categories.filter(c => c.isActive && !c.hiddenInPOS);
   const occupiedRoomsCount = rooms.filter(r => r.status === 'occupied').length;
 
   return (
