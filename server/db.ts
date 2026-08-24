@@ -42,6 +42,14 @@ export interface ProductVariant {
   stock: number;
   minStockLevel: number;
   isActive: boolean;
+  /**
+   * Shot / peg poured from the 750ml bottle stock.
+   * Shot variants keep NO independent stock — every shot sold reduces the
+   * 750ml bottle stock (via the product's open-bottle ml tracker).
+   */
+  isShot?: boolean;
+  /** Pour volume in ml for shot variants (e.g. 100, 50, 25). */
+  shotVolumeMl?: number;
 }
 
 export interface Product {
@@ -57,6 +65,10 @@ export interface Product {
   isArchived?: boolean;
   createdAt: string;
   variants: ProductVariant[];
+  /** When true, this item serves shots (100/50/25ml) poured from its 750ml bottle stock. */
+  servesShots?: boolean;
+  /** ml already poured (sold as shots) from the currently open 750ml bottle. 0..749 */
+  openBottleUsedMl?: number;
 }
 
 export interface OrderItem {
@@ -343,7 +355,7 @@ const initialCompanies: Company[] = [
 ];
 
 const initialProducts: Product[] = [
-  // Rockland Old Arrack / Gal Arrack
+  // Rockland Old Arrack / Gal Arrack — serves shots poured from the 750ml bottle stock
   {
     id: 'prod-1',
     name: 'Rockland Old Arrack (Gal Arrack)',
@@ -352,14 +364,16 @@ const initialProducts: Product[] = [
     description: 'Traditional blended coconut spirit aged in teak vats.',
     isKitchenItem: false,
     isActive: true,
+    servesShots: true,
+    openBottleUsedMl: 0,
     createdAt: new Date().toISOString(),
     variants: [
       { id: 'var-1-750', productId: 'prod-1', size: '750ml Bottle', sku: 'RK-ARR-750', costPrice: 3100, sellingPrice: 3850, stock: 24, minStockLevel: 5, isActive: true },
       { id: 'var-1-375', productId: 'prod-1', size: '375ml Half', sku: 'RK-ARR-375', costPrice: 1600, sellingPrice: 1980, stock: 36, minStockLevel: 6, isActive: true },
       { id: 'var-1-180', productId: 'prod-1', size: '180ml Quarter', sku: 'RK-ARR-180', costPrice: 800, sellingPrice: 1050, stock: 45, minStockLevel: 10, isActive: true },
-      { id: 'var-1-100', productId: 'prod-1', size: '100ml Shot Plus', sku: 'RK-ARR-100', costPrice: 460, sellingPrice: 620, stock: 50, minStockLevel: 10, isActive: true },
-      { id: 'var-1-50', productId: 'prod-1', size: '50ml Peg / Double', sku: 'RK-ARR-50', costPrice: 230, sellingPrice: 330, stock: 90, minStockLevel: 15, isActive: true },
-      { id: 'var-1-25', productId: 'prod-1', size: '25ml Single Shot', sku: 'RK-ARR-25', costPrice: 120, sellingPrice: 180, stock: 120, minStockLevel: 20, isActive: true },
+      { id: 'var-1-100', productId: 'prod-1', size: '100ml Shot Plus', sku: 'RK-ARR-100', costPrice: 460, sellingPrice: 620, stock: 0, minStockLevel: 0, isActive: true, isShot: true, shotVolumeMl: 100 },
+      { id: 'var-1-50', productId: 'prod-1', size: '50ml Peg / Double', sku: 'RK-ARR-50', costPrice: 230, sellingPrice: 330, stock: 0, minStockLevel: 0, isActive: true, isShot: true, shotVolumeMl: 50 },
+      { id: 'var-1-25', productId: 'prod-1', size: '25ml Single Shot', sku: 'RK-ARR-25', costPrice: 120, sellingPrice: 180, stock: 0, minStockLevel: 0, isActive: true, isShot: true, shotVolumeMl: 25 },
     ]
   },
   // DCSL Extra Special Arrack
@@ -830,6 +844,20 @@ export class Database {
           // Ensure roomBookings array exists
           if (!Array.isArray(parsed.roomBookings)) {
             parsed.roomBookings = [];
+          }
+
+          // Normalize shot-serving products (shots pour from the 750ml bottle stock)
+          if (Array.isArray(parsed.products)) {
+            parsed.products.forEach((p: Product) => {
+              if (p.servesShots) {
+                const used = Number(p.openBottleUsedMl);
+                p.openBottleUsedMl = Number.isFinite(used) && used > 0 ? used % 750 : 0;
+                // Shot variants never hold independent stock
+                (p.variants || []).forEach(v => {
+                  if (v.isShot) v.stock = 0;
+                });
+              }
+            });
           }
 
           // Ensure counters has bookingSeq

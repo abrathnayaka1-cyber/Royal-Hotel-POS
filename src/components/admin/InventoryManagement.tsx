@@ -32,6 +32,8 @@ interface VariantInventoryItem {
   minStockLevel: number;
   isActive: boolean;
   status: 'IN_STOCK' | 'LOW_STOCK' | 'OUT_OF_STOCK';
+  isShot?: boolean;
+  shotVolumeMl?: number;
 }
 
 export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> = ({ settings }) => {
@@ -106,12 +108,13 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
     }
   };
 
-  // Calculations
-  const totalStockUnits = items.reduce((sum, i) => sum + (i.stock || 0), 0);
-  const totalCostValuation = items.reduce((sum, i) => sum + (i.stock || 0) * (i.costPrice || 0), 0);
-  const totalRetailValuation = items.reduce((sum, i) => sum + (i.stock || 0) * (i.sellingPrice || 0), 0);
-  const lowStockCount = items.filter(i => i.status === 'LOW_STOCK' || (i.stock <= i.minStockLevel && i.stock > 0)).length;
-  const outOfStockCount = items.filter(i => i.status === 'OUT_OF_STOCK' || i.stock <= 0).length;
+  // Calculations (shot sizes share the 750ml bottle liquid — exclude them so nothing is double-counted)
+  const countable = items.filter(i => !i.isShot);
+  const totalStockUnits = countable.reduce((sum, i) => sum + (i.stock || 0), 0);
+  const totalCostValuation = countable.reduce((sum, i) => sum + (i.stock || 0) * (i.costPrice || 0), 0);
+  const totalRetailValuation = countable.reduce((sum, i) => sum + (i.stock || 0) * (i.sellingPrice || 0), 0);
+  const lowStockCount = countable.filter(i => i.status === 'LOW_STOCK' || (i.stock <= i.minStockLevel && i.stock > 0)).length;
+  const outOfStockCount = countable.filter(i => i.status === 'OUT_OF_STOCK' || i.stock <= 0).length;
 
   const filteredItems = items.filter(item => {
     if (statusFilter !== 'all' && item.status !== statusFilter) return false;
@@ -255,6 +258,11 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
                     </div>
                     <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
                       <span className="font-semibold text-blue-600 dark:text-blue-400">{item.size}</span>
+                      {item.isShot && (
+                        <span className="px-1.5 py-0.5 bg-purple-50 text-purple-700 dark:bg-purple-950/50 dark:text-purple-300 rounded font-bold text-[9px] uppercase" title="Shots are deducted from the 750ml Bottle total stock">
+                          🥃 Shot • from 750ml
+                        </span>
+                      )}
                       {item.companyName && <span>• {item.companyName}</span>}
                     </div>
                   </td>
@@ -276,7 +284,7 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
                       {item.stock}
                     </span>
                     <span className="text-[10px] text-slate-400 block font-normal">
-                      Min: {item.minStockLevel}
+                      {item.isShot ? 'Shots left (auto)' : `Min: ${item.minStockLevel}`}
                     </span>
                   </td>
 
@@ -297,6 +305,11 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
                   </td>
 
                   <td className="py-3 px-4 text-right">
+                    {item.isShot ? (
+                      <span className="text-[10px] font-semibold text-slate-400 italic" title="Shots have no independent stock — adjust the 750ml Bottle row instead">
+                        Auto from 750ml Bottle
+                      </span>
+                    ) : (
                     <div className="flex items-center justify-end gap-1.5">
                       <button
                         onClick={() => openActionModal('IN', item)}
@@ -324,6 +337,7 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
                         Adjust
                       </button>
                     </div>
+                    )}
                   </td>
                 </tr>
               ))}

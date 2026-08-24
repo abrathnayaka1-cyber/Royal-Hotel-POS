@@ -642,9 +642,10 @@ app.get('/api/products', authMiddleware, (req: Request, res: Response) => {
   if (user.role === 'cashier') {
     const activeProducts = db.raw.products
       .filter(p => p.isActive && !p.isArchived)
+      .map(p => productForClient(p))
       .map(p => ({
         ...p,
-        variants: p.variants.filter(v => v.isActive)
+        variants: p.variants.filter((v: ProductVariant) => v.isActive)
       }));
     return res.json(activeProducts);
   }
@@ -654,13 +655,13 @@ app.get('/api/products', authMiddleware, (req: Request, res: Response) => {
     ? db.raw.products
     : db.raw.products.filter(p => !p.isArchived);
 
-  res.json(products);
+  res.json(products.map(p => productForClient(p)));
 });
 
 app.get('/api/products/:id', authMiddleware, (req: Request, res: Response) => {
   const product = db.raw.products.find(p => p.id === req.params.id);
   if (!product) return res.status(404).json({ error: 'Product not found.' });
-  res.json(product);
+  res.json(productForClient(product));
 });
 
 /** Returns an error message when a SKU / barcode is duplicated inside the payload or already used by another product. */
@@ -729,9 +730,32 @@ function validateVariantPrices(variants: any[]): string | null {
   return null;
 }
 
+/** Validates shot configuration: shot rows need a valid pour volume and a 750ml source bottle must exist. */
+function validateShotSetup(servesShots: boolean, variants: any[]): string | null {
+  const shotRows = (variants || []).filter((v: any) => v && v.isShot);
+  if (!servesShots) {
+    if (shotRows.length > 0) return 'Shot sizes defined but "Serves Shots" is turned off. Enable it or remove the shot sizes.';
+    return null;
+  }
+  if (shotRows.length === 0) {
+    return 'Serves Shots is enabled but no shot sizes (100ml / 50ml / 25ml) were defined.';
+  }
+  for (const v of shotRows) {
+    const vol = Number(v.shotVolumeMl) || parseMlFromSize(String(v.size || '')) || 0;
+    if (!(vol > 0 && vol < BOTTLE_ML)) {
+      return `Shot size "${v.size || 'shot'}" must have a pour volume between 1ml and 749ml (e.g. 100ml, 50ml, 25ml).`;
+    }
+  }
+  const hasBottle = (variants || []).some((v: any) => v && !v.isShot && parseMlFromSize(String(v.size || '')) === BOTTLE_ML);
+  if (!hasBottle) {
+    return 'A 750ml Bottle size is required to serve shots — shots are deducted from the 750ml bottle total stock.';
+  }
+  return null;
+}
+
 app.post('/api/products', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   const user = (req as any).user as User;
-  const { name, categoryId, companyId, description, image, isKitchenItem, taxRate, variants } = req.body;
+  const { name, categoryId, companyId, description, image, isKitchenItem, taxRate, variants, servesShots } = req.body;
 
   if (!name || typeof name !== 'string' || !name.trim() || !categoryId || !Array.isArray(variants) || variants.length === 0) {
     return res.status(400).json({ error: 'Product name, category, and at least one size/variant are required.' });
@@ -748,11 +772,16 @@ app.post('/api/products', authMiddleware, requireRole('super_admin'), (req: Requ
   const codeError = validateVariantCodes(variants);
   if (codeError) return res.status(400).json({ error: codeError });
 
+  const shotError = validateShotSetup(Boolean(servesShots), variants);
+  if (shotError) return res.status(400).json({ error: shotError });
+
   const productId = `prod-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
   const usedSkus = new Set<string>();
   const formattedVariants: ProductVariant[] = variants.map((v: any, index: number) => {
     const variantId = `var-${productId.replace('prod-', '')}-${index + 1}-${crypto.randomBytes(2).toString('hex')}`;
-    const initialStock = Math.max(0, Number(v.stock || 0));
+    const isShot = Boolean(servesShots) && Boolean(v.isShot);
+    const shotVolumeMl = isShot ? (Number(v.shotVolumeMl) || parseMlFromSize(String(v.size || '')) || 0) : undefined;
+    const initialStock = isShot ? 0 : Math.max(0, Number(v.stock || 0));
     const costPrice = Math.max(0, Number(v.costPrice || 0));
     const sellingPrice = Math.max(0, Number(v.sellingPrice || 0));
 
@@ -775,8 +804,10 @@ app.post('/api/products', authMiddleware, requireRole('super_admin'), (req: Requ
       costPrice,
       sellingPrice,
       stock: initialStock,
-      minStockLevel: Math.max(0, Number(v.minStockLevel || db.raw.settings.lowStockDefaultThreshold || 5)),
-      isActive: v.isActive !== false
+      minStockLevel: isShot ? 0 : Math.max(0, Number(v.minStockLevel || db.raw.settings.lowStockDefaultThreshold || 5)),
+      isActive: v.isActive !== false,
+      isShot: isShot || undefined,
+      shotVolumeMl: isShot ? shotVolumeMl : undefined
     };
   });
 
@@ -791,7 +822,9 @@ app.post('/api/products', authMiddleware, requireRole('super_admin'), (req: Requ
     taxRate: taxRate ? Math.max(0, Math.min(100, Number(taxRate))) : undefined,
     isActive: true,
     createdAt: new Date().toISOString(),
-    variants: formattedVariants
+    variants: formattedVariants,
+    servesShots: Boolean(servesShots),
+    openBottleUsedMl: 0
   };
 
   db.raw.products.push(newProduct);
@@ -815,9 +848,9 @@ app.post('/api/products', authMiddleware, requireRole('super_admin'), (req: Requ
   });
 
   db.save();
-  db.logAudit(user.id, user.name, user.role, 'CREATE_PRODUCT', 'PRODUCT', newProduct.id, `Created product "${newProduct.name}" with ${formattedVariants.length} variants.`);
+  db.logAudit(user.id, user.name, user.role, 'CREATE_PRODUCT', 'PRODUCT', newProduct.id, `Created product "${newProduct.name}" with ${formattedVariants.length} variants.${newProduct.servesShots ? ' Serves shots from 750ml bottle stock.' : ''}`);
 
-  res.status(201).json(newProduct);
+  res.status(201).json(productForClient(newProduct));
 });
 
 app.put('/api/products/:id', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
@@ -825,7 +858,7 @@ app.put('/api/products/:id', authMiddleware, requireRole('super_admin'), (req: R
   const product = db.raw.products.find(p => p.id === req.params.id);
   if (!product) return res.status(404).json({ error: 'Product not found.' });
 
-  const { name, categoryId, companyId, description, image, isKitchenItem, taxRate, isActive, variants } = req.body;
+  const { name, categoryId, companyId, description, image, isKitchenItem, taxRate, isActive, variants, servesShots } = req.body;
 
   if (name && typeof name === 'string' && name.trim()) product.name = name.trim().slice(0, 191);
   if (categoryId && db.raw.categories.some(c => c.id === categoryId)) product.categoryId = categoryId;
@@ -835,6 +868,11 @@ app.put('/api/products/:id', authMiddleware, requireRole('super_admin'), (req: R
   if (isKitchenItem !== undefined) product.isKitchenItem = Boolean(isKitchenItem);
   if (taxRate !== undefined) product.taxRate = Math.max(0, Math.min(100, Number(taxRate)));
   if (isActive !== undefined) product.isActive = Boolean(isActive);
+  if (servesShots !== undefined) {
+    product.servesShots = Boolean(servesShots);
+    if (!product.servesShots) product.openBottleUsedMl = 0;
+    else if (!Number.isFinite(Number(product.openBottleUsedMl))) product.openBottleUsedMl = 0;
+  }
 
   if (Array.isArray(variants) && variants.length > 0) {
     const priceError = validateVariantPrices(variants);
@@ -843,12 +881,19 @@ app.put('/api/products/:id', authMiddleware, requireRole('super_admin'), (req: R
     const codeError = validateVariantCodes(variants, product.id);
     if (codeError) return res.status(400).json({ error: codeError });
 
+    const shotError = validateShotSetup(Boolean(product.servesShots), variants);
+    if (shotError) return res.status(400).json({ error: shotError });
+
     const updatedSkus = new Set<string>();
     const updatedVariants: ProductVariant[] = variants.map((v: any, index: number) => {
       const existingVar = product.variants.find(oldV => oldV.id === v.id);
       const varId = v.id || `var-${product.id.replace('prod-', '')}-${Date.now()}-${index}-${crypto.randomBytes(2).toString('hex')}`;
 
-      const newStock = Math.max(0, Number(v.stock !== undefined ? v.stock : (existingVar?.stock ?? 0)));
+      const isShot = Boolean(product.servesShots) && Boolean(v.isShot);
+      const shotVolumeMl = isShot ? (Number(v.shotVolumeMl) || parseMlFromSize(String(v.size || '')) || 0) : undefined;
+
+      // Shot variants never hold independent stock — they pour from the 750ml bottle
+      const newStock = isShot ? 0 : Math.max(0, Number(v.stock !== undefined ? v.stock : (existingVar?.stock ?? 0)));
       const oldStock = existingVar ? existingVar.stock : 0;
 
       // Check negative stock policy
@@ -868,7 +913,9 @@ app.put('/api/products/:id', authMiddleware, requireRole('super_admin'), (req: R
           'adjustment',
           user.id,
           user.name,
-          'Manual stock correction via product edit'
+          isShot
+            ? 'Converted to shot size — stock now pours from the 750ml bottle'
+            : 'Manual stock correction via product edit'
         );
       }
 
@@ -887,8 +934,10 @@ app.put('/api/products/:id', authMiddleware, requireRole('super_admin'), (req: R
         costPrice: Math.max(0, Number(v.costPrice || 0)),
         sellingPrice: Math.max(0, Number(v.sellingPrice || 0)),
         stock: newStock,
-        minStockLevel: Math.max(0, Number(v.minStockLevel || 5)),
-        isActive: v.isActive !== false
+        minStockLevel: isShot ? 0 : Math.max(0, Number(v.minStockLevel || 5)),
+        isActive: v.isActive !== false,
+        isShot: isShot || undefined,
+        shotVolumeMl: isShot ? shotVolumeMl : undefined
       };
     });
 
@@ -898,7 +947,7 @@ app.put('/api/products/:id', authMiddleware, requireRole('super_admin'), (req: R
   try {
     db.save();
     db.logAudit(user.id, user.name, user.role, 'UPDATE_PRODUCT', 'PRODUCT', product.id, `Updated product "${product.name}" details and variants.`);
-    res.json(product);
+    res.json(productForClient(product));
   } catch (e: any) {
     res.status(400).json({ error: e.message || 'Failed to update product' });
   }
@@ -931,10 +980,18 @@ app.get('/api/inventory', authMiddleware, requireRole('super_admin'), (req: Requ
     const company = db.raw.companies.find(c => c.id === product.companyId);
 
     for (const variant of product.variants) {
-      const isLowStock = variant.stock <= variant.minStockLevel && variant.stock > 0;
-      const isOutOfStock = variant.stock <= 0;
-      const stockValue = variant.stock * (variant.costPrice || 0);
-      const retailValue = variant.stock * (variant.sellingPrice || 0);
+      const isShot = isShotVariant(product, variant);
+      const shotVol = isShot ? getShotVolumeMl(variant) : 0;
+      // Shot variants show DERIVED stock: how many shots remain in the 750ml bottle pool
+      const effectiveStock = isShot && shotVol > 0
+        ? Math.floor(Math.max(0, getAvailableShotMl(product)) / shotVol)
+        : variant.stock;
+
+      const isLowStock = !isShot && variant.stock <= variant.minStockLevel && variant.stock > 0;
+      const isOutOfStock = effectiveStock <= 0;
+      // Shot variants carry no valuation of their own (the liquid is already valued in the 750ml bottle stock)
+      const stockValue = isShot ? 0 : variant.stock * (variant.costPrice || 0);
+      const retailValue = isShot ? 0 : variant.stock * (variant.sellingPrice || 0);
 
       inventoryList.push({
         id: variant.id,
@@ -950,14 +1007,16 @@ app.get('/api/inventory', authMiddleware, requireRole('super_admin'), (req: Requ
         barcode: variant.barcode,
         costPrice: variant.costPrice,
         sellingPrice: variant.sellingPrice,
-        stock: variant.stock,
+        stock: effectiveStock,
         minStockLevel: variant.minStockLevel,
         status: isOutOfStock ? 'OUT_OF_STOCK' : isLowStock ? 'LOW_STOCK' : 'IN_STOCK',
         isLowStock,
         isOutOfStock,
         stockValue,
         retailValue,
-        isActive: variant.isActive && product.isActive
+        isActive: variant.isActive && product.isActive,
+        isShot: isShot || undefined,
+        shotVolumeMl: isShot ? shotVol : undefined
       });
     }
   }
@@ -972,6 +1031,142 @@ function findVariantById(variantId: string): { product: Product; variant: Produc
   }
   return null;
 }
+
+// ==========================================
+// SHOT POURING SYSTEM (100ml / 50ml / 25ml FROM 750ml BOTTLE STOCK)
+// ==========================================
+
+/** Volume of the source bottle every shot pours from. */
+const BOTTLE_ML = 750;
+
+/** Extracts the ml volume from a size label like "750ml Bottle" -> 750. */
+function parseMlFromSize(size: string): number | null {
+  const m = /(\d+(?:\.\d+)?)\s*ml/i.exec(size || '');
+  return m ? Number(m[1]) : null;
+}
+
+/** Pour volume (ml) of a shot variant — explicit shotVolumeMl or parsed from the size label. */
+function getShotVolumeMl(v: ProductVariant): number {
+  const vol = Number(v.shotVolumeMl) || parseMlFromSize(v.size) || 0;
+  return vol > 0 && vol <= BOTTLE_ML ? vol : 0;
+}
+
+/** True when this variant is a shot that must be deducted from the 750ml bottle stock. */
+function isShotVariant(product: Product, v: ProductVariant): boolean {
+  return Boolean(product.servesShots && v.isShot && getShotVolumeMl(v) > 0);
+}
+
+/** The 750ml bottle variant shots are poured from. */
+function getBottleVariant(product: Product): ProductVariant | null {
+  const candidates = product.variants.filter(v => !v.isShot && parseMlFromSize(v.size) === BOTTLE_ML);
+  return candidates.find(v => v.isActive) || candidates[0] || null;
+}
+
+/** Total ml still available for shots = (750ml bottle stock × 750) − ml already poured from the open bottle. */
+function getAvailableShotMl(product: Product): number {
+  if (!product.servesShots) return 0;
+  const bottle = getBottleVariant(product);
+  if (!bottle) return 0;
+  const used = Math.max(0, Number(product.openBottleUsedMl) || 0);
+  return bottle.stock * BOTTLE_ML - used;
+}
+
+/**
+ * Deducts `totalMl` of shot sales from the product's 750ml bottle stock.
+ * Whenever the open bottle is finished (750ml poured) the bottle count drops by 1.
+ */
+function deductShotMl(
+  product: Product,
+  totalMl: number,
+  user: User,
+  reference: string,
+  referenceId?: string
+): void {
+  const bottle = getBottleVariant(product);
+  if (!bottle || totalMl <= 0) return;
+
+  const used = Math.max(0, Number(product.openBottleUsedMl) || 0) + totalMl;
+  const bottlesConsumed = Math.floor(used / BOTTLE_ML);
+  product.openBottleUsedMl = used % BOTTLE_ML;
+
+  if (bottlesConsumed > 0) {
+    const beforeQty = bottle.stock;
+    bottle.stock -= bottlesConsumed;
+    db.recordStockMovement(
+      product.id,
+      product.name,
+      bottle.id,
+      bottle.size,
+      -bottlesConsumed,
+      beforeQty,
+      bottle.stock,
+      'sale',
+      user.id,
+      user.name,
+      `Shot sales (${totalMl}ml poured) emptied ${bottlesConsumed} x 750ml bottle(s) — ${reference}`,
+      referenceId
+    );
+  }
+}
+
+/** Reverses shot sales (bill void) — returns ml to the open bottle, restoring full bottles when needed. */
+function restoreShotMl(
+  product: Product,
+  totalMl: number,
+  user: User,
+  reference: string,
+  referenceId?: string
+): void {
+  const bottle = getBottleVariant(product);
+  if (!bottle || totalMl <= 0) return;
+
+  let used = Math.max(0, Number(product.openBottleUsedMl) || 0) - totalMl;
+  let bottlesRestored = 0;
+  while (used < 0) {
+    used += BOTTLE_ML;
+    bottlesRestored++;
+  }
+  product.openBottleUsedMl = used;
+
+  if (bottlesRestored > 0) {
+    const beforeQty = bottle.stock;
+    bottle.stock += bottlesRestored;
+    db.recordStockMovement(
+      product.id,
+      product.name,
+      bottle.id,
+      bottle.size,
+      bottlesRestored,
+      beforeQty,
+      bottle.stock,
+      'return',
+      user.id,
+      user.name,
+      `Shot sale reversal (${totalMl}ml returned) — ${reference}`,
+      referenceId
+    );
+  }
+}
+
+/**
+ * API-safe view of a product: shot variants get a DERIVED stock
+ * (how many shots can still be poured from the 750ml bottle stock)
+ * plus the raw ml pool so the POS can do live cart math.
+ */
+function productForClient(product: Product): any {
+  if (!product.servesShots) return product;
+  const availableMl = Math.max(0, getAvailableShotMl(product));
+  return {
+    ...product,
+    availableShotMl: availableMl,
+    variants: product.variants.map(v => {
+      if (!isShotVariant(product, v)) return v;
+      const vol = getShotVolumeMl(v);
+      return { ...v, stock: vol > 0 ? Math.floor(availableMl / vol) : 0 };
+    })
+  };
+}
+
 
 // ==========================================
 // ORDER ITEM SANITIZATION & PRICING (SERVER AUTHORITATIVE)
@@ -1091,6 +1286,10 @@ app.post('/api/inventory/stock-in', authMiddleware, requireRole('super_admin'), 
   if (!found) return res.status(404).json({ error: 'Product variant not found.' });
   const { product: targetProduct, variant: targetVariant } = found;
 
+  if (isShotVariant(targetProduct, targetVariant)) {
+    return res.status(400).json({ error: `"${targetProduct.name} (${targetVariant.size})" is a shot size poured from the 750ml bottle. Adjust the 750ml Bottle stock instead.` });
+  }
+
   const beforeQty = targetVariant.stock;
   targetVariant.stock += numQty;
   const numCost = costPrice && Number(costPrice) > 0 ? Number(costPrice) : targetVariant.costPrice;
@@ -1135,6 +1334,10 @@ app.post('/api/inventory/stock-out', authMiddleware, requireRole('super_admin'),
   if (!found) return res.status(404).json({ error: 'Product variant not found.' });
   const { product: targetProduct, variant: targetVariant } = found;
 
+  if (isShotVariant(targetProduct, targetVariant)) {
+    return res.status(400).json({ error: `"${targetProduct.name} (${targetVariant.size})" is a shot size poured from the 750ml bottle. Adjust the 750ml Bottle stock instead.` });
+  }
+
   if (!db.raw.settings.allowNegativeStock && targetVariant.stock - numQty < 0) {
     return res.status(400).json({ error: `Cannot reduce stock below zero. Current stock: ${targetVariant.stock}, requested: ${numQty}. Enable negative stock in settings if needed.` });
   }
@@ -1175,6 +1378,10 @@ app.post('/api/inventory/adjust', authMiddleware, requireRole('super_admin'), (r
   const found = findVariantById(variantId);
   if (!found) return res.status(404).json({ error: 'Product variant not found.' });
   const { product: targetProduct, variant: targetVariant } = found;
+
+  if (isShotVariant(targetProduct, targetVariant)) {
+    return res.status(400).json({ error: `"${targetProduct.name} (${targetVariant.size})" is a shot size poured from the 750ml bottle. Adjust the 750ml Bottle stock instead.` });
+  }
 
   const beforeQty = targetVariant.stock;
   let diff = 0;
@@ -1494,17 +1701,49 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
     return res.status(400).json({ error: `Payment amount cannot be less than Grand Total (Rs. ${numGrandTotal.toFixed(2)}) for this payment method.` });
   }
 
+  // Split cart into normal items and shot items (shots pour from the 750ml bottle stock)
+  const requested = new Map<string, number>();          // non-shot variantId -> qty
+  const shotMlByProduct = new Map<string, number>();    // productId -> total ml of shots requested
+  const bottleQtyByProduct = new Map<string, number>(); // productId -> 750ml bottles requested directly
+
+  for (const item of safeItems) {
+    const found = findVariantById(item.variantId);
+    if (!found) continue;
+    if (isShotVariant(found.product, found.variant)) {
+      const ml = getShotVolumeMl(found.variant) * item.quantity;
+      shotMlByProduct.set(found.product.id, (shotMlByProduct.get(found.product.id) || 0) + ml);
+    } else {
+      requested.set(item.variantId, (requested.get(item.variantId) || 0) + item.quantity);
+      if (found.product.servesShots) {
+        const bottle = getBottleVariant(found.product);
+        if (bottle && bottle.id === found.variant.id) {
+          bottleQtyByProduct.set(found.product.id, (bottleQtyByProduct.get(found.product.id) || 0) + item.quantity);
+        }
+      }
+    }
+  }
+
   // Stock check (aggregate per variant so the same variant sent twice cannot oversell)
   if (!db.raw.settings.allowNegativeStock) {
-    const requested = new Map<string, number>();
-    for (const item of safeItems) {
-      requested.set(item.variantId, (requested.get(item.variantId) || 0) + item.quantity);
-    }
     for (const [variantId, qty] of requested) {
       const found = findVariantById(variantId);
       if (found && found.variant.stock < qty) {
         return res.status(400).json({
           error: `Insufficient stock for ${found.product.name} (${found.variant.size}). Available: ${found.variant.stock}, Requested: ${qty}.`
+        });
+      }
+    }
+
+    // Shot check: requested shot ml must fit in the remaining 750ml bottle stock
+    // (after reserving any full 750ml bottles also being sold on this bill)
+    for (const [productId, neededMl] of shotMlByProduct) {
+      const product = db.raw.products.find(p => p.id === productId);
+      if (!product) continue;
+      const reservedBottlesMl = (bottleQtyByProduct.get(productId) || 0) * BOTTLE_ML;
+      const availableMl = getAvailableShotMl(product) - reservedBottlesMl;
+      if (neededMl > availableMl) {
+        return res.status(400).json({
+          error: `Insufficient 750ml bottle stock for ${product.name} shots. Available: ${Math.max(0, availableMl)}ml, Requested: ${neededMl}ml. Shots are poured from the 750ml bottle stock.`
         });
       }
     }
@@ -1514,9 +1753,10 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
   const billNumber = db.getNextBillNumber();
   const invoiceNumber = db.getNextInvoiceNumber();
 
+  // 1) Deduct normal (non-shot) items directly from their own stock
   for (const item of safeItems) {
     const found = findVariantById(item.variantId);
-    if (found) {
+    if (found && !isShotVariant(found.product, found.variant)) {
       const beforeQty = found.variant.stock;
       found.variant.stock -= item.quantity;
 
@@ -1534,6 +1774,14 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
         `Sale on ${billNumber} / ${invoiceNumber}`,
         billId
       );
+    }
+  }
+
+  // 2) Deduct shot sales (100ml / 50ml / 25ml) from the 750ml bottle total stock
+  for (const [productId, totalMl] of shotMlByProduct) {
+    const product = db.raw.products.find(p => p.id === productId);
+    if (product) {
+      deductShotMl(product, totalMl, user, `Sale on ${billNumber} / ${invoiceNumber}`, billId);
     }
   }
 
@@ -1603,26 +1851,42 @@ app.post('/api/bills/:id/void', authMiddleware, requireRole('super_admin'), (req
 
   bill.status = 'voided';
 
+  // Restore shot ml back to the 750ml bottle pool; restore normal items to their own stock
+  const shotMlToRestore = new Map<string, number>();
+
   for (const item of bill.items) {
     const found = findVariantById(item.variantId);
-    if (found) {
-      const beforeQty = found.variant.stock;
-      found.variant.stock += item.quantity;
+    if (!found) continue;
 
-      db.recordStockMovement(
-        found.product.id,
-        found.product.name,
-        found.variant.id,
-        found.variant.size,
-        item.quantity,
-        beforeQty,
-        found.variant.stock,
-        'return',
-        user.id,
-        user.name,
-        `Bill void reversal: ${bill.billNumber} (${reason ? String(reason).slice(0, 500) : 'Admin void'})`,
-        bill.id
-      );
+    if (isShotVariant(found.product, found.variant)) {
+      const ml = getShotVolumeMl(found.variant) * item.quantity;
+      shotMlToRestore.set(found.product.id, (shotMlToRestore.get(found.product.id) || 0) + ml);
+      continue;
+    }
+
+    const beforeQty = found.variant.stock;
+    found.variant.stock += item.quantity;
+
+    db.recordStockMovement(
+      found.product.id,
+      found.product.name,
+      found.variant.id,
+      found.variant.size,
+      item.quantity,
+      beforeQty,
+      found.variant.stock,
+      'return',
+      user.id,
+      user.name,
+      `Bill void reversal: ${bill.billNumber} (${reason ? String(reason).slice(0, 500) : 'Admin void'})`,
+      bill.id
+    );
+  }
+
+  for (const [productId, totalMl] of shotMlToRestore) {
+    const product = db.raw.products.find(p => p.id === productId);
+    if (product) {
+      restoreShotMl(product, totalMl, user, `Bill void reversal: ${bill.billNumber}`, bill.id);
     }
   }
 
@@ -1841,7 +2105,12 @@ app.get('/api/reports/daily-stock-sheet', authMiddleware, (req: Request, res: Re
       const sold = soldMap[v.id] || 0;
       const received = receivedMap[v.id] || 0;
       const adjustments = adjustmentMap[v.id] || 0;
-      const balance = v.stock;
+      // Shot sizes: balance = shots still pourable from the 750ml bottle stock
+      const isShot = isShotVariant(p, v);
+      const shotVol = isShot ? getShotVolumeMl(v) : 0;
+      const balance = isShot && shotVol > 0
+        ? Math.floor(Math.max(0, getAvailableShotMl(p)) / shotVol)
+        : v.stock;
       // Improved opening stock calculation: closing + sold - received - adjustments
       const inHand = Math.max(0, balance + sold - received - adjustments);
       const stock = inHand + received;
@@ -1905,6 +2174,8 @@ app.post('/api/reports/daily-stock-sheet/reconcile', authMiddleware, requireRole
 
     const found = findVariantById(adj.variantId);
     if (found) {
+      // Shot sizes have no independent stock — reconcile the 750ml bottle row instead
+      if (isShotVariant(found.product, found.variant)) continue;
       const qtyBefore = found.variant.stock;
       const diff = newBal - qtyBefore;
       if (diff !== 0) {
@@ -2397,6 +2668,8 @@ app.get('/api/dashboard/stats', authMiddleware, requireRole('super_admin'), (req
   db.raw.products.forEach(p => {
     if (p.isArchived) return;
     p.variants.forEach(v => {
+      // Shot sizes have no independent stock (they pour from the 750ml bottle) — skip alerts
+      if (isShotVariant(p, v)) return;
       if (v.stock <= 0) {
         outOfStockCount++;
         lowStockItems.push({
