@@ -405,6 +405,7 @@ const initialCategories: Category[] = [
   { id: 'cat-9', name: 'Kottu & Rotti', type: 'restaurant', displayOrder: 9, isActive: true },
   { id: 'cat-10', name: 'Soft Drinks & Water', type: 'restaurant', displayOrder: 10, isActive: true },
   { id: 'cat-11', name: 'Bar Services & Mixers', type: 'service', displayOrder: 11, isActive: true },
+  { id: 'cat-1kg-portion', name: '1KG Portion (Bulk Food)', type: 'restaurant', displayOrder: 12, isActive: true },
 ];
 
 const initialCompanies: Company[] = [
@@ -728,6 +729,479 @@ const initialProducts: Product[] = [
     variants: [
       { id: 'var-12-large', productId: 'prod-12', size: 'Large Bucket + Lime', sku: 'SER-ICE-LRG', costPrice: 50, sellingPrice: 300, stock: 100, minStockLevel: 10, isActive: true },
       { id: 'var-12-reg', productId: 'prod-12', size: 'Regular Ice Bucket', sku: 'SER-ICE-REG', costPrice: 30, sellingPrice: 200, stock: 100, minStockLevel: 10, isActive: true },
+    ]
+  },
+
+  // ==========================================================================
+  // 1KG PORTION — Bulk Kitchen Food Items (all isKitchenItem = true → KOT)
+  // Category: cat-1kg-portion (type: restaurant → listed under FOOD & KITCHEN)
+  // ==========================================================================
+  {
+    id: 'prod-1kg-01',
+    name: 'Pork Stew 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Slow-braised pork stew — bulk 1KG portion (approx. 8-10 servings).',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-01', productId: 'prod-1kg-01', size: '1KG Portion', sku: 'K1G-PSTW', costPrice: 0, sellingPrice: 6500, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-02',
+    name: 'Hot Butter Cuttlefish 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Crispy butter-tossed cuttlefish — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-02', productId: 'prod-1kg-02', size: '1KG Portion', sku: 'K1G-HBCF', costPrice: 0, sellingPrice: 7000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-03',
+    name: 'Boiled Vegetable 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Fresh boiled mixed vegetables — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-03', productId: 'prod-1kg-03', size: '1KG Portion', sku: 'K1G-BVEG', costPrice: 0, sellingPrice: 3500, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-04',
+    name: 'Fish Fried 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Crispy fried fish — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-04', productId: 'prod-1kg-04', size: '1KG Portion', sku: 'K1G-FFRY', costPrice: 0, sellingPrice: 6000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-05',
+    name: 'Beef Deviled 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Spicy devilled beef with capsicum & onions — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-05', productId: 'prod-1kg-05', size: '1KG Portion', sku: 'K1G-BDEV', costPrice: 0, sellingPrice: 6500, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-06',
+    name: 'Sausages Deviled 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Devilled sausages tossed with onions & chili — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-06', productId: 'prod-1kg-06', size: '1KG Portion', sku: 'K1G-SDEV', costPrice: 0, sellingPrice: 4500, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-07',
+    name: 'French Fries 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Golden crispy french fries — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-07', productId: 'prod-1kg-07', size: '1KG Portion', sku: 'K1G-FF1K', costPrice: 0, sellingPrice: 4000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-08',
+    name: 'Mutton Black Curry',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Slow-cooked black roasted mutton curry — standard portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-08', productId: 'prod-1kg-08', size: 'Standard Portion', sku: 'K1G-MBC', costPrice: 0, sellingPrice: 6000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-09',
+    name: 'Cooking Charge',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Kitchen cooking / preparation charge for outside or special-order food.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-09', productId: 'prod-1kg-09', size: 'Per Order', sku: 'K1G-CCHG', costPrice: 0, sellingPrice: 0, stock: 9999, minStockLevel: 0, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-10',
+    name: 'Beef Black Curry 500ml',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Black roasted beef curry — 500ml portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-10', productId: 'prod-1kg-10', size: '500ml Portion', sku: 'K1G-BBC5', costPrice: 0, sellingPrice: 3000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-11',
+    name: 'Prawn Deviled 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Spicy devilled prawns with capsicum & onions — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-11', productId: 'prod-1kg-11', size: '1KG Portion', sku: 'K1G-PDEV', costPrice: 0, sellingPrice: 7000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-12',
+    name: 'Fish Fingers 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Crumbed golden fish fingers — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-12', productId: 'prod-1kg-12', size: '1KG Portion', sku: 'K1G-FFIN', costPrice: 0, sellingPrice: 6500, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-13',
+    name: 'Sausage Deviled 500g',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Devilled sausages with onions & chili — 500g portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-13', productId: 'prod-1kg-13', size: '500g Portion', sku: 'K1G-SDV5', costPrice: 0, sellingPrice: 2000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-14',
+    name: 'Battered Vegetables 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Crispy battered mixed vegetables — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-14', productId: 'prod-1kg-14', size: '1KG Portion', sku: 'K1G-BVEG1', costPrice: 0, sellingPrice: 4000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-15',
+    name: 'Kadala 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Tempered black chickpeas (kadala) — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-15', productId: 'prod-1kg-15', size: '1KG Portion', sku: 'K1G-KAD', costPrice: 0, sellingPrice: 2400, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-16',
+    name: 'Potato Wedges 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Seasoned crispy potato wedges — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-16', productId: 'prod-1kg-16', size: '1KG Portion', sku: 'K1G-PWED', costPrice: 0, sellingPrice: 2000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-17',
+    name: 'Hot Battered Mushroom 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Hot battered crispy mushrooms — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-17', productId: 'prod-1kg-17', size: '1KG Portion', sku: 'K1G-HBM', costPrice: 0, sellingPrice: 2500, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-18',
+    name: 'Fish Cutlet 10pc',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Golden fried fish cutlets — 10 pieces portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-18', productId: 'prod-1kg-18', size: '10 Pieces', sku: 'K1G-FCUT', costPrice: 0, sellingPrice: 600, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-19',
+    name: 'Fried Cashew 500g',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Salted fried cashew nuts — 500g portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-19', productId: 'prod-1kg-19', size: '500g Portion', sku: 'K1G-FCAS', costPrice: 0, sellingPrice: 5000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-20',
+    name: 'Boiled Egg 10 Portion',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Boiled eggs — 10 portions pack.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-20', productId: 'prod-1kg-20', size: '10 Portions', sku: 'K1G-BEGG', costPrice: 0, sellingPrice: 1200, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-21',
+    name: 'Fruit Platter',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Fresh seasonal fruit platter — standard portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-21', productId: 'prod-1kg-21', size: 'Standard Portion', sku: 'K1G-FPLT', costPrice: 0, sellingPrice: 1800, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-22',
+    name: 'Hot Battered Cuttlefish 500g',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Hot battered crispy cuttlefish — 500g portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-22', productId: 'prod-1kg-22', size: '500g Portion', sku: 'K1G-HBC5', costPrice: 0, sellingPrice: 3500, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-23',
+    name: 'French Fries 500g',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Golden crispy french fries — 500g portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-23', productId: 'prod-1kg-23', size: '500g Portion', sku: 'K1G-FF5H', costPrice: 0, sellingPrice: 2000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-24',
+    name: 'Chicken Deviled 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Spicy devilled chicken with capsicum & onions — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-24', productId: 'prod-1kg-24', size: '1KG Portion', sku: 'K1G-CDEV', costPrice: 0, sellingPrice: 6000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-25',
+    name: 'Mixture 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Spicy fried bar mixture — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-25', productId: 'prod-1kg-25', size: '1KG Portion', sku: 'K1G-MIX', costPrice: 0, sellingPrice: 1500, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-26',
+    name: 'Chicken Fried 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Crispy fried chicken — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-26', productId: 'prod-1kg-26', size: '1KG Portion', sku: 'K1G-CFRY', costPrice: 0, sellingPrice: 5000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-27',
+    name: 'Beef Fried 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Crispy fried beef — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-27', productId: 'prod-1kg-27', size: '1KG Portion', sku: 'K1G-BFRY', costPrice: 0, sellingPrice: 6000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-28',
+    name: 'Sausage Fried 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Fried sausages — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-28', productId: 'prod-1kg-28', size: '1KG Portion', sku: 'K1G-SFRY', costPrice: 0, sellingPrice: 4000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-29',
+    name: 'Prawns Fried 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Crispy fried prawns — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-29', productId: 'prod-1kg-29', size: '1KG Portion', sku: 'K1G-PFRY', costPrice: 0, sellingPrice: 6500, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-30',
+    name: 'Fish Devilled 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Spicy devilled fish with capsicum & onions — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-30', productId: 'prod-1kg-30', size: '1KG Portion', sku: 'K1G-FDEV', costPrice: 0, sellingPrice: 6500, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-31',
+    name: 'Chicken Black Curry 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Black roasted chicken curry — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-31', productId: 'prod-1kg-31', size: '1KG Portion', sku: 'K1G-CBC', costPrice: 0, sellingPrice: 5500, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-32',
+    name: 'Beef Black Curry 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Black roasted beef curry — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-32', productId: 'prod-1kg-32', size: '1KG Portion', sku: 'K1G-BBC1', costPrice: 0, sellingPrice: 6000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-33',
+    name: 'Chicken Stew 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Slow-braised chicken stew — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-33', productId: 'prod-1kg-33', size: '1KG Portion', sku: 'K1G-CSTW', costPrice: 0, sellingPrice: 6000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-34',
+    name: 'Fish Stew 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Slow-braised fish stew — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-34', productId: 'prod-1kg-34', size: '1KG Portion', sku: 'K1G-FSTW', costPrice: 0, sellingPrice: 6000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-35',
+    name: 'Beef Stew 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Slow-braised beef stew — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-35', productId: 'prod-1kg-35', size: '1KG Portion', sku: 'K1G-BSTW', costPrice: 0, sellingPrice: 6500, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-1kg-36',
+    name: 'Battered Prawns 1KG',
+    categoryId: 'cat-1kg-portion',
+    companyId: 'comp-7',
+    description: 'Crispy battered prawns — bulk 1KG portion.',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-1kg-36', productId: 'prod-1kg-36', size: '1KG Portion', sku: 'K1G-BPRN', costPrice: 0, sellingPrice: 7000, stock: 50, minStockLevel: 10, isActive: true },
     ]
   }
 ];
