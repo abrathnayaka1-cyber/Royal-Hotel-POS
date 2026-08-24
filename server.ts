@@ -2729,6 +2729,7 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
     amountReceived,
     paymentMethod,
     paymentDetails,
+    roomBookingId,
     notes,
     heldBillId
   } = req.body;
@@ -2745,8 +2746,18 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
   const safeItems = sanitized.items;
 
   // Must stay in sync with the PaymentMethod union in src/types.ts
-  const validPaymentMethods = ['cash', 'card', 'bank_transfer', 'other', 'split'];
+  const validPaymentMethods = ['cash', 'card', 'bank_transfer', 'other', 'split', 'room_charge'];
   const safePaymentMethod = validPaymentMethods.includes(paymentMethod) ? paymentMethod : 'cash';
+
+  const roomBooking = safePaymentMethod === 'room_charge'
+    ? db.raw.roomBookings.find(b => b.id === roomBookingId)
+    : undefined;
+  if (safePaymentMethod === 'room_charge' && orderType !== 'room_service') {
+    return res.status(400).json({ error: 'Room charge is only available for Room Service orders.' });
+  }
+  if (safePaymentMethod === 'room_charge' && (!roomBooking || !['confirmed', 'checked_in'].includes(roomBooking.status))) {
+    return res.status(400).json({ error: 'Select an active room booking before charging items to the room.' });
+  }
 
   // Server recomputes every money value - never trust the client
   const totals = computeOrderTotals(safeItems, { discount, discountPercentage });
@@ -2765,7 +2776,7 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
   }
 
   // For non-cash, ensure amountReceived >= grandTotal or at least grandTotal if split not fully implemented
-  if (safePaymentMethod !== 'cash' && safePaymentMethod !== 'split' && numReceived + 0.01 < numGrandTotal) {
+  if (safePaymentMethod !== 'cash' && safePaymentMethod !== 'split' && safePaymentMethod !== 'room_charge' && numReceived + 0.01 < numGrandTotal) {
     return res.status(400).json({ error: `Payment amount cannot be less than Grand Total (Rs. ${numGrandTotal.toFixed(2)}) for this payment method.` });
   }
 
@@ -2877,13 +2888,31 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
     changeAmount: Number(Math.max(0, numReceived - numGrandTotal).toFixed(2)),
     paymentMethod: safePaymentMethod,
     paymentDetails: paymentDetails || undefined,
-    status: 'paid',
+    roomBookingId: roomBooking?.id,
+    roomNumber: roomBooking?.roomNumber,
+    status: roomBooking ? 'charged_to_room' : 'paid',
     notes: notes ? String(notes).slice(0, 1000) : undefined,
     createdAt: new Date().toISOString(),
-    paidAt: new Date().toISOString()
+    paidAt: roomBooking ? undefined : new Date().toISOString()
   };
 
   db.raw.bills.unshift(newBill);
+
+  // A room-service sale remains unpaid until room checkout. Attach its full item
+  // breakdown to the booking so room price + purchases settle as one account.
+  if (roomBooking) {
+    roomBooking.itemCharges = roomBooking.itemCharges || [];
+    roomBooking.itemCharges.push({
+      billId: newBill.id,
+      billNumber: newBill.billNumber,
+      items: snapshotItems,
+      total: numGrandTotal,
+      chargedAt: newBill.createdAt,
+    });
+    roomBooking.extraCharges = Number((roomBooking.extraCharges + numGrandTotal).toFixed(2));
+    roomBooking.grandTotal = Number((roomBooking.grandTotal + numGrandTotal).toFixed(2));
+    roomBooking.balanceDue = Number(Math.max(0, roomBooking.grandTotal - roomBooking.advancePaid).toFixed(2));
+  }
 
   if (heldBillId) {
     const heldIndex = db.raw.heldBills.findIndex(h => h.id === heldBillId);
@@ -2915,6 +2944,13 @@ app.post('/api/bills/:id/void', authMiddleware, requireRole('super_admin'), (req
 
   if (bill.status === 'voided' || bill.status === 'cancelled') {
     return res.status(400).json({ error: 'Bill is already voided or cancelled.' });
+  }
+
+  const linkedRoomBooking = bill.roomBookingId
+    ? db.raw.roomBookings.find(b => b.id === bill.roomBookingId)
+    : undefined;
+  if (linkedRoomBooking?.status === 'checked_out') {
+    return res.status(400).json({ error: 'This room-charge bill has already been settled at room checkout and cannot be voided separately.' });
   }
 
   bill.status = 'voided';
@@ -2956,6 +2992,13 @@ app.post('/api/bills/:id/void', authMiddleware, requireRole('super_admin'), (req
     if (product) {
       restoreShotMl(product, totalMl, user, `Bill void reversal: ${bill.billNumber}`, bill.id);
     }
+  }
+
+  if (linkedRoomBooking) {
+    linkedRoomBooking.itemCharges = (linkedRoomBooking.itemCharges || []).filter(c => c.billId !== bill.id);
+    linkedRoomBooking.extraCharges = Number(Math.max(0, linkedRoomBooking.extraCharges - bill.grandTotal).toFixed(2));
+    linkedRoomBooking.grandTotal = Number(Math.max(0, linkedRoomBooking.grandTotal - bill.grandTotal).toFixed(2));
+    linkedRoomBooking.balanceDue = Number(Math.max(0, linkedRoomBooking.grandTotal - linkedRoomBooking.advancePaid).toFixed(2));
   }
 
   db.save();
@@ -3657,6 +3700,13 @@ app.put('/api/room-bookings/:id/checkout', authMiddleware, (req: Request, res: R
     booking.balanceDue = Number(Math.max(0, booking.grandTotal - booking.advancePaid).toFixed(2));
     booking.status = 'checked_out';
     booking.checkedOutAt = new Date().toISOString();
+    for (const charge of booking.itemCharges || []) {
+      const linkedBill = db.raw.bills.find(b => b.id === charge.billId && b.status === 'charged_to_room');
+      if (linkedBill) {
+        linkedBill.status = 'paid';
+        linkedBill.paidAt = booking.checkedOutAt;
+      }
+    }
     if (paymentMethod) booking.paymentMethod = paymentMethod;
     if (notes && typeof notes === 'string') booking.notes = (booking.notes ? booking.notes + ' | ' : '') + notes.slice(0, 500);
 
@@ -3691,6 +3741,13 @@ app.put('/api/room-bookings/:id/cancel', authMiddleware, (req: Request, res: Res
 
     if (booking.status === 'checked_out') {
       return res.status(400).json({ error: 'Cannot cancel already checked out booking' });
+    }
+    const activeItemCharges = (booking.itemCharges || []).filter(charge => {
+      const bill = db.raw.bills.find(b => b.id === charge.billId);
+      return bill && bill.status !== 'voided' && bill.status !== 'cancelled';
+    });
+    if (activeItemCharges.length > 0) {
+      return res.status(400).json({ error: `This booking has ${activeItemCharges.length} room-charge bill(s). Void those bills before cancelling the booking.` });
     }
 
     booking.status = 'cancelled';

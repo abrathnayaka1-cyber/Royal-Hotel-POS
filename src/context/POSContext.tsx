@@ -82,7 +82,7 @@ interface POSContextType {
   loadHeldBill: (heldBill: HeldBill) => void;
   deleteHeldBill: (heldBillId: string) => Promise<void>;
   createKOT: () => Promise<KOT>;
-  completeCheckout: (paymentMethod: Bill['paymentMethod'], amountReceived: number, paymentDetails?: unknown) => Promise<Bill>;
+  completeCheckout: (paymentMethod: Bill['paymentMethod'], amountReceived: number, paymentDetails?: unknown, roomBookingId?: string) => Promise<Bill>;
   refreshProducts: () => Promise<void>;
   refreshHeldBills: () => Promise<void>;
   handleBarcodeScan: (barcode: string) => boolean;
@@ -599,7 +599,8 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const completeCheckout = async (
     paymentMethod: Bill['paymentMethod'],
     amountReceived: number,
-    paymentDetails?: unknown
+    paymentDetails?: unknown,
+    roomBookingId?: string
   ): Promise<Bill> => {
     if (cart.length === 0) {
       throw new Error('Cart is empty. Cannot complete sale.');
@@ -626,6 +627,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       changeAmount: Number(Math.max(0, amountReceived - grandTotal).toFixed(2)),
       paymentMethod,
       paymentDetails,
+      roomBookingId,
       notes,
       heldBillId: activeHeldBillId || undefined,
     };
@@ -638,6 +640,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setRecentCompletedBill(completedBill);
     await refreshProducts();
     await refreshHeldBills();
+    if (roomBookingId) await refreshRoomBookings();
     clearCart();
     setIsPaymentModalOpen(false);
     setIsReceiptModalOpen(true);

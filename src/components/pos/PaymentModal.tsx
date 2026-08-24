@@ -26,20 +26,30 @@ export const PaymentModal: React.FC = () => {
     customerName,
     completeCheckout,
     settings,
+    roomBookings,
   } = usePOS();
 
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
   const [amountReceived, setAmountReceived] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [selectedRoomBookingId, setSelectedRoomBookingId] = useState('');
 
+  const activeRoomBookings = roomBookings.filter(b => b.status === 'checked_in' || b.status === 'confirmed');
+  const selectedBooking = activeRoomBookings.find(b => b.id === selectedRoomBookingId);
   const currencySymbol = settings?.currencySymbol || 'Rs.';
 
   useEffect(() => {
     if (isPaymentModalOpen) {
+      setPaymentMethod('cash');
       setAmountReceived(grandTotal.toString());
       setErrorMsg(null);
       setIsProcessing(false);
+      const matchingBooking = activeRoomBookings.find(b =>
+        b.roomNumber.toLowerCase() === tableNumber.trim().toLowerCase() ||
+        b.guestName.toLowerCase() === customerName.trim().toLowerCase()
+      );
+      setSelectedRoomBookingId(matchingBooking?.id || '');
     }
   }, [isPaymentModalOpen, grandTotal]);
 
@@ -68,7 +78,18 @@ export const PaymentModal: React.FC = () => {
       setIsProcessing(true);
       setErrorMsg(null);
 
-      await completeCheckout(paymentMethod, numReceived);
+      if (paymentMethod === 'room_charge' && !selectedRoomBookingId) {
+        setErrorMsg('Please select the guest room booking.');
+        setIsProcessing(false);
+        return;
+      }
+
+      await completeCheckout(
+        paymentMethod,
+        paymentMethod === 'room_charge' ? 0 : numReceived,
+        undefined,
+        paymentMethod === 'room_charge' ? selectedRoomBookingId : undefined
+      );
 
       confetti({
         particleCount: 50,
@@ -85,7 +106,10 @@ export const PaymentModal: React.FC = () => {
     { method: 'cash', label: 'Cash Tender', icon: Banknote },
     { method: 'card', label: 'Credit / Debit Card', icon: CreditCard },
     { method: 'bank_transfer', label: 'Bank / QR Transfer', icon: Building2 },
-    { method: 'other', label: 'Room Charge / Other', icon: Receipt },
+    { method: 'other', label: 'Other', icon: Receipt },
+    ...(orderType === 'room_service'
+      ? [{ method: 'room_charge' as PaymentMethod, label: 'Add to Room Bill', icon: Receipt }]
+      : []),
   ];
 
   return (
@@ -163,6 +187,34 @@ export const PaymentModal: React.FC = () => {
               })}
             </div>
           </div>
+
+          {paymentMethod === 'room_charge' && (
+            <div className="p-4 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-xl space-y-2">
+              <label className="text-xs font-bold uppercase tracking-wider text-blue-800 dark:text-blue-300 block">
+                Select Occupied Room / Guest
+              </label>
+              <select
+                value={selectedRoomBookingId}
+                onChange={e => setSelectedRoomBookingId(e.target.value)}
+                className="w-full px-3 py-2.5 rounded-xl border border-blue-300 dark:border-blue-700 bg-white dark:bg-slate-900 text-sm font-bold text-slate-900 dark:text-white"
+              >
+                <option value="">Choose active booking...</option>
+                {activeRoomBookings.map(booking => (
+                  <option key={booking.id} value={booking.id}>
+                    Room {booking.roomNumber} — {booking.guestName} ({booking.bookingNumber})
+                  </option>
+                ))}
+              </select>
+              {selectedBooking && (
+                <div className="text-xs text-blue-700 dark:text-blue-300">
+                  Current room balance: <strong>{currencySymbol} {selectedBooking.balanceDue.toLocaleString()}</strong>
+                  {' '}+ Items: <strong>{currencySymbol} {grandTotal.toLocaleString()}</strong>
+                  {' '}= New balance: <strong>{currencySymbol} {(selectedBooking.balanceDue + grandTotal).toLocaleString()}</strong>
+                </div>
+              )}
+              <p className="text-[11px] text-slate-500">No payment is collected now. These items will be included with the room charge at checkout.</p>
+            </div>
+          )}
 
           {/* Cash Tender Input & Denominations */}
           {paymentMethod === 'cash' && (

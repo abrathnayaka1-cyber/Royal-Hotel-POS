@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { fetchApi } from '../../lib/api.ts';
 import {
@@ -173,9 +173,9 @@ function normalizeHeader(h: string): string {
   return h.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-function mapSheetRows(json: Record<string, unknown>[]): RawImportRow[] {
+function mapSheetRows(json: Record<string, unknown>[], headerRow = 0): RawImportRow[] {
   return json.map((obj, i) => {
-    const row: RawImportRow = { rowNumber: i + 2 };
+    const row: RawImportRow = { rowNumber: headerRow + i + 2 };
     for (const [key, value] of Object.entries(obj)) {
       const field = HEADER_ALIASES[normalizeHeader(key)];
       if (!field || value === undefined || value === null || String(value).trim() === '') continue;
@@ -227,6 +227,7 @@ export const StockImportModal: React.FC<{
   const [rawRows, setRawRows] = useState<RawImportRow[]>([]);
   const [parseNote, setParseNote] = useState<string | null>(null);
   const [isParsing, setIsParsing] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Preview
   const [previewRows, setPreviewRows] = useState<ImportPreviewRow[]>([]);
@@ -366,8 +367,23 @@ export const StockImportModal: React.FC<{
         const wb = XLSX.read(buffer, { type: 'array' });
         const ws = wb.Sheets[wb.SheetNames[0]];
         if (!ws) throw new Error('No sheets found');
-        const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '' });
-        const rows = mapSheetRows(json).filter(r =>
+
+        // Supplier sheets often have a title or invoice details above the table.
+        // Locate the first plausible header row instead of assuming row 1.
+        const grid = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: '', blankrows: false });
+        const headerRow = grid.slice(0, 25).findIndex(cells => {
+          const recognised = (cells || []).filter(cell => HEADER_ALIASES[normalizeHeader(String(cell || ''))]);
+          const hasIdentity = (cells || []).some(cell => {
+            const field = HEADER_ALIASES[normalizeHeader(String(cell || ''))];
+            return field === 'productName' || field === 'sku' || field === 'barcode';
+          });
+          return hasIdentity && recognised.length >= 2;
+        });
+        if (headerRow < 0) {
+          throw new Error('Column headings were not found. Include Product Name (or SKU/Barcode) and Quantity, or use the downloadable template.');
+        }
+        const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', range: headerRow });
+        const rows = mapSheetRows(json, headerRow).filter(r =>
           r.productName || r.sku || r.barcode || r.size ||
           (r.quantity !== undefined && String(r.quantity).trim() !== '')
         );
@@ -478,7 +494,7 @@ export const StockImportModal: React.FC<{
   };
 
   const problemCount = summary ? summary.invalid + summary.needsReview : 0;
-  const activePreviewRows = useMemo(() => previewRows, [previewRows]);
+  const activePreviewRows = previewRows;
 
   const fmt = (n?: number) => (n === undefined || n === null ? '—' : `${currencySymbol} ${Number(n).toLocaleString()}`);
 
@@ -718,8 +734,8 @@ export const StockImportModal: React.FC<{
                     Download Excel Template
                   </button>
                 </div>
-                <label
-                  className="flex flex-col items-center justify-center gap-2 p-8 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-2xl bg-slate-50 dark:bg-slate-800/40 cursor-pointer hover:border-blue-400 transition-colors"
+                <div
+                  className="flex flex-col items-center justify-center gap-2 p-8 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-2xl bg-slate-50 dark:bg-slate-800/40 hover:border-blue-400 transition-colors"
                   onDragOver={e => e.preventDefault()}
                   onDrop={e => {
                     e.preventDefault();
@@ -728,9 +744,10 @@ export const StockImportModal: React.FC<{
                   }}
                 >
                   <input
+                    ref={fileInputRef}
                     type="file"
-                    accept=".xlsx,.xls,.csv,.pdf"
-                    className="hidden"
+                    accept=".xlsx,.xls,.csv,.pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,application/pdf"
+                    className="sr-only"
                     onChange={e => {
                       const f = e.target.files?.[0];
                       if (f) handleFile(f);
@@ -743,13 +760,21 @@ export const StockImportModal: React.FC<{
                     <UploadCloud className="w-8 h-8 text-slate-400" />
                   )}
                   <span className="text-xs font-bold text-slate-600 dark:text-slate-300">
-                    {isParsing ? 'Reading file...' : 'Click or drop a file here'}
+                    {isParsing ? 'Reading file...' : 'Drop a file here, or choose one below'}
                   </span>
+                  <button
+                    type="button"
+                    disabled={isParsing}
+                    onClick={() => fileInputRef.current?.click()}
+                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white text-xs font-bold cursor-pointer disabled:cursor-not-allowed"
+                  >
+                    Choose Excel / CSV / PDF File
+                  </button>
                   <span className="text-[10px] text-slate-400 flex items-center gap-2">
                     <FileSpreadsheet className="w-3 h-3" /> .xlsx .xls .csv
-                    <FileText className="w-3 h-3 ml-1" /> .pdf (invoice)
+                    <FileText className="w-3 h-3 ml-1" /> .pdf (invoice) · max 3.5 MB
                   </span>
-                </label>
+                </div>
 
                 {fileName && rawRows.length > 0 && (
                   <div className="mt-2 p-3 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 rounded-xl text-xs text-emerald-700 dark:text-emerald-300 font-semibold flex items-center gap-2">
