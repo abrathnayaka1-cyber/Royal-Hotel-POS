@@ -16,6 +16,7 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
+    "check:php": "node tools/check-php.mjs",
     "format": "prettier --write \"src/**/*.{ts,tsx,js,jsx}\""
   },
   "keywords": [
@@ -61,6 +62,7 @@
   },
   "devDependencies": {
     "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.4"
+    "@types/react-dom": "^19.2.4",
+    "php-parser": "^3.7.0"
   }
 }

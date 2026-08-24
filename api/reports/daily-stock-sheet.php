@@ -3,37 +3,47 @@
  * Daily Stock Sheet & Bar Reconciliation API
  * Hostinger Web Hosting Compatible
  * Target: /api/reports/daily-stock-sheet.php
+ *
+ * GET  - build the daily register (In-Hand, Received, Stock, Balance, Sold, Value)
+ * POST - apply a physical-count reconciliation (Super Admin only)
  */
 
-require_once __DIR__ . '/../db.php';
+// middleware.php already loads config/database.php and exposes Database::getConnection(),
+// requireAuth()/requireSuperAdmin(), sendJson()/sendError() and logAudit().
 require_once __DIR__ . '/../middleware.php';
 
-header('Content-Type: application/json; charset=utf-8');
+$user = requireAuth();
 
-// Authenticate user
-$user = authenticate();
-if (!$user) {
-    http_response_type(401);
-    echo json_encode(['error' => 'Unauthorized']);
-    exit;
+$pdo = Database::getConnection();
+
+$method = $_SERVER['REQUEST_METHOD'];
+
+// Allow shared hosts that cannot send PUT/PATCH/DELETE through to .php endpoints.
+if ($method === 'POST' && !empty($_SERVER['HTTP_X_HTTP_METHOD_OVERRIDE'])) {
+    $method = strtoupper($_SERVER['HTTP_X_HTTP_METHOD_OVERRIDE']);
 }
 
-$pdo = get_db_connection();
+// --------------------------------------------------------------------------
+// GET - Daily stock sheet report
+// --------------------------------------------------------------------------
+if ($method === 'GET') {
+    $targetDate = isset($_GET['date']) && $_GET['date'] !== '' ? trim((string)$_GET['date']) : date('Y-m-d');
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $targetDate)) {
+        sendError('Invalid date. Expected format: YYYY-MM-DD.', 400);
+    }
 
-if ($_SERVER['REQUEST_METHOD'] === 'GET') {
-    $targetDate = isset($_GET['date']) ? trim($_GET['date']) : date('Y-m-d');
-    $categoryFilter = isset($_GET['categoryId']) ? trim($_GET['categoryId']) : 'all';
-    $search = isset($_GET['search']) ? strtolower(trim($_GET['search'])) : '';
-    $typeFilter = isset($_GET['type']) ? trim($_GET['type']) : 'all';
+    $categoryFilter = isset($_GET['categoryId']) ? trim((string)$_GET['categoryId']) : 'all';
+    $search = isset($_GET['search']) ? strtolower(trim((string)$_GET['search'])) : '';
+    $typeFilter = isset($_GET['type']) ? trim((string)$_GET['type']) : 'all';
 
     $formattedDate = str_replace('-', '.', $targetDate);
 
-    // 1. Get units sold on this date
+    // 1. Units sold on this date (paid bills only)
     $soldQuery = "
         SELECT bi.variant_id, SUM(bi.quantity) as total_sold
         FROM bill_items bi
         INNER JOIN bills b ON bi.bill_id = b.id
-        WHERE b.status = 'paid' AND DATE(b.created_at) = :targetDate
+        WHERE b.status = 'paid' AND DATE(COALESCE(b.paid_at, b.created_at)) = :targetDate
         GROUP BY bi.variant_id
     ";
     $soldStmt = $pdo->prepare($soldQuery);
@@ -43,18 +53,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         $soldMap[$row['variant_id']] = (int)$row['total_sold'];
     }
 
-    // 2. Get received movements on this date
-    $recQuery = "
-        SELECT variant_id, SUM(quantity_change) as total_received
+    // 2. Received units + adjustments recorded on this date.
+    //    Matches the Node/Express implementation: stock_in / purchase and positive
+    //    adjustments count as "received", negative adjustments are subtracted from the
+    //    opening (in-hand) figure.
+    $movQuery = "
+        SELECT variant_id, movement_type, quantity_change
         FROM stock_movements
-        WHERE movement_type IN ('stock_in', 'purchase') AND DATE(created_at) = :targetDate
-        GROUP BY variant_id
+        WHERE DATE(created_at) = :targetDate
     ";
-    $recStmt = $pdo->prepare($recQuery);
-    $recStmt->execute([':targetDate' => $targetDate]);
+    $movStmt = $pdo->prepare($movQuery);
+    $movStmt->execute([':targetDate' => $targetDate]);
     $receivedMap = [];
-    while ($row = $recStmt->fetch()) {
-        $receivedMap[$row['variant_id']] = (int)$row['total_received'];
+    $adjustmentMap = [];
+    while ($row = $movStmt->fetch()) {
+        $variantId = $row['variant_id'];
+        $change = (int)$row['quantity_change'];
+        if (in_array($row['movement_type'], ['stock_in', 'purchase'], true)) {
+            $receivedMap[$variantId] = ($receivedMap[$variantId] ?? 0) + $change;
+        } elseif ($row['movement_type'] === 'adjustment') {
+            if ($change > 0) {
+                $receivedMap[$variantId] = ($receivedMap[$variantId] ?? 0) + $change;
+            } else {
+                $adjustmentMap[$variantId] = ($adjustmentMap[$variantId] ?? 0) + $change;
+            }
+        }
     }
 
     // 3. Fetch all active products and variants
@@ -62,9 +85,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         SELECT 
             p.id as product_id, p.name as product_name, p.category_id, p.is_kitchen_item,
             c.name as category_name, c.type as category_type,
+            co.name as company_name,
             v.id as variant_id, v.size, v.sku, v.cost_price, v.selling_price, v.stock
         FROM products p
         INNER JOIN categories c ON p.category_id = c.id
+        LEFT JOIN companies co ON p.company_id = co.id
         INNER JOIN product_variants v ON p.id = v.product_id
         WHERE p.is_active = 1 AND p.is_archived = 0 AND v.is_active = 1
         ORDER BY c.display_order ASC, p.name ASC, v.selling_price DESC
@@ -102,8 +127,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         $varId = $row['variant_id'];
         $sold = isset($soldMap[$varId]) ? $soldMap[$varId] : 0;
         $received = isset($receivedMap[$varId]) ? $receivedMap[$varId] : 0;
+        $adjustments = isset($adjustmentMap[$varId]) ? $adjustmentMap[$varId] : 0;
         $balance = (int)$row['stock'];
-        $inHand = max(0, $balance + $sold - $received);
+        $inHand = max(0, $balance + $sold - $received - $adjustments);
         $stock = $inHand + $received;
         $price = (float)$row['selling_price'];
         $value = $sold * $price;
@@ -120,6 +146,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             'productId' => $row['product_id'],
             'variantId' => $varId,
             'productName' => $row['product_name'],
+            'companyName' => $row['company_name'] ?: 'In-House / Other',
             'categoryName' => $row['category_name'],
             'size' => $row['size'],
             'displayName' => $displayName ?: ($row['product_name'] . ' ' . $row['size']),
@@ -135,7 +162,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         ];
     }
 
-    echo json_encode([
+    sendJson([
         'date' => $targetDate,
         'formattedDate' => $formattedDate,
         'totalInHand' => $totalInHand,
@@ -146,24 +173,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         'totalValue' => $totalValue,
         'items' => $items
     ]);
-    exit;
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+// --------------------------------------------------------------------------
+// POST - Physical audit reconciliation (Super Admin only)
+// --------------------------------------------------------------------------
+if ($method === 'POST') {
     if ($user['role'] !== 'super_admin') {
-        http_response_type(403);
-        echo json_encode(['error' => 'Super Admin permission required']);
-        exit;
+        sendError('Super Admin permission required', 403);
     }
 
-    $data = json_decode(file_get_contents('php://input'), true);
-    $adjustments = isset($data['adjustments']) ? $data['adjustments'] : [];
-    $reason = isset($data['reason']) ? trim($data['reason']) : 'Daily Stock Sheet Physical Audit Reconciliation';
+    $input = getJsonInput();
+    $adjustments = isset($input['adjustments']) ? $input['adjustments'] : [];
+    $reason = isset($input['reason']) && is_string($input['reason']) && trim($input['reason']) !== ''
+        ? substr(trim($input['reason']), 0, 500)
+        : 'Daily Stock Sheet Physical Audit Reconciliation';
 
     if (!is_array($adjustments) || empty($adjustments)) {
-        http_response_type(400);
-        echo json_encode(['error' => 'No adjustments provided']);
-        exit;
+        sendError('No adjustments provided', 400);
     }
 
     $updatedCount = 0;
@@ -178,9 +205,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ");
 
         foreach ($adjustments as $adj) {
-            $variantId = $adj['variantId'];
-            $newBalance = (int)$adj['newBalance'];
-            if ($newBalance < 0) continue;
+            if (!is_array($adj) || empty($adj['variantId'])) continue;
+
+            $variantId = (string)$adj['variantId'];
+            $newBalance = isset($adj['newBalance']) && is_numeric($adj['newBalance']) ? (int)$adj['newBalance'] : -1;
+            if ($newBalance < 0 || $newBalance > 1000000) continue;
 
             $getStmt->execute([':variantId' => $variantId]);
             $current = $getStmt->fetch();
@@ -190,7 +219,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($diff !== 0) {
                     $updateStmt->execute([':newStock' => $newBalance, ':variantId' => $variantId]);
                     $movStmt->execute([
-                        ':id' => 'mov-' . uniqid(),
+                        ':id' => 'mov-audit-' . round(microtime(true) * 1000) . '-' . substr(bin2hex(random_bytes(3)), 0, 6),
                         ':productId' => $current['product_id'],
                         ':productName' => $current['product_name'],
                         ':variantId' => $variantId,
@@ -208,15 +237,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $pdo->commit();
-        echo json_encode([
+
+        logAudit(
+            $user['id'],
+            $user['name'],
+            $user['role'],
+            'DAILY_SHEET_RECONCILE',
+            'INVENTORY',
+            null,
+            "Reconciled {$updatedCount} items via Daily Stock Sheet audit"
+        );
+
+        sendJson([
             'success' => true,
             'updatedCount' => $updatedCount,
             'message' => "Successfully updated {$updatedCount} stock item(s) from physical sheet."
         ]);
     } catch (Exception $e) {
-        $pdo->rollBack();
-        http_response_type(500);
-        echo json_encode(['error' => 'Database error: ' . $e->getMessage()]);
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        error_log('[DailyStockSheet Error] ' . $e->getMessage());
+        sendError('Database error while saving the stock sheet reconciliation.', 500);
     }
-    exit;
 }
+
+sendError('Method not allowed', 405);
