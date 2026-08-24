@@ -30,7 +30,7 @@ export const FooterStatusBar: React.FC = () => {
           {products.length} CATALOG ITEMS LOADED
         </span>
         <span className="text-slate-400">
-          VERSION 2.4.0 MASTER BUILD PRO
+          ROYAL HOTEL POS v1.1.0
         </span>
       </div>
     </footer>
