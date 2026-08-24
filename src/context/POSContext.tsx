@@ -68,6 +68,9 @@ interface POSContextType {
   openVariantModal: (product: Product) => void;
   closeVariantModal: () => void;
   addToCart: (product: Product, variant: ProductVariant, quantity?: number, itemNotes?: string) => void;
+  availableStockFor: (variant: ProductVariant) => number;
+  isDamageModalOpen: boolean;
+  setIsDamageModalOpen: (open: boolean) => void;
   updateCartQuantity: (variantId: string, quantity: number) => void;
   removeFromCart: (variantId: string) => void;
   clearCart: () => void;
@@ -132,6 +135,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [selectedProductForVariant, setSelectedProductForVariant] = useState<Product | null>(null);
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState<boolean>(false);
   const [isHeldBillsModalOpen, setIsHeldBillsModalOpen] = useState<boolean>(false);
+  const [isDamageModalOpen, setIsDamageModalOpen] = useState<boolean>(false);
   const [isReceiptModalOpen, setIsReceiptModalOpen] = useState<boolean>(false);
   const [isKOTModalOpen, setIsKOTModalOpen] = useState<boolean>(false);
 
@@ -345,8 +349,51 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSelectedProductForVariant(null);
   };
 
+  /** Pour volume of a shot variant (explicit or parsed from the size label). */
+  const shotMlOf = (v: ProductVariant): number => {
+    if (Number(v.shotVolumeMl) > 0) return Number(v.shotVolumeMl);
+    const m = /(\d+(?:\.\d+)?)\s*ml/i.exec(v.size || '');
+    return m ? Number(m[1]) : 0;
+  };
+
   /** Stock left for a variant taking what is already in the cart into account. */
   const availableStockFor = (variant: ProductVariant): number => {
+    const product = products.find(p => p.id === variant.productId);
+
+    // Shot variants pour from the shared 750ml bottle pool of the product
+    if (product?.servesShots && variant.isShot) {
+      const vol = shotMlOf(variant);
+      if (vol <= 0) return 0;
+      let poolMl = Math.max(0, Number(product.availableShotMl) || 0);
+      // Subtract everything already in the cart that drinks from the same bottles
+      for (const item of cart) {
+        if (item.productId !== product.id) continue;
+        const v = product.variants.find(x => x.id === item.variantId);
+        if (!v) continue;
+        if (v.isShot) {
+          poolMl -= (shotMlOf(v) || 0) * item.quantity;
+        } else if (/750\s*ml/i.test(v.size)) {
+          poolMl -= 750 * item.quantity;
+        }
+      }
+      return Math.floor(Math.max(0, poolMl) / vol);
+    }
+
+    // The 750ml bottle of a shot-serving product: reserve bottles the cart's shots will need
+    if (product?.servesShots && !variant.isShot && /750\s*ml/i.test(variant.size)) {
+      const inCartBottles = cart.find(i => i.variantId === variant.id)?.quantity || 0;
+      let shotMlInCart = 0;
+      for (const item of cart) {
+        if (item.productId !== product.id) continue;
+        const v = product.variants.find(x => x.id === item.variantId);
+        if (v?.isShot) shotMlInCart += (shotMlOf(v) || 0) * item.quantity;
+      }
+      const poolMl = Math.max(0, Number(product.availableShotMl) || 0);
+      const openBottleRemainderMl = poolMl % 750; // ml left in the currently open bottle
+      const bottlesReservedForShots = Math.ceil(Math.max(0, shotMlInCart - openBottleRemainderMl) / 750);
+      return variant.stock - inCartBottles - bottlesReservedForShots;
+    }
+
     const inCart = cart.find(i => i.variantId === variant.id)?.quantity || 0;
     return variant.stock - inCart;
   };
@@ -366,9 +413,13 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const remaining = availableStockFor(variant);
       if (remaining < quantity) {
         window.alert(
-          remaining <= 0
-            ? `${product.name} (${variant.size}) is out of stock.`
-            : `Only ${remaining} x ${product.name} (${variant.size}) left in stock.`
+          variant.isShot
+            ? (remaining <= 0
+                ? `${product.name} (${variant.size}) — no more shots left in the 750ml bottle stock.`
+                : `Only ${remaining} x ${product.name} (${variant.size}) shot(s) left in the 750ml bottle stock.`)
+            : (remaining <= 0
+                ? `${product.name} (${variant.size}) is out of stock.`
+                : `Only ${remaining} x ${product.name} (${variant.size}) left in stock.`)
         );
         closeVariantModal();
         return;
@@ -425,14 +476,23 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Never allow the cart quantity to exceed the stock on hand
     const allowNegativeStock = settings?.allowNegativeStock === true;
     if (!allowNegativeStock) {
-      let stockOnHand: number | null = null;
+      let variantRef: ProductVariant | null = null;
       for (const p of products) {
         const v = p.variants.find(x => x.id === variantId);
-        if (v) { stockOnHand = v.stock; break; }
+        if (v) { variantRef = v; break; }
       }
-      if (stockOnHand !== null && quantity > stockOnHand) {
-        window.alert(`Only ${stockOnHand} unit(s) available in stock.`);
-        quantity = Math.max(1, stockOnHand);
+      if (variantRef) {
+        const currentQty = cart.find(i => i.variantId === variantId)?.quantity || 0;
+        // availableStockFor already subtracts what is in the cart (incl. shared 750ml shot pool)
+        const maxQty = availableStockFor(variantRef) + currentQty;
+        if (quantity > maxQty) {
+          window.alert(
+            variantRef.isShot
+              ? `Only ${Math.max(0, maxQty)} shot(s) can still be poured from the 750ml bottle stock.`
+              : `Only ${Math.max(0, maxQty)} unit(s) available in stock.`
+          );
+          quantity = Math.max(1, maxQty);
+        }
       }
     }
 
@@ -666,6 +726,9 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         openVariantModal,
         closeVariantModal,
         addToCart,
+        availableStockFor,
+        isDamageModalOpen,
+        setIsDamageModalOpen,
         updateCartQuantity,
         removeFromCart,
         clearCart,

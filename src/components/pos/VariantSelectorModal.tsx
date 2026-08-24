@@ -9,6 +9,7 @@ export const VariantSelectorModal: React.FC = () => {
     selectedProductForVariant,
     closeVariantModal,
     addToCart,
+    availableStockFor,
     settings,
   } = usePOS();
 
@@ -60,8 +61,11 @@ export const VariantSelectorModal: React.FC = () => {
               .filter(v => v.isActive)
               .map(variant => {
                 const isSelected = selectedVariant?.id === variant.id;
-                const isOutOfStock = variant.stock <= 0;
-                const isLowStock = variant.stock > 0 && variant.stock <= variant.minStockLevel;
+                const isShot = Boolean(product.servesShots && variant.isShot);
+                // Cart-aware remaining: shots & bottles share the same 750ml pool
+                const remaining = availableStockFor(variant);
+                const isOutOfStock = remaining <= 0;
+                const isLowStock = !isShot && remaining > 0 && remaining <= variant.minStockLevel;
 
                 return (
                   <button
@@ -85,6 +89,11 @@ export const VariantSelectorModal: React.FC = () => {
                       <span className="text-sm font-semibold text-slate-500 dark:text-slate-400">
                         {currencySymbol} {variant.sellingPrice.toLocaleString()}
                       </span>
+                      {isShot && (
+                        <span className="mt-1 inline-block text-[9px] font-black uppercase tracking-wide text-amber-700 dark:text-amber-400 bg-amber-100 dark:bg-amber-950/50 px-1.5 py-0.5 rounded">
+                          Shot • from 750ml bottle
+                        </span>
+                      )}
                     </div>
 
                     <div className="mt-2.5">
@@ -94,11 +103,11 @@ export const VariantSelectorModal: React.FC = () => {
                         </span>
                       ) : isLowStock ? (
                         <span className="text-[10px] text-orange-500 font-bold uppercase underline">
-                          Low Stock: {variant.stock}
+                          Low Stock: {remaining}
                         </span>
                       ) : (
                         <span className="text-[10px] text-green-600 dark:text-emerald-400 font-bold uppercase">
-                          Stock: {variant.stock}
+                          {isShot ? `Shots Left: ${remaining}` : `Stock: ${remaining}`}
                         </span>
                       )}
                     </div>

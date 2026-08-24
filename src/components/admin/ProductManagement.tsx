@@ -38,8 +38,9 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
   const [formCompanyId, setFormCompanyId] = useState<string>('');
   const [formDescription, setFormDescription] = useState<string>('');
   const [formIsKitchen, setFormIsKitchen] = useState<boolean>(false);
+  const [formServesShots, setFormServesShots] = useState<boolean>(false);
   const [formVariants, setFormVariants] = useState<
-    { id?: string; size: string; sku: string; barcode?: string; costPrice: number; sellingPrice: number; stock: number; minStockLevel: number; isActive: boolean }[]
+    { id?: string; size: string; sku: string; barcode?: string; costPrice: number; sellingPrice: number; stock: number; minStockLevel: number; isActive: boolean; isShot?: boolean; shotVolumeMl?: number }[]
   >([]);
 
   const currencySymbol = settings?.currencySymbol || 'Rs.';
@@ -76,12 +77,12 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
     setFormCompanyId(companies[0]?.id || '');
     setFormDescription('');
     setFormIsKitchen(false);
+    setFormServesShots(false);
     // Default standard bottle sizes for quick entry
     setFormVariants([
       { size: '750ml Bottle', sku: '', costPrice: 3000, sellingPrice: 3800, stock: 20, minStockLevel: 5, isActive: true },
       { size: '375ml Half', sku: '', costPrice: 1500, sellingPrice: 1950, stock: 30, minStockLevel: 5, isActive: true },
       { size: '180ml Quarter', sku: '', costPrice: 750, sellingPrice: 1000, stock: 40, minStockLevel: 8, isActive: true },
-      { size: '50ml Peg', sku: '', costPrice: 220, sellingPrice: 320, stock: 80, minStockLevel: 10, isActive: true },
     ]);
     setErrorMsg(null);
     setIsModalOpen(true);
@@ -94,6 +95,7 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
     setFormCompanyId(product.companyId || '');
     setFormDescription(product.description || '');
     setFormIsKitchen(product.isKitchenItem);
+    setFormServesShots(Boolean(product.servesShots));
     setFormVariants(
       product.variants.map(v => ({
         id: v.id,
@@ -102,13 +104,33 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
         barcode: v.barcode || '',
         costPrice: v.costPrice,
         sellingPrice: v.sellingPrice,
-        stock: v.stock,
+        stock: v.isShot ? 0 : v.stock,
         minStockLevel: v.minStockLevel,
         isActive: v.isActive,
+        isShot: v.isShot || false,
+        shotVolumeMl: v.shotVolumeMl,
       }))
     );
     setErrorMsg(null);
     setIsModalOpen(true);
+  };
+
+  /** Toggle "Serves Shots": adds the standard 100/50/25ml shot rows or removes them. */
+  const handleToggleServesShots = (enabled: boolean) => {
+    setFormServesShots(enabled);
+    if (enabled) {
+      setFormVariants(prev => {
+        if (prev.some(v => v.isShot)) return prev;
+        return [
+          ...prev,
+          { size: '100ml Shot', sku: '', costPrice: 0, sellingPrice: 620, stock: 0, minStockLevel: 0, isActive: true, isShot: true, shotVolumeMl: 100 },
+          { size: '50ml Shot', sku: '', costPrice: 0, sellingPrice: 330, stock: 0, minStockLevel: 0, isActive: true, isShot: true, shotVolumeMl: 50 },
+          { size: '25ml Shot', sku: '', costPrice: 0, sellingPrice: 180, stock: 0, minStockLevel: 0, isActive: true, isShot: true, shotVolumeMl: 25 },
+        ];
+      });
+    } else {
+      setFormVariants(prev => prev.filter(v => !v.isShot));
+    }
   };
 
   const addVariantRow = () => {
@@ -140,6 +162,17 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
       setErrorMsg('Please define at least one size/variant.');
       return;
     }
+    if (formServesShots) {
+      const hasBottle = formVariants.some(v => !v.isShot && /750\s*ml/i.test(v.size));
+      if (!hasBottle) {
+        setErrorMsg('Serves Shots requires a 750ml Bottle size — shots are deducted from the 750ml bottle total stock.');
+        return;
+      }
+      if (!formVariants.some(v => v.isShot)) {
+        setErrorMsg('Serves Shots is enabled but no shot sizes (100ml / 50ml / 25ml) are defined.');
+        return;
+      }
+    }
 
     try {
       setErrorMsg(null);
@@ -149,12 +182,15 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
         companyId: formCompanyId || undefined,
         description: formDescription.trim(),
         isKitchenItem: formIsKitchen,
+        servesShots: formServesShots,
         variants: formVariants.map(v => ({
           ...v,
           costPrice: Number(v.costPrice || 0),
           sellingPrice: Number(v.sellingPrice || 0),
-          stock: Number(v.stock || 0),
-          minStockLevel: Number(v.minStockLevel || 5),
+          stock: v.isShot ? 0 : Number(v.stock || 0),
+          minStockLevel: v.isShot ? 0 : Number(v.minStockLevel || 5),
+          isShot: formServesShots && Boolean(v.isShot),
+          shotVolumeMl: formServesShots && v.isShot ? Number(v.shotVolumeMl || 0) : undefined,
         })),
       };
 
@@ -318,6 +354,16 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
                             Kitchen KOT
                           </span>
                         )}
+                        {product.servesShots && (
+                          <span className="px-1.5 py-0.2 bg-purple-50 text-purple-700 dark:bg-purple-950 dark:text-purple-300 rounded font-semibold text-[10px]" title="Shots are deducted from the 750ml Bottle total stock">
+                            🥃 Shots from 750ml
+                          </span>
+                        )}
+                        {product.servesShots && (product.openBottleUsedMl || 0) > 0 && (
+                          <span className="px-1.5 py-0.2 bg-cyan-50 text-cyan-700 dark:bg-cyan-950 dark:text-cyan-300 rounded font-semibold text-[10px]" title="The currently open 750ml bottle">
+                            Open bottle: {product.openBottleUsedMl}ml used / {750 - (product.openBottleUsedMl || 0)}ml left
+                          </span>
+                        )}
                       </div>
                     </td>
 
@@ -334,14 +380,16 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
                           <span
                             key={v.id}
                             className={`px-2 py-0.5 rounded-md text-[10px] font-semibold border ${
-                              v.stock <= 0
+                              v.isShot
+                                ? 'bg-purple-50 border-purple-200 text-purple-700 dark:bg-purple-950/40 dark:border-purple-900 dark:text-purple-300'
+                                : v.stock <= 0
                                 ? 'bg-rose-50 border-rose-200 text-rose-700 dark:bg-rose-950/40 dark:border-rose-900 dark:text-rose-300'
                                 : v.stock <= v.minStockLevel
                                 ? 'bg-amber-50 border-amber-200 text-amber-700 dark:bg-amber-950/40 dark:border-amber-900 dark:text-amber-300'
                                 : 'bg-slate-50 border-slate-200 text-slate-700 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300'
                             }`}
                           >
-                            <strong>{v.size}</strong>: {currencySymbol}{v.sellingPrice.toLocaleString()} (Qty: {v.stock})
+                            <strong>{v.size}</strong>: {currencySymbol}{v.sellingPrice.toLocaleString()} {v.isShot ? `(Shots left: ${v.stock})` : `(Qty: ${v.stock})`}
                           </span>
                         ))}
                       </div>
@@ -474,7 +522,7 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
                   </select>
                 </div>
 
-                <div className="sm:col-span-2 flex items-center gap-3 pt-4">
+                <div className="sm:col-span-2 flex flex-col gap-2.5 pt-4">
                   <label className="flex items-center gap-2 cursor-pointer text-xs font-bold text-slate-800 dark:text-slate-200">
                     <input
                       type="checkbox"
@@ -483,6 +531,21 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
                       className="w-4 h-4 text-blue-600 rounded"
                     />
                     <span>Kitchen Food Item (Triggers Kitchen Order Tickets KOT)</span>
+                  </label>
+
+                  <label className="flex items-start gap-2 cursor-pointer text-xs font-bold text-slate-800 dark:text-slate-200">
+                    <input
+                      type="checkbox"
+                      checked={formServesShots}
+                      onChange={e => handleToggleServesShots(e.target.checked)}
+                      className="w-4 h-4 mt-0.5 text-amber-600 rounded"
+                    />
+                    <span>
+                      🥃 Serves Shots (100ml / 50ml / 25ml)
+                      <span className="block font-medium text-[11px] text-slate-500 mt-0.5">
+                        Shot sizes hold NO separate stock — every shot sold is automatically deducted from the <strong>750ml Bottle total stock</strong>. When 750ml worth of shots is poured, the bottle count drops by 1.
+                      </span>
+                    </span>
                   </label>
                 </div>
               </div>
@@ -537,20 +600,43 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
                     </thead>
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800 bg-white dark:bg-slate-900">
                       {formVariants.map((variant, idx) => (
-                        <tr key={idx}>
+                        <tr key={idx} className={variant.isShot ? 'bg-amber-50/60 dark:bg-amber-950/20' : ''}>
                           <td className="py-2 px-3">
-                            <input
-                              type="text"
-                              required
-                              placeholder="e.g. 750ml, 50ml, Full"
-                              value={variant.size}
-                              onChange={e => {
-                                const copy = [...formVariants];
-                                copy[idx].size = e.target.value;
-                                setFormVariants(copy);
-                              }}
-                              className="w-full px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-bold text-slate-900 dark:text-white"
-                            />
+                            {variant.isShot ? (
+                              <div className="flex items-center gap-1.5">
+                                <select
+                                  value={variant.shotVolumeMl || 25}
+                                  onChange={e => {
+                                    const copy = [...formVariants];
+                                    const vol = Number(e.target.value);
+                                    copy[idx].shotVolumeMl = vol;
+                                    copy[idx].size = `${vol}ml Shot`;
+                                    setFormVariants(copy);
+                                  }}
+                                  className="px-2 py-1 bg-white dark:bg-slate-800 border border-amber-300 dark:border-amber-800 rounded-lg text-xs font-bold text-amber-800 dark:text-amber-300 cursor-pointer"
+                                >
+                                  <option value={100}>100ml</option>
+                                  <option value={50}>50ml</option>
+                                  <option value={25}>25ml</option>
+                                </select>
+                                <span className="text-[10px] font-black uppercase text-amber-700 dark:text-amber-400 whitespace-nowrap">
+                                  Shot 🥃
+                                </span>
+                              </div>
+                            ) : (
+                              <input
+                                type="text"
+                                required
+                                placeholder="e.g. 750ml, 375ml, Full"
+                                value={variant.size}
+                                onChange={e => {
+                                  const copy = [...formVariants];
+                                  copy[idx].size = e.target.value;
+                                  setFormVariants(copy);
+                                }}
+                                className="w-full px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-bold text-slate-900 dark:text-white"
+                              />
+                            )}
                           </td>
                           <td className="py-2 px-3">
                             <input
@@ -570,6 +656,7 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
                               type="number"
                               min="0"
                               value={variant.costPrice}
+                              title={variant.isShot ? 'Leave 0 for automatic cost — calculated proportionally from the 750ml Bottle cost price' : undefined}
                               onChange={e => {
                                 const copy = [...formVariants];
                                 copy[idx].costPrice = Number(e.target.value);
@@ -577,6 +664,9 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
                               }}
                               className="w-24 px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs"
                             />
+                            {variant.isShot && !(Number(variant.costPrice) > 0) && (
+                              <span className="block text-[9px] text-slate-400 mt-0.5">0 = auto from 750ml</span>
+                            )}
                           </td>
                           <td className="py-2 px-3">
                             <input
@@ -593,30 +683,43 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
                             />
                           </td>
                           <td className="py-2 px-3">
-                            <input
-                              type="number"
-                              min="0"
-                              value={variant.stock}
-                              onChange={e => {
-                                const copy = [...formVariants];
-                                copy[idx].stock = Number(e.target.value);
-                                setFormVariants(copy);
-                              }}
-                              className="w-20 px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-bold"
-                            />
+                            {variant.isShot ? (
+                              <span
+                                className="block w-20 px-2 py-1 text-[10px] font-bold text-amber-700 dark:text-amber-400 whitespace-nowrap"
+                                title="Shots are automatically deducted from the 750ml Bottle total stock"
+                              >
+                                Auto — 750ml
+                              </span>
+                            ) : (
+                              <input
+                                type="number"
+                                min="0"
+                                value={variant.stock}
+                                onChange={e => {
+                                  const copy = [...formVariants];
+                                  copy[idx].stock = Number(e.target.value);
+                                  setFormVariants(copy);
+                                }}
+                                className="w-20 px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-bold"
+                              />
+                            )}
                           </td>
                           <td className="py-2 px-3">
-                            <input
-                              type="number"
-                              min="0"
-                              value={variant.minStockLevel}
-                              onChange={e => {
-                                const copy = [...formVariants];
-                                copy[idx].minStockLevel = Number(e.target.value);
-                                setFormVariants(copy);
-                              }}
-                              className="w-16 px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs text-slate-500"
-                            />
+                            {variant.isShot ? (
+                              <span className="block w-16 px-2 py-1 text-xs text-slate-400 text-center">—</span>
+                            ) : (
+                              <input
+                                type="number"
+                                min="0"
+                                value={variant.minStockLevel}
+                                onChange={e => {
+                                  const copy = [...formVariants];
+                                  copy[idx].minStockLevel = Number(e.target.value);
+                                  setFormVariants(copy);
+                                }}
+                                className="w-16 px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs text-slate-500"
+                              />
+                            )}
                           </td>
                           <td className="py-2 px-2 text-center">
                             <button

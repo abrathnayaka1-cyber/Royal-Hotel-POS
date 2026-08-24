@@ -42,6 +42,14 @@ export interface ProductVariant {
   stock: number;
   minStockLevel: number;
   isActive: boolean;
+  /**
+   * Shot / peg poured from the 750ml bottle stock.
+   * Shot variants keep NO independent stock — every shot sold reduces the
+   * 750ml bottle stock (via the product's open-bottle ml tracker).
+   */
+  isShot?: boolean;
+  /** Pour volume in ml for shot variants (e.g. 100, 50, 25). */
+  shotVolumeMl?: number;
 }
 
 export interface Product {
@@ -57,6 +65,10 @@ export interface Product {
   isArchived?: boolean;
   createdAt: string;
   variants: ProductVariant[];
+  /** When true, this item serves shots (100/50/25ml) poured from its 750ml bottle stock. */
+  servesShots?: boolean;
+  /** ml already poured (sold as shots) from the currently open 750ml bottle. 0..749 */
+  openBottleUsedMl?: number;
 }
 
 export interface OrderItem {
@@ -226,6 +238,68 @@ export interface AuditLog {
   createdAt: string;
 }
 
+// ==========================================
+// SMART STOCK IMPORT (Excel / CSV / PDF)
+// ==========================================
+
+export type StockImportType = 'purchase' | 'physical_count';
+
+export type StockImportRowStatus =
+  | 'MATCHED'
+  | 'NEW_ITEM'
+  | 'PRICE_CHANGE'
+  | 'DUPLICATE'
+  | 'NEEDS_REVIEW'
+  | 'INVALID';
+
+export interface StockImportRowResult {
+  productName: string;
+  size: string;
+  sku?: string;
+  productId?: string;
+  variantId?: string;
+  status: StockImportRowStatus;
+  quantity: number;          // Purchase: units added. Physical count: counted quantity.
+  stockBefore?: number;
+  stockAfter?: number;
+  adjustment?: number;       // Physical count difference (+/-)
+  oldCostPrice?: number;
+  newCostPrice?: number;
+  oldSellingPrice?: number;
+  newSellingPrice?: number;
+  note?: string;
+}
+
+export interface StockImport {
+  id: string;                // e.g. IMP-20260824-0001
+  importType: StockImportType;
+  fileName?: string;
+  fileType?: string;         // xlsx | xls | csv | pdf | manual
+  fileHash?: string;         // SHA-256 fingerprint for duplicate detection
+  supplier?: string;
+  invoiceNumber?: string;
+  invoiceDate?: string;
+  summary: {
+    matched: number;
+    newProducts: number;
+    newVariants: number;
+    newCategories: number;
+    newCompanies: number;
+    priceChanges: number;
+    totalUnitsAdded: number;
+    totalAdjustment: number;
+    rowsImported: number;
+    rowsExcluded: number;
+  };
+  createdCategories: string[];
+  createdCompanies: string[];
+  createdProducts: string[];
+  rows: StockImportRowResult[];
+  userId: string;
+  userName: string;
+  createdAt: string;
+}
+
 export interface SystemSettings {
   businessName: string;
   businessTagline?: string;
@@ -265,6 +339,7 @@ export interface DatabaseSchema {
   kots: KOT[];
   bills: Bill[];
   stockMovements: StockMovement[];
+  stockImports: StockImport[];
   auditLogs: AuditLog[];
   settings: SystemSettings;
   counters: {
@@ -273,6 +348,7 @@ export interface DatabaseSchema {
     kotSeq: number;
     bookingSeq: number;
     holdSeq?: number;
+    importSeq?: number;
   };
 }
 
@@ -343,7 +419,7 @@ const initialCompanies: Company[] = [
 ];
 
 const initialProducts: Product[] = [
-  // Rockland Old Arrack / Gal Arrack
+  // Rockland Old Arrack / Gal Arrack — serves shots poured from the 750ml bottle stock
   {
     id: 'prod-1',
     name: 'Rockland Old Arrack (Gal Arrack)',
@@ -352,14 +428,16 @@ const initialProducts: Product[] = [
     description: 'Traditional blended coconut spirit aged in teak vats.',
     isKitchenItem: false,
     isActive: true,
+    servesShots: true,
+    openBottleUsedMl: 0,
     createdAt: new Date().toISOString(),
     variants: [
       { id: 'var-1-750', productId: 'prod-1', size: '750ml Bottle', sku: 'RK-ARR-750', costPrice: 3100, sellingPrice: 3850, stock: 24, minStockLevel: 5, isActive: true },
       { id: 'var-1-375', productId: 'prod-1', size: '375ml Half', sku: 'RK-ARR-375', costPrice: 1600, sellingPrice: 1980, stock: 36, minStockLevel: 6, isActive: true },
       { id: 'var-1-180', productId: 'prod-1', size: '180ml Quarter', sku: 'RK-ARR-180', costPrice: 800, sellingPrice: 1050, stock: 45, minStockLevel: 10, isActive: true },
-      { id: 'var-1-100', productId: 'prod-1', size: '100ml Shot Plus', sku: 'RK-ARR-100', costPrice: 460, sellingPrice: 620, stock: 50, minStockLevel: 10, isActive: true },
-      { id: 'var-1-50', productId: 'prod-1', size: '50ml Peg / Double', sku: 'RK-ARR-50', costPrice: 230, sellingPrice: 330, stock: 90, minStockLevel: 15, isActive: true },
-      { id: 'var-1-25', productId: 'prod-1', size: '25ml Single Shot', sku: 'RK-ARR-25', costPrice: 120, sellingPrice: 180, stock: 120, minStockLevel: 20, isActive: true },
+      { id: 'var-1-100', productId: 'prod-1', size: '100ml Shot Plus', sku: 'RK-ARR-100', costPrice: 460, sellingPrice: 620, stock: 0, minStockLevel: 0, isActive: true, isShot: true, shotVolumeMl: 100 },
+      { id: 'var-1-50', productId: 'prod-1', size: '50ml Peg / Double', sku: 'RK-ARR-50', costPrice: 230, sellingPrice: 330, stock: 0, minStockLevel: 0, isActive: true, isShot: true, shotVolumeMl: 50 },
+      { id: 'var-1-25', productId: 'prod-1', size: '25ml Single Shot', sku: 'RK-ARR-25', costPrice: 120, sellingPrice: 180, stock: 0, minStockLevel: 0, isActive: true, isShot: true, shotVolumeMl: 25 },
     ]
   },
   // DCSL Extra Special Arrack
@@ -832,6 +910,25 @@ export class Database {
             parsed.roomBookings = [];
           }
 
+          // Ensure stockImports array exists (Smart Stock Import history)
+          if (!Array.isArray(parsed.stockImports)) {
+            parsed.stockImports = [];
+          }
+
+          // Normalize shot-serving products (shots pour from the 750ml bottle stock)
+          if (Array.isArray(parsed.products)) {
+            parsed.products.forEach((p: Product) => {
+              if (p.servesShots) {
+                const used = Number(p.openBottleUsedMl);
+                p.openBottleUsedMl = Number.isFinite(used) && used > 0 ? used % 750 : 0;
+                // Shot variants never hold independent stock
+                (p.variants || []).forEach(v => {
+                  if (v.isShot) v.stock = 0;
+                });
+              }
+            });
+          }
+
           // Ensure counters has bookingSeq
           if (!parsed.counters) {
             parsed.counters = { billSeq: 1001, invoiceSeq: 5001, kotSeq: 101, bookingSeq: 2001, holdSeq: 1 };
@@ -865,6 +962,7 @@ export class Database {
       kots: [],
       bills: [],
       stockMovements: [],
+      stockImports: [],
       auditLogs: [
         {
           id: 'audit-1',
@@ -983,6 +1081,18 @@ export class Database {
     return `HOLD-${seq}`;
   }
 
+  /** Unique Smart Stock Import reference, e.g. IMP-20260824-0001 */
+  public getNextImportId(): string {
+    if (!this.data.counters.importSeq) {
+      this.data.counters.importSeq = 1;
+    }
+    const seq = this.data.counters.importSeq++;
+    const d = new Date();
+    const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+    this.save();
+    return `IMP-${ymd}-${String(seq).padStart(4, '0')}`;
+  }
+
   public getNextBookingNumber(): string {
     if (!this.data.counters.bookingSeq) {
       this.data.counters.bookingSeq = 2001;
@@ -1094,6 +1204,7 @@ export class Database {
     this.data.kots = this.data.kots || [];
     this.data.bills = this.data.bills || [];
     this.data.stockMovements = this.data.stockMovements || [];
+    this.data.stockImports = this.data.stockImports || [];
     this.data.auditLogs = this.data.auditLogs || [];
     this.data.settings = { ...defaultSettings, ...this.data.settings };
     this.save();

@@ -77,7 +77,8 @@ export const ProductGrid: React.FC = () => {
         const company = companies.find(c => c.id === product.companyId);
         const activeVariants = product.variants.filter(v => v.isActive);
         const minPrice = activeVariants.length > 0 ? Math.min(...activeVariants.map(v => v.sellingPrice)) : 0;
-        const totalStock = activeVariants.reduce((sum, v) => sum + v.stock, 0);
+        // Shot variants share the 750ml bottle liquid — don't double-count them in total stock
+        const totalStock = activeVariants.reduce((sum, v) => sum + (product.servesShots && v.isShot ? 0 : v.stock), 0);
         const isOutOfStock = totalStock <= 0;
         const isSingleVariant = activeVariants.length === 1;
 
