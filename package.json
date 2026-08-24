@@ -16,6 +16,8 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
+    "check:php": "node tools/check-php.mjs",
+    "test": "vitest run",
     "format": "prettier --write \"src/**/*.{ts,tsx,js,jsx}\""
   },
   "keywords": [
@@ -60,7 +62,12 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
     "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.4"
+    "@types/react-dom": "^19.2.4",
+    "jsdom": "^30.0.1",
+    "php-parser": "^3.7.0",
+    "vitest": "^4.1.11"
   }
 }

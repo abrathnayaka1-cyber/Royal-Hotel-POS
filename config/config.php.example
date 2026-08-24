@@ -19,3 +19,13 @@ return [
         'cors_origin' => '*',
     ]
 ];
+
+/*
+ * Cross-origin requests:
+ * The PHP API only reflects an Origin header when it belongs to the same host, or when it is
+ * listed in the CORS_ALLOWED_ORIGINS environment variable (comma separated, exact match), e.g.
+ *
+ *   CORS_ALLOWED_ORIGINS=https://pos.example.com,https://admin.example.com
+ *
+ * Same-host deployments (frontend + api on one domain) need no configuration at all.
+ */
