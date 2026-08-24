@@ -238,6 +238,68 @@ export interface AuditLog {
   createdAt: string;
 }
 
+// ==========================================
+// SMART STOCK IMPORT (Excel / CSV / PDF)
+// ==========================================
+
+export type StockImportType = 'purchase' | 'physical_count';
+
+export type StockImportRowStatus =
+  | 'MATCHED'
+  | 'NEW_ITEM'
+  | 'PRICE_CHANGE'
+  | 'DUPLICATE'
+  | 'NEEDS_REVIEW'
+  | 'INVALID';
+
+export interface StockImportRowResult {
+  productName: string;
+  size: string;
+  sku?: string;
+  productId?: string;
+  variantId?: string;
+  status: StockImportRowStatus;
+  quantity: number;          // Purchase: units added. Physical count: counted quantity.
+  stockBefore?: number;
+  stockAfter?: number;
+  adjustment?: number;       // Physical count difference (+/-)
+  oldCostPrice?: number;
+  newCostPrice?: number;
+  oldSellingPrice?: number;
+  newSellingPrice?: number;
+  note?: string;
+}
+
+export interface StockImport {
+  id: string;                // e.g. IMP-20260824-0001
+  importType: StockImportType;
+  fileName?: string;
+  fileType?: string;         // xlsx | xls | csv | pdf | manual
+  fileHash?: string;         // SHA-256 fingerprint for duplicate detection
+  supplier?: string;
+  invoiceNumber?: string;
+  invoiceDate?: string;
+  summary: {
+    matched: number;
+    newProducts: number;
+    newVariants: number;
+    newCategories: number;
+    newCompanies: number;
+    priceChanges: number;
+    totalUnitsAdded: number;
+    totalAdjustment: number;
+    rowsImported: number;
+    rowsExcluded: number;
+  };
+  createdCategories: string[];
+  createdCompanies: string[];
+  createdProducts: string[];
+  rows: StockImportRowResult[];
+  userId: string;
+  userName: string;
+  createdAt: string;
+}
+
 export interface SystemSettings {
   businessName: string;
   businessTagline?: string;
@@ -277,6 +339,7 @@ export interface DatabaseSchema {
   kots: KOT[];
   bills: Bill[];
   stockMovements: StockMovement[];
+  stockImports: StockImport[];
   auditLogs: AuditLog[];
   settings: SystemSettings;
   counters: {
@@ -285,6 +348,7 @@ export interface DatabaseSchema {
     kotSeq: number;
     bookingSeq: number;
     holdSeq?: number;
+    importSeq?: number;
   };
 }
 
@@ -846,6 +910,11 @@ export class Database {
             parsed.roomBookings = [];
           }
 
+          // Ensure stockImports array exists (Smart Stock Import history)
+          if (!Array.isArray(parsed.stockImports)) {
+            parsed.stockImports = [];
+          }
+
           // Normalize shot-serving products (shots pour from the 750ml bottle stock)
           if (Array.isArray(parsed.products)) {
             parsed.products.forEach((p: Product) => {
@@ -893,6 +962,7 @@ export class Database {
       kots: [],
       bills: [],
       stockMovements: [],
+      stockImports: [],
       auditLogs: [
         {
           id: 'audit-1',
@@ -1011,6 +1081,18 @@ export class Database {
     return `HOLD-${seq}`;
   }
 
+  /** Unique Smart Stock Import reference, e.g. IMP-20260824-0001 */
+  public getNextImportId(): string {
+    if (!this.data.counters.importSeq) {
+      this.data.counters.importSeq = 1;
+    }
+    const seq = this.data.counters.importSeq++;
+    const d = new Date();
+    const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+    this.save();
+    return `IMP-${ymd}-${String(seq).padStart(4, '0')}`;
+  }
+
   public getNextBookingNumber(): string {
     if (!this.data.counters.bookingSeq) {
       this.data.counters.bookingSeq = 2001;
@@ -1122,6 +1204,7 @@ export class Database {
     this.data.kots = this.data.kots || [];
     this.data.bills = this.data.bills || [];
     this.data.stockMovements = this.data.stockMovements || [];
+    this.data.stockImports = this.data.stockImports || [];
     this.data.auditLogs = this.data.auditLogs || [];
     this.data.settings = { ...defaultSettings, ...this.data.settings };
     this.save();

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { fetchApi } from '../../lib/api.ts';
 import { SystemSettings } from '../../types.ts';
+import { StockImportModal } from './StockImportModal.tsx';
 import {
   Package,
   PlusCircle,
@@ -14,7 +15,8 @@ import {
   DollarSign,
   Layers,
   ArrowDownCircle,
-  ArrowUpCircle
+  ArrowUpCircle,
+  UploadCloud
 } from 'lucide-react';
 
 interface VariantInventoryItem {
@@ -53,6 +55,8 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const currencySymbol = settings?.currencySymbol || 'Rs.';
+
+  const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
 
   const loadInventory = async () => {
     try {
@@ -143,13 +147,23 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
           </p>
         </div>
 
-        <button
-          onClick={loadInventory}
-          className="p-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 rounded-xl text-slate-600 dark:text-slate-300 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer w-fit"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-          Refresh Stock
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            id="smart-import-btn"
+            onClick={() => setIsImportModalOpen(true)}
+            className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-md shadow-blue-600/20 transition-all cursor-pointer w-fit"
+          >
+            <UploadCloud className="w-3.5 h-3.5" />
+            Smart Import
+          </button>
+          <button
+            onClick={loadInventory}
+            className="p-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 rounded-xl text-slate-600 dark:text-slate-300 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer w-fit"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+            Refresh Stock
+          </button>
+        </div>
       </div>
 
       {/* Stock Valuation KPI Cards */}
@@ -444,6 +458,14 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
           </div>
         </div>
       )}
+
+      {/* Smart Stock Import (Excel / CSV / PDF) */}
+      <StockImportModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        onImported={loadInventory}
+        currencySymbol={currencySymbol}
+      />
     </div>
   );
 };

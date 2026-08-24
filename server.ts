@@ -10,7 +10,7 @@ import rateLimit from 'express-rate-limit';
 import { createServer as createViteServer } from 'vite';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
-import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking } from './server/db.ts';
+import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking, StockImport, StockImportRowResult, StockImportType } from './server/db.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -1541,6 +1541,968 @@ app.post('/api/inventory/damage-report', authMiddleware, (req: Request, res: Res
       : `${numQty} x ${product.name} (${variant.size}) recorded as damaged. Admin has been notified via the audit log.`,
     newStock: variant.stock
   });
+});
+
+// ==========================================
+// SMART STOCK IMPORT (EXCEL / CSV / PDF) — SUPER ADMIN
+// ==========================================
+// Additive module: reuses products/variants/categories/companies,
+// stock_movements ledger and audit logging. Fully preview-first and
+// transactional (snapshot + rollback on failure).
+
+interface RawImportRow {
+  rowNumber?: number;
+  sku?: string;
+  barcode?: string;
+  category?: string;
+  brand?: string;
+  productName?: string;
+  size?: string;
+  buyingPrice?: string | number | null;
+  sellingPrice?: string | number | null;
+  quantity?: string | number | null;
+  minStock?: string | number | null;
+  supplier?: string;
+  invoiceNumber?: string;
+  invoiceDate?: string;
+}
+
+interface ImportRowDecision {
+  excluded?: boolean;
+  applyBuyingPrice?: boolean;
+  applySellingPrice?: boolean;
+  /** Manually resolved match for NEEDS_REVIEW rows ('new' = create as new item). */
+  resolvedVariantId?: string;
+  /** Admin-corrected quantity (e.g. for PDF rows). */
+  quantity?: number;
+}
+
+interface ImportPreviewRow {
+  rowId: number;
+  rowNumber: number;
+  productName: string;
+  size: string;
+  sku?: string;
+  barcode?: string;
+  category?: string;
+  brand?: string;
+  quantity: number;
+  buyingPrice?: number;
+  sellingPrice?: number;
+  minStock?: number;
+  status: 'MATCHED' | 'NEW_ITEM' | 'PRICE_CHANGE' | 'DUPLICATE' | 'NEEDS_REVIEW' | 'INVALID';
+  note?: string;
+  excluded: boolean;
+  matchedVariantId?: string;
+  matchedProductId?: string;
+  matchedLabel?: string;
+  targetProductId?: string; // new size for an existing product
+  existingStock?: number;
+  finalStock?: number;
+  adjustment?: number;
+  oldCost?: number;
+  newCost?: number;
+  oldSell?: number;
+  newSell?: number;
+  priceChange?: boolean;
+  isNewCategory?: boolean;
+  isNewCompany?: boolean;
+  candidates?: { variantId: string; label: string }[];
+}
+
+interface ImportMeta {
+  fileName?: string;
+  fileType?: string;
+  fileHash?: string;
+  supplier?: string;
+  invoiceNumber?: string;
+  invoiceDate?: string;
+}
+
+const IMPORT_MAX_ROWS = 2000;
+
+/** Normalizes text for matching: lowercase, collapse whitespace, strip punctuation, unify "750 ML" -> "750ml". */
+function importNormText(s: unknown): string {
+  return String(s ?? '')
+    .toLowerCase()
+    .replace(/(\d+(?:\.\d+)?)\s*m\s*l\b/g, '$1ml')
+    .replace(/[.,;:_\-\/\\'"()\[\]]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Size identity key: the ml volume when present ("750 ML Bottle" -> "750ml"), else the normalized label. */
+function importSizeKey(s: unknown): string {
+  const ml = parseMlFromSize(String(s ?? ''));
+  if (ml) return `${ml}ml`;
+  return importNormText(s);
+}
+
+/** Parses money values like "Rs. 3,200", "3,200", "3200.50". Returns undefined when blank, NaN when invalid. */
+function importParseMoney(v: unknown): number | undefined {
+  if (v === undefined || v === null || String(v).trim() === '') return undefined;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : NaN;
+  const cleaned = String(v).replace(/rs\.?|lkr|රු|\s/gi, '').replace(/,/g, '');
+  if (cleaned === '' || !/^-?\d*(\.\d+)?$/.test(cleaned)) return NaN;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+/** Parses quantities. Returns undefined when blank, NaN when invalid. */
+function importParseQty(v: unknown): number | undefined {
+  const n = importParseMoney(v);
+  if (n === undefined) return undefined;
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return NaN;
+  return n;
+}
+
+interface MatchHit { product: Product; variant: ProductVariant; }
+
+function importVariantLabel(hit: MatchHit): string {
+  return `${hit.product.name} — ${hit.variant.size} [${hit.variant.sku || hit.variant.id}]`;
+}
+
+/** Builds lookup indexes across all live products for the matching engine. */
+function buildImportMatchIndex() {
+  const byBarcode = new Map<string, MatchHit>();
+  const bySku = new Map<string, MatchHit>();
+  const byNameSizeBrand = new Map<string, MatchHit[]>();
+  const byNameSize = new Map<string, MatchHit[]>();
+  const bySizeKey = new Map<string, MatchHit[]>();
+  const productByName = new Map<string, Product[]>();
+  const companyByName = new Map<string, Company>();
+  const categoryByName = new Map<string, Category>();
+
+  db.raw.companies.forEach(c => companyByName.set(importNormText(c.name), c));
+  db.raw.categories.forEach(c => categoryByName.set(importNormText(c.name), c));
+
+  for (const p of db.raw.products) {
+    if (p.isArchived) continue;
+    const nName = importNormText(p.name);
+    const comp = p.companyId ? db.raw.companies.find(c => c.id === p.companyId) : undefined;
+    const nComp = comp ? importNormText(comp.name) : '';
+
+    if (!productByName.has(nName)) productByName.set(nName, []);
+    productByName.get(nName)!.push(p);
+
+    for (const v of p.variants) {
+      const hit: MatchHit = { product: p, variant: v };
+      if (v.barcode && v.barcode.trim()) {
+        byBarcode.set(v.barcode.trim().toLowerCase(), hit);
+      }
+      if (v.sku && v.sku.trim()) {
+        bySku.set(v.sku.trim().toLowerCase(), hit);
+      }
+      const sKey = importSizeKey(v.size);
+      if (!bySizeKey.has(sKey)) bySizeKey.set(sKey, []);
+      bySizeKey.get(sKey)!.push(hit);
+      const k2 = `${nName}|${sKey}`;
+      if (!byNameSize.has(k2)) byNameSize.set(k2, []);
+      byNameSize.get(k2)!.push(hit);
+      const k3 = `${nName}|${sKey}|${nComp}`;
+      if (!byNameSizeBrand.has(k3)) byNameSizeBrand.set(k3, []);
+      byNameSizeBrand.get(k3)!.push(hit);
+    }
+  }
+  return { byBarcode, bySku, byNameSizeBrand, byNameSize, bySizeKey, productByName, companyByName, categoryByName };
+}
+
+/** Infers a sensible category type for auto-created categories. */
+function inferCategoryType(name: string): Category['type'] {
+  const n = importNormText(name);
+  if (/beer|wine|arrack|whisky|whiskey|vodka|gin|rum|brandy|spirit|liquor|stout|lager|toddy|sake|cider/.test(n)) return 'bar';
+  if (/food|meal|rice|kottu|bites|starter|dessert|drink|juice|soft/.test(n)) return 'restaurant';
+  return 'other';
+}
+
+/**
+ * Core engine: sanitizes, matches, validates and stages every uploaded row.
+ * NEVER mutates the database — used by both /preview and /confirm.
+ */
+function processImportRows(
+  importType: StockImportType,
+  rawRows: RawImportRow[],
+  decisions: Record<string, ImportRowDecision> = {}
+): {
+  rows: ImportPreviewRow[];
+  summary: {
+    totalRows: number; matched: number; newItems: number; priceChanges: number;
+    newCategories: string[]; newCompanies: string[]; unitsToAdd: number; totalAdjustment: number;
+    needsReview: number; invalid: number; duplicates: number; excluded: number;
+  };
+} {
+  const idx = buildImportMatchIndex();
+  const rows: ImportPreviewRow[] = [];
+  const seenIdentity = new Map<string, ImportPreviewRow>();
+  const newCategorySet = new Set<string>();
+  const newCompanySet = new Set<string>();
+
+  rawRows.slice(0, IMPORT_MAX_ROWS).forEach((raw, i) => {
+    const decision = decisions[String(i)] || {};
+    const row: ImportPreviewRow = {
+      rowId: i,
+      rowNumber: Number(raw.rowNumber) || i + 2,
+      productName: String(raw.productName ?? '').trim().slice(0, 191),
+      size: String(raw.size ?? '').trim().slice(0, 64),
+      sku: raw.sku ? String(raw.sku).trim().slice(0, 128) : undefined,
+      barcode: raw.barcode ? String(raw.barcode).trim().slice(0, 128) : undefined,
+      category: raw.category ? String(raw.category).trim().slice(0, 128) : undefined,
+      brand: raw.brand ? String(raw.brand).trim().slice(0, 128) : undefined,
+      quantity: 0,
+      status: 'MATCHED',
+      excluded: Boolean(decision.excluded),
+    };
+
+    // Skip fully blank rows silently
+    if (!row.productName && !row.sku && !row.barcode && !row.size &&
+        (raw.quantity === undefined || raw.quantity === null || String(raw.quantity).trim() === '')) {
+      return;
+    }
+
+    // ---- Quantity ----
+    const qtyOverride = decision.quantity !== undefined ? decision.quantity : undefined;
+    const qty = qtyOverride !== undefined ? importParseQty(qtyOverride) : importParseQty(raw.quantity);
+    if (importType === 'purchase') {
+      if (qty === undefined) {
+        row.quantity = 0; // price-update-only rows are allowed
+      } else if (Number.isNaN(qty) || qty < 0 || qty > 100000) {
+        row.status = 'INVALID';
+        row.note = 'Invalid quantity — must be a whole number (0 – 100,000). Negative receipts are not allowed.';
+      } else {
+        row.quantity = qty;
+      }
+    } else {
+      if (qty === undefined || Number.isNaN(qty) || qty < 0 || qty > 1000000) {
+        row.status = 'INVALID';
+        row.note = 'Invalid physical count — a counted quantity (0 or more) is required.';
+      } else {
+        row.quantity = qty;
+      }
+    }
+
+    // ---- Prices ----
+    const buy = importParseMoney(raw.buyingPrice);
+    const sell = importParseMoney(raw.sellingPrice);
+    if (buy !== undefined && (Number.isNaN(buy) || buy < 0 || buy > 100000000)) {
+      row.status = 'INVALID';
+      row.note = row.note ? `${row.note} Invalid buying price.` : 'Invalid buying price.';
+    } else if (buy !== undefined) {
+      row.buyingPrice = buy;
+    }
+    if (sell !== undefined && (Number.isNaN(sell) || sell < 0 || sell > 100000000)) {
+      row.status = 'INVALID';
+      row.note = row.note ? `${row.note} Invalid selling price.` : 'Invalid selling price.';
+    } else if (sell !== undefined) {
+      row.sellingPrice = sell;
+    }
+    const minStock = importParseQty(raw.minStock);
+    if (minStock !== undefined && !Number.isNaN(minStock) && minStock >= 0) row.minStock = minStock;
+
+    // ---- Identity ----
+    const hasIdentity = Boolean(row.barcode || row.sku || (row.productName && row.size));
+    if (!hasIdentity && row.status !== 'INVALID') {
+      row.status = 'INVALID';
+      row.note = 'Missing product identity — provide SKU, Barcode, or Product Name + Size.';
+    }
+
+    if (row.status === 'INVALID') {
+      rows.push(row);
+      return;
+    }
+
+    // ---- Matching engine (Barcode > SKU > Name+Size+Brand > Name+Size) ----
+    let hit: MatchHit | null = null;
+    let ambiguous: MatchHit[] = [];
+
+    if (decision.resolvedVariantId && decision.resolvedVariantId !== 'new') {
+      const resolved = findVariantById(decision.resolvedVariantId);
+      if (resolved) hit = resolved;
+    } else if (decision.resolvedVariantId === 'new') {
+      hit = null; // force create-as-new
+    } else {
+      if (row.barcode) hit = idx.byBarcode.get(row.barcode.toLowerCase()) || null;
+      if (!hit && row.sku) hit = idx.bySku.get(row.sku.toLowerCase()) || null;
+      if (!hit && row.productName && row.size) {
+        const nName = importNormText(row.productName);
+        const sKey = importSizeKey(row.size);
+        if (row.brand) {
+          const k3 = `${nName}|${sKey}|${importNormText(row.brand)}`;
+          const hits3 = idx.byNameSizeBrand.get(k3) || [];
+          if (hits3.length === 1) hit = hits3[0];
+          else if (hits3.length > 1) ambiguous = hits3;
+        }
+        if (!hit && ambiguous.length === 0) {
+          const hits4 = idx.byNameSize.get(`${nName}|${sKey}`) || [];
+          if (hits4.length === 1) hit = hits4[0];
+          else if (hits4.length > 1) ambiguous = hits4;
+        }
+      }
+    }
+
+    if (ambiguous.length > 1 && !hit) {
+      row.status = 'NEEDS_REVIEW';
+      row.note = 'Multiple existing items match this row — pick the correct one.';
+      row.candidates = ambiguous.slice(0, 10).map(h => ({ variantId: h.variant.id, label: importVariantLabel(h) }));
+      rows.push(row);
+      return;
+    }
+
+    // ---- In-file duplicate detection / merging ----
+    const identityKey = hit
+      ? `v:${hit.variant.id}`
+      : `n:${importNormText(row.productName)}|${importSizeKey(row.size)}`;
+    const firstRow = seenIdentity.get(identityKey);
+    if (firstRow) {
+      if (importType === 'purchase') {
+        if (!row.excluded && !firstRow.excluded) {
+          firstRow.quantity += row.quantity;
+          if (firstRow.matchedVariantId && firstRow.existingStock !== undefined) {
+            firstRow.finalStock = firstRow.existingStock + firstRow.quantity;
+          }
+          firstRow.note = firstRow.note
+            ? `${firstRow.note} (+${row.quantity} merged from row ${row.rowNumber})`
+            : `Merged duplicate row ${row.rowNumber} (+${row.quantity})`;
+        }
+        row.status = 'DUPLICATE';
+        row.excluded = true;
+        row.note = `Duplicate of row ${firstRow.rowNumber} — quantity merged there.`;
+      } else {
+        if (firstRow.quantity === row.quantity) {
+          row.status = 'DUPLICATE';
+          row.excluded = true;
+          row.note = `Duplicate of row ${firstRow.rowNumber} — same count.`;
+        } else {
+          row.status = 'NEEDS_REVIEW';
+          row.note = `Conflicting counts in file (row ${firstRow.rowNumber}: ${firstRow.quantity}, this row: ${row.quantity}).`;
+        }
+      }
+      rows.push(row);
+      return;
+    }
+
+    if (hit) {
+      // ---- MATCHED path ----
+      if (isShotVariant(hit.product, hit.variant)) {
+        row.status = 'INVALID';
+        row.note = 'Shot size — shots pour from the 750ml Bottle stock. Import to the 750ml Bottle row instead.';
+        rows.push(row);
+        return;
+      }
+      row.matchedVariantId = hit.variant.id;
+      row.matchedProductId = hit.product.id;
+      row.matchedLabel = importVariantLabel(hit);
+      row.productName = row.productName || hit.product.name;
+      row.size = row.size || hit.variant.size;
+      row.existingStock = hit.variant.stock;
+
+      if (importType === 'purchase') {
+        row.finalStock = hit.variant.stock + row.quantity;
+        row.oldCost = hit.variant.costPrice;
+        row.oldSell = hit.variant.sellingPrice;
+        const costChanged = row.buyingPrice !== undefined && Math.abs(row.buyingPrice - hit.variant.costPrice) > 0.009;
+        const sellChanged = row.sellingPrice !== undefined && Math.abs(row.sellingPrice - hit.variant.sellingPrice) > 0.009;
+        if (costChanged) row.newCost = row.buyingPrice;
+        if (sellChanged) row.newSell = row.sellingPrice;
+        if (costChanged || sellChanged) {
+          row.priceChange = true;
+          row.status = 'PRICE_CHANGE';
+        }
+        if (row.quantity === 0 && !row.priceChange) {
+          row.note = 'No quantity and no price change — nothing to do.';
+        }
+      } else {
+        row.adjustment = row.quantity - hit.variant.stock;
+        row.finalStock = row.quantity;
+        if (row.adjustment === 0) row.note = 'Count matches system stock — no adjustment needed.';
+      }
+      seenIdentity.set(identityKey, row);
+      rows.push(row);
+      return;
+    }
+
+    // ---- Unmatched ----
+    if (importType === 'physical_count') {
+      row.status = 'NEEDS_REVIEW';
+      row.note = 'Item not found — physical count can only adjust existing items. Pick the matching item or exclude this row.';
+      if (row.productName && row.size) {
+        const nName = importNormText(row.productName);
+        const sameSize = idx.bySizeKey.get(importSizeKey(row.size)) || [];
+        row.candidates = sameSize
+          .filter(h => {
+            const hn = importNormText(h.product.name);
+            return nName.length >= 4 && (hn.includes(nName) || nName.includes(hn));
+          })
+          .slice(0, 10)
+          .map(h => ({ variantId: h.variant.id, label: importVariantLabel(h) }));
+      }
+      seenIdentity.set(identityKey, row);
+      rows.push(row);
+      return;
+    }
+
+    // Purchase mode: check for NEAR matches first — same size, similar (but not identical)
+    // product name. Never guess: surface them as NEEDS_REVIEW instead of creating duplicates.
+    if (row.productName && row.size && !decision.resolvedVariantId) {
+      const nName = importNormText(row.productName);
+      if (nName.length >= 4) {
+        const sameSize = idx.bySizeKey.get(importSizeKey(row.size)) || [];
+        const near = sameSize.filter(h => {
+          const hn = importNormText(h.product.name);
+          return hn !== nName && (hn.includes(nName) || nName.includes(hn));
+        });
+        if (near.length > 0) {
+          row.status = 'NEEDS_REVIEW';
+          row.note = `Possible match found ("${near[0].product.name}") — confirm whether this is the same item or a brand-new product.`;
+          row.candidates = near.slice(0, 10).map(h => ({ variantId: h.variant.id, label: importVariantLabel(h) }));
+          seenIdentity.set(identityKey, row);
+          rows.push(row);
+          return;
+        }
+      }
+    }
+
+    // Purchase mode: NEW ITEM (new product or new size of an existing product)
+    row.status = 'NEW_ITEM';
+    if (!row.productName || !row.size) {
+      row.status = 'NEEDS_REVIEW';
+      row.note = 'Cannot create a new item without both Product Name and Size.';
+      seenIdentity.set(identityKey, row);
+      rows.push(row);
+      return;
+    }
+    if (row.sellingPrice === undefined || row.sellingPrice <= 0) {
+      row.status = 'INVALID';
+      row.note = 'New items need a Selling Price greater than 0.';
+      rows.push(row);
+      return;
+    }
+
+    const sameNameProducts = idx.productByName.get(importNormText(row.productName)) || [];
+    if (sameNameProducts.length > 0) {
+      const brandNorm = row.brand ? importNormText(row.brand) : '';
+      const preferred = brandNorm
+        ? sameNameProducts.find(p => {
+            const comp = p.companyId ? db.raw.companies.find(c => c.id === p.companyId) : undefined;
+            return comp && importNormText(comp.name) === brandNorm;
+          }) || sameNameProducts[0]
+        : sameNameProducts[0];
+      row.targetProductId = preferred.id;
+      row.note = `New size "${row.size}" will be added to existing product "${preferred.name}".`;
+    } else {
+      row.note = 'Brand-new product will be created after confirmation.';
+      const catName = row.category || 'General';
+      if (!idx.categoryByName.has(importNormText(catName))) {
+        row.isNewCategory = true;
+        newCategorySet.add(catName);
+      }
+      if (row.brand && !idx.companyByName.has(importNormText(row.brand))) {
+        row.isNewCompany = true;
+        newCompanySet.add(row.brand);
+      }
+    }
+    row.existingStock = 0;
+    row.finalStock = row.quantity;
+    seenIdentity.set(identityKey, row);
+    rows.push(row);
+  });
+
+  // ---- Summary ----
+  const active = rows.filter(r => !r.excluded);
+  const summary = {
+    totalRows: rows.length,
+    matched: active.filter(r => r.matchedVariantId && (r.status === 'MATCHED' || r.status === 'PRICE_CHANGE')).length,
+    newItems: active.filter(r => r.status === 'NEW_ITEM').length,
+    priceChanges: active.filter(r => r.priceChange).length,
+    newCategories: Array.from(newCategorySet),
+    newCompanies: Array.from(newCompanySet),
+    unitsToAdd: importType === 'purchase'
+      ? active.filter(r => r.status !== 'INVALID' && r.status !== 'NEEDS_REVIEW').reduce((s, r) => s + r.quantity, 0)
+      : 0,
+    totalAdjustment: importType === 'physical_count'
+      ? active.filter(r => r.adjustment !== undefined).reduce((s, r) => s + (r.adjustment || 0), 0)
+      : 0,
+    needsReview: active.filter(r => r.status === 'NEEDS_REVIEW').length,
+    invalid: active.filter(r => r.status === 'INVALID').length,
+    duplicates: rows.filter(r => r.status === 'DUPLICATE').length,
+    excluded: rows.filter(r => r.excluded).length,
+  };
+
+  return { rows, summary };
+}
+
+/** Detects a previously processed import for the same invoice / file. */
+function findDuplicateImport(meta: ImportMeta, importType: StockImportType): StockImport | null {
+  const list = db.raw.stockImports || [];
+  const hash = meta.fileHash && String(meta.fileHash).trim();
+  const inv = meta.invoiceNumber && importNormText(meta.invoiceNumber);
+  const sup = meta.supplier && importNormText(meta.supplier);
+  for (const imp of list) {
+    if (hash && imp.fileHash && imp.fileHash === hash) return imp;
+    if (inv && imp.invoiceNumber && importNormText(imp.invoiceNumber) === inv &&
+        imp.importType === importType &&
+        (!sup || !imp.supplier || importNormText(imp.supplier) === sup)) {
+      return imp;
+    }
+  }
+  return null;
+}
+
+function sanitizeImportMeta(body: any): ImportMeta {
+  return {
+    fileName: body?.fileName ? String(body.fileName).slice(0, 191) : undefined,
+    fileType: body?.fileType ? String(body.fileType).slice(0, 16) : undefined,
+    fileHash: body?.fileHash ? String(body.fileHash).slice(0, 128) : undefined,
+    supplier: body?.supplier ? String(body.supplier).trim().slice(0, 191) : undefined,
+    invoiceNumber: body?.invoiceNumber ? String(body.invoiceNumber).trim().slice(0, 128) : undefined,
+    invoiceDate: body?.invoiceDate ? String(body.invoiceDate).trim().slice(0, 32) : undefined,
+  };
+}
+
+function parseImportRequest(body: any): { importType: StockImportType; rows: RawImportRow[]; decisions: Record<string, ImportRowDecision>; meta: ImportMeta } | { error: string } {
+  const importType: StockImportType = body?.importType === 'physical_count' ? 'physical_count' : body?.importType === 'purchase' ? 'purchase' : (null as any);
+  if (!importType) return { error: 'Import type must be "purchase" (Stock In) or "physical_count".' };
+  if (!Array.isArray(body?.rows) || body.rows.length === 0) {
+    return { error: 'No valid product rows found in the uploaded file.' };
+  }
+  if (body.rows.length > IMPORT_MAX_ROWS) {
+    return { error: `Too many rows (max ${IMPORT_MAX_ROWS} per import). Split the file and try again.` };
+  }
+  const decisions: Record<string, ImportRowDecision> = {};
+  if (body.decisions && typeof body.decisions === 'object') {
+    for (const [k, v] of Object.entries(body.decisions as Record<string, any>)) {
+      if (!v || typeof v !== 'object') continue;
+      decisions[k] = {
+        excluded: Boolean(v.excluded),
+        applyBuyingPrice: v.applyBuyingPrice === undefined ? undefined : Boolean(v.applyBuyingPrice),
+        applySellingPrice: v.applySellingPrice === undefined ? undefined : Boolean(v.applySellingPrice),
+        resolvedVariantId: typeof v.resolvedVariantId === 'string' ? v.resolvedVariantId.slice(0, 128) : undefined,
+        quantity: v.quantity === undefined || v.quantity === null || v.quantity === '' ? undefined : Number(v.quantity),
+      };
+    }
+  }
+  return { importType, rows: body.rows as RawImportRow[], decisions, meta: sanitizeImportMeta(body) };
+}
+
+// ---- PREVIEW (never touches the database) ----
+app.post('/api/inventory/import/preview', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
+  const parsed = parseImportRequest(req.body);
+  if ('error' in parsed) return res.status(400).json({ error: parsed.error });
+
+  try {
+    const { rows, summary } = processImportRows(parsed.importType, parsed.rows, parsed.decisions);
+    const duplicateImport = findDuplicateImport(parsed.meta, parsed.importType);
+    res.json({
+      rows,
+      summary,
+      duplicateImport: duplicateImport
+        ? {
+            id: duplicateImport.id,
+            invoiceNumber: duplicateImport.invoiceNumber,
+            supplier: duplicateImport.supplier,
+            fileName: duplicateImport.fileName,
+            importedAt: duplicateImport.createdAt,
+            importedBy: duplicateImport.userName,
+          }
+        : null,
+    });
+  } catch (e: any) {
+    console.error('[IMPORT] Preview failed:', e);
+    res.status(500).json({ error: 'Unable to analyse the uploaded rows. Please check the file and try again.' });
+  }
+});
+
+// ---- CONFIRM (transactional commit with rollback) ----
+app.post('/api/inventory/import/confirm', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const parsed = parseImportRequest(req.body);
+  if ('error' in parsed) return res.status(400).json({ error: parsed.error });
+  const force = Boolean(req.body?.force);
+
+  // Re-run the full engine server-side — never trust client-computed results
+  const { rows, summary } = processImportRows(parsed.importType, parsed.rows, parsed.decisions);
+
+  const problems = rows.filter(r => !r.excluded && (r.status === 'INVALID' || r.status === 'NEEDS_REVIEW'));
+  if (problems.length > 0) {
+    return res.status(400).json({
+      error: `Import contains ${problems.length} problematic row(s). Fix, resolve or exclude them before confirming.`,
+      problemRows: problems.map(r => ({ rowId: r.rowId, rowNumber: r.rowNumber, status: r.status, note: r.note })),
+    });
+  }
+
+  const duplicateImport = findDuplicateImport(parsed.meta, parsed.importType);
+  if (duplicateImport && !force) {
+    return res.status(409).json({
+      error: `Duplicate import detected. ${duplicateImport.invoiceNumber ? `Invoice ${duplicateImport.invoiceNumber}` : `File "${duplicateImport.fileName || ''}"`} was already imported on ${new Date(duplicateImport.createdAt).toLocaleDateString()} by ${duplicateImport.userName} (${duplicateImport.id}). Stock will NOT be added twice unless you explicitly force it.`,
+      duplicateImport: { id: duplicateImport.id, importedAt: duplicateImport.createdAt },
+    });
+  }
+
+  const applyRows = rows.filter(r =>
+    !r.excluded && r.status !== 'DUPLICATE' && r.status !== 'INVALID' && r.status !== 'NEEDS_REVIEW'
+  );
+  if (applyRows.length === 0) {
+    return res.status(400).json({ error: 'Nothing to import — every row is excluded, duplicate or empty.' });
+  }
+
+  // ==== TRANSACTION: snapshot -> apply -> rollback on ANY failure ====
+  const snapshot = {
+    products: JSON.parse(JSON.stringify(db.raw.products)),
+    categories: JSON.parse(JSON.stringify(db.raw.categories)),
+    companies: JSON.parse(JSON.stringify(db.raw.companies)),
+    stockMovements: JSON.parse(JSON.stringify(db.raw.stockMovements)),
+    stockImports: JSON.parse(JSON.stringify(db.raw.stockImports || [])),
+    counters: JSON.parse(JSON.stringify(db.raw.counters)),
+  };
+
+  try {
+    const importId = db.getNextImportId();
+    const now = new Date().toISOString();
+    const refText = [
+      parsed.meta.invoiceNumber ? `Invoice ${parsed.meta.invoiceNumber}` : '',
+      parsed.meta.supplier ? `from ${parsed.meta.supplier}` : '',
+      parsed.meta.fileName ? `(${parsed.meta.fileName})` : '',
+    ].filter(Boolean).join(' ');
+
+    const createdCategories: string[] = [];
+    const createdCompanies: string[] = [];
+    const createdProducts: string[] = [];
+    const resultRows: StockImportRowResult[] = [];
+    const priceAudits: string[] = [];
+    let totalUnitsAdded = 0;
+    let totalAdjustment = 0;
+    let newVariants = 0;
+
+    const catCache = new Map<string, Category>();
+    db.raw.categories.forEach(c => catCache.set(importNormText(c.name), c));
+    const compCache = new Map<string, Company>();
+    db.raw.companies.forEach(c => compCache.set(importNormText(c.name), c));
+
+    const ensureCategory = (name: string): Category => {
+      const key = importNormText(name);
+      const existing = catCache.get(key);
+      if (existing) return existing;
+      const cat: Category = {
+        id: `cat-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+        name: name.trim().slice(0, 128),
+        type: inferCategoryType(name),
+        isActive: true,
+        displayOrder: db.raw.categories.length + 1,
+      };
+      db.raw.categories.push(cat);
+      catCache.set(key, cat);
+      createdCategories.push(cat.name);
+      return cat;
+    };
+
+    const ensureCompany = (name: string): Company => {
+      const key = importNormText(name);
+      const existing = compCache.get(key);
+      if (existing) return existing;
+      const comp: Company = {
+        id: `comp-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+        name: name.trim().slice(0, 128),
+        description: `Auto-created by Smart Import ${importId}`,
+        isActive: true,
+      };
+      db.raw.companies.push(comp);
+      compCache.set(key, comp);
+      createdCompanies.push(comp.name);
+      return comp;
+    };
+
+    const usedSkus = new Set<string>();
+    // Products created earlier in this same import run (so multiple sizes group together)
+    const runProductByName = new Map<string, Product>();
+
+    for (const row of applyRows) {
+      const movementReason = `Smart Import ${importId}${refText ? ` — ${refText}` : ''}`;
+
+      if (row.matchedVariantId) {
+        const found = findVariantById(row.matchedVariantId);
+        if (!found) throw new Error(`Variant disappeared during import: ${row.matchedVariantId}`);
+        const { product, variant } = found;
+        const decision = parsed.decisions[String(row.rowId)] || {};
+
+        const result: StockImportRowResult = {
+          productName: product.name,
+          size: variant.size,
+          sku: variant.sku,
+          productId: product.id,
+          variantId: variant.id,
+          status: row.status,
+          quantity: row.quantity,
+          stockBefore: variant.stock,
+        };
+
+        if (parsed.importType === 'purchase') {
+          // Price updates (Accept New Price unless the admin chose Keep Existing)
+          if (row.priceChange) {
+            if (row.newCost !== undefined && decision.applyBuyingPrice !== false) {
+              priceAudits.push(`${product.name} (${variant.size}): buying ${variant.costPrice} → ${row.newCost}`);
+              result.oldCostPrice = variant.costPrice;
+              result.newCostPrice = row.newCost;
+              variant.costPrice = row.newCost;
+            }
+            if (row.newSell !== undefined && decision.applySellingPrice !== false) {
+              priceAudits.push(`${product.name} (${variant.size}): selling ${variant.sellingPrice} → ${row.newSell}`);
+              result.oldSellingPrice = variant.sellingPrice;
+              result.newSellingPrice = row.newSell;
+              variant.sellingPrice = row.newSell;
+            }
+          }
+          if (row.quantity > 0) {
+            const before = variant.stock;
+            variant.stock += row.quantity;
+            totalUnitsAdded += row.quantity;
+            db.recordStockMovement(
+              product.id, product.name, variant.id, variant.size,
+              row.quantity, before, variant.stock, 'stock_in',
+              user.id, user.name, movementReason, importId,
+              row.buyingPrice !== undefined ? row.buyingPrice : variant.costPrice
+            );
+          }
+          result.stockAfter = variant.stock;
+        } else {
+          // Physical count → controlled adjustment
+          const diff = row.quantity - variant.stock;
+          result.adjustment = diff;
+          if (diff !== 0) {
+            const before = variant.stock;
+            variant.stock = row.quantity;
+            totalAdjustment += diff;
+            db.recordStockMovement(
+              product.id, product.name, variant.id, variant.size,
+              diff, before, variant.stock, 'adjustment',
+              user.id, user.name, `Physical stock count via ${movementReason}`, importId
+            );
+          }
+          result.stockAfter = variant.stock;
+        }
+        resultRows.push(result);
+        continue;
+      }
+
+      // ---- NEW ITEM (purchase mode only) ----
+      if (row.status === 'NEW_ITEM') {
+        let product: Product | undefined = row.targetProductId
+          ? db.raw.products.find(p => p.id === row.targetProductId)
+          : runProductByName.get(importNormText(row.productName));
+
+        if (!product) {
+          const category = ensureCategory(row.category || 'General');
+          const company = row.brand ? ensureCompany(row.brand) : undefined;
+          product = {
+            id: `prod-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+            name: row.productName.slice(0, 191),
+            categoryId: category.id,
+            companyId: company?.id,
+            description: `Created by Smart Import ${importId}`,
+            isKitchenItem: false,
+            isActive: true,
+            createdAt: now,
+            variants: [],
+          };
+          db.raw.products.push(product);
+          runProductByName.set(importNormText(product.name), product);
+          createdProducts.push(product.name);
+        }
+
+        const sku = row.sku && row.sku.trim()
+          ? row.sku.trim().slice(0, 128)
+          : makeUniqueSku(`${row.productName.substring(0, 3)}-${row.size}`, usedSkus);
+        usedSkus.add(sku.toUpperCase());
+
+        const variant: ProductVariant = {
+          id: `var-${product.id.replace('prod-', '')}-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
+          productId: product.id,
+          size: row.size.slice(0, 64),
+          sku,
+          barcode: row.barcode || undefined,
+          costPrice: row.buyingPrice !== undefined ? row.buyingPrice : 0,
+          sellingPrice: row.sellingPrice !== undefined ? row.sellingPrice : 0,
+          stock: 0,
+          minStockLevel: row.minStock !== undefined ? row.minStock : (db.raw.settings.lowStockDefaultThreshold || 5),
+          isActive: true,
+        };
+        product.variants.push(variant);
+        newVariants++;
+
+        if (row.quantity > 0) {
+          variant.stock = row.quantity;
+          totalUnitsAdded += row.quantity;
+          db.recordStockMovement(
+            product.id, product.name, variant.id, variant.size,
+            row.quantity, 0, variant.stock, 'stock_in',
+            user.id, user.name, `New item received via ${movementReason}`, importId,
+            variant.costPrice
+          );
+        }
+
+        resultRows.push({
+          productName: product.name,
+          size: variant.size,
+          sku: variant.sku,
+          productId: product.id,
+          variantId: variant.id,
+          status: 'NEW_ITEM',
+          quantity: row.quantity,
+          stockBefore: 0,
+          stockAfter: variant.stock,
+          newCostPrice: variant.costPrice,
+          newSellingPrice: variant.sellingPrice,
+          note: row.note,
+        });
+      }
+    }
+
+    const importRecord: StockImport = {
+      id: importId,
+      importType: parsed.importType,
+      fileName: parsed.meta.fileName,
+      fileType: parsed.meta.fileType,
+      fileHash: parsed.meta.fileHash,
+      supplier: parsed.meta.supplier,
+      invoiceNumber: parsed.meta.invoiceNumber,
+      invoiceDate: parsed.meta.invoiceDate,
+      summary: {
+        matched: summary.matched,
+        newProducts: createdProducts.length,
+        newVariants,
+        newCategories: createdCategories.length,
+        newCompanies: createdCompanies.length,
+        priceChanges: priceAudits.length,
+        totalUnitsAdded,
+        totalAdjustment,
+        rowsImported: applyRows.length,
+        rowsExcluded: summary.excluded,
+      },
+      createdCategories,
+      createdCompanies,
+      createdProducts,
+      rows: resultRows,
+      userId: user.id,
+      userName: user.name,
+      createdAt: now,
+    };
+    if (!Array.isArray(db.raw.stockImports)) db.raw.stockImports = [];
+    db.raw.stockImports.unshift(importRecord);
+    if (db.raw.stockImports.length > 500) db.raw.stockImports.length = 500;
+
+    db.save();
+
+    db.logAudit(
+      user.id, user.name, user.role, 'STOCK_IMPORT', 'INVENTORY', importId,
+      `Smart Import ${importId} (${parsed.importType === 'purchase' ? 'Purchase / Stock In' : 'Physical Stock Count'})${refText ? ` ${refText}` : ''}: ` +
+      `${applyRows.length} rows, ${createdProducts.length} new products, ${newVariants} new sizes, ` +
+      (parsed.importType === 'purchase' ? `+${totalUnitsAdded} units` : `net adjustment ${totalAdjustment >= 0 ? '+' : ''}${totalAdjustment}`) +
+      (priceAudits.length ? `. Price changes: ${priceAudits.join('; ').slice(0, 900)}` : '')
+    );
+
+    res.status(201).json({ message: 'Import committed successfully.', import: importRecord });
+  } catch (e: any) {
+    // ---- ROLLBACK: restore every touched collection ----
+    console.error('[IMPORT] Commit failed, rolling back:', e);
+    db.raw.products = snapshot.products;
+    db.raw.categories = snapshot.categories;
+    db.raw.companies = snapshot.companies;
+    db.raw.stockMovements = snapshot.stockMovements;
+    db.raw.stockImports = snapshot.stockImports;
+    db.raw.counters = snapshot.counters;
+    try { db.save(); } catch { /* best-effort persist of rollback */ }
+    res.status(500).json({ error: 'Database import failed. No changes were made.' });
+  }
+});
+
+// ---- IMPORT HISTORY ----
+app.get('/api/inventory/import/history', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
+  const list = (db.raw.stockImports || []).map(imp => ({
+    id: imp.id,
+    importType: imp.importType,
+    fileName: imp.fileName,
+    fileType: imp.fileType,
+    supplier: imp.supplier,
+    invoiceNumber: imp.invoiceNumber,
+    invoiceDate: imp.invoiceDate,
+    summary: imp.summary,
+    userName: imp.userName,
+    createdAt: imp.createdAt,
+  }));
+  res.json(list);
+});
+
+app.get('/api/inventory/import/:id', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
+  const imp = (db.raw.stockImports || []).find(i => i.id === req.params.id);
+  if (!imp) return res.status(404).json({ error: 'Import record not found.' });
+  res.json(imp);
+});
+
+// ---- PDF PARSING (safe, best-effort, always preview-first) ----
+app.post('/api/inventory/import/parse-pdf', authMiddleware, requireRole('super_admin'), async (req: Request, res: Response) => {
+  const { dataBase64, fileName } = req.body || {};
+  if (typeof dataBase64 !== 'string' || dataBase64.length === 0) {
+    return res.status(400).json({ error: 'No PDF data received.' });
+  }
+  if (dataBase64.length > 4.8 * 1024 * 1024) {
+    return res.status(400).json({ error: 'PDF is too large (max ~3.5 MB). Please use the Excel template for big invoices.' });
+  }
+
+  let buffer: Buffer;
+  try {
+    buffer = Buffer.from(dataBase64, 'base64');
+  } catch {
+    return res.status(400).json({ error: 'Invalid PDF upload.' });
+  }
+  if (buffer.subarray(0, 5).toString('latin1') !== '%PDF-') {
+    return res.status(400).json({ error: 'The uploaded file is not a valid PDF document.' });
+  }
+
+  try {
+    const pdfParse = (await import('pdf-parse/lib/pdf-parse.js')).default;
+    const data = await pdfParse(buffer);
+    const text = String(data.text || '');
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+    // Heuristic: rows usually contain "<name> <size ml> ... numbers (qty / prices)"
+    const rows: RawImportRow[] = [];
+    const sizeRe = /(\d+(?:\.\d+)?)\s*ml\b/i;
+    for (const line of lines) {
+      const sizeMatch = sizeRe.exec(line);
+      if (!sizeMatch) continue;
+      const name = line.slice(0, sizeMatch.index).replace(/[\d.,]+\s*$/, '').trim();
+      if (!name || name.length < 2) continue;
+      const after = line.slice(sizeMatch.index + sizeMatch[0].length);
+      const numbers = (after.match(/\d[\d,]*(?:\.\d+)?/g) || []).map(n => Number(n.replace(/,/g, ''))).filter(n => Number.isFinite(n));
+      if (numbers.length === 0) continue;
+
+      const qty = numbers.find(n => Number.isInteger(n) && n > 0 && n <= 10000);
+      const priceCandidates = numbers.filter(n => n !== qty && n > 0);
+      rows.push({
+        productName: name.slice(0, 191),
+        size: `${sizeMatch[1]}ml`,
+        quantity: qty !== undefined ? qty : undefined,
+        buyingPrice: priceCandidates.length > 0 ? priceCandidates[0] : undefined,
+        sellingPrice: priceCandidates.length > 1 ? priceCandidates[priceCandidates.length - 1] : undefined,
+      });
+      if (rows.length >= IMPORT_MAX_ROWS) break;
+    }
+
+    if (rows.length === 0) {
+      return res.status(422).json({
+        error: 'Unable to confidently extract product rows from this PDF. Please review the document or use the Excel template instead.',
+      });
+    }
+
+    res.json({
+      rows,
+      pages: data.numpages,
+      note: `Best-effort extraction from "${fileName || 'PDF'}" — verify every quantity and price in the preview before confirming.`,
+    });
+  } catch (e: any) {
+    console.error('[IMPORT] PDF parse failed:', e?.message || e);
+    res.status(422).json({
+      error: 'Unable to confidently extract this invoice. Please review or use the Excel template.',
+    });
+  }
 });
 
 const getStockMovementsHandler = (req: Request, res: Response) => {
