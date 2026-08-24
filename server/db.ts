@@ -406,6 +406,7 @@ const initialCategories: Category[] = [
   { id: 'cat-10', name: 'Soft Drinks & Water', type: 'restaurant', displayOrder: 10, isActive: true },
   { id: 'cat-11', name: 'Bar Services & Mixers', type: 'service', displayOrder: 11, isActive: true },
   { id: 'cat-1kg-portion', name: '1KG Portion (Bulk Food)', type: 'restaurant', displayOrder: 12, isActive: true },
+  { id: 'cat-beer-pub', name: 'Beer Pub', type: 'bar', displayOrder: 13, isActive: true },
 ];
 
 const initialCompanies: Company[] = [
@@ -1202,6 +1203,98 @@ const initialProducts: Product[] = [
     createdAt: new Date().toISOString(),
     variants: [
       { id: 'var-1kg-36', productId: 'prod-1kg-36', size: '1KG Portion', sku: 'K1G-BPRN', costPrice: 0, sellingPrice: 7000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+
+  // ==========================================================================
+  // BEER PUB — Price-point bar counter buttons (from legacy POS menu)
+  // Category: cat-beer-pub (type: bar). Generic beer price buttons keep the
+  // counter workflow: tap the tile matching the bottle/serve price.
+  // "Beef Noodles Medium" is the only kitchen item here (fires a KOT).
+  // ==========================================================================
+  {
+    id: 'prod-bp-01',
+    name: 'Beer 900',
+    categoryId: 'cat-beer-pub',
+    description: 'Beer price-point button — serve/bottle sold at Rs. 900.',
+    isKitchenItem: false,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-bp-01', productId: 'prod-bp-01', size: 'Bottle / Serve', sku: 'BP-BEER-900', costPrice: 0, sellingPrice: 900, stock: 100, minStockLevel: 24, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-bp-02',
+    name: 'Beer 950',
+    categoryId: 'cat-beer-pub',
+    description: 'Beer price-point button — serve/bottle sold at Rs. 950.',
+    isKitchenItem: false,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-bp-02', productId: 'prod-bp-02', size: 'Bottle / Serve', sku: 'BP-BEER-950', costPrice: 0, sellingPrice: 950, stock: 100, minStockLevel: 24, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-bp-03',
+    name: 'Beer 870',
+    categoryId: 'cat-beer-pub',
+    description: 'Beer price-point button — serve/bottle sold at Rs. 870.',
+    isKitchenItem: false,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-bp-03', productId: 'prod-bp-03', size: 'Bottle / Serve', sku: 'BP-BEER-870', costPrice: 0, sellingPrice: 870, stock: 100, minStockLevel: 24, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-bp-04',
+    name: 'Beer 800',
+    categoryId: 'cat-beer-pub',
+    description: 'Beer price-point button — serve/bottle sold at Rs. 800.',
+    isKitchenItem: false,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-bp-04', productId: 'prod-bp-04', size: 'Bottle / Serve', sku: 'BP-BEER-800', costPrice: 0, sellingPrice: 800, stock: 100, minStockLevel: 24, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-bp-05',
+    name: 'Beef Noodles Medium',
+    categoryId: 'cat-beer-pub',
+    companyId: 'comp-7',
+    description: 'Stir-fried beef noodles — medium portion (kitchen item, fires KOT).',
+    isKitchenItem: true,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-bp-05', productId: 'prod-bp-05', size: 'Medium Portion', sku: 'BP-BNDL-MED', costPrice: 0, sellingPrice: 1000, stock: 50, minStockLevel: 10, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-bp-06',
+    name: 'Beer 630',
+    categoryId: 'cat-beer-pub',
+    description: 'Beer price-point button — serve/bottle sold at Rs. 630.',
+    isKitchenItem: false,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-bp-06', productId: 'prod-bp-06', size: 'Bottle / Serve', sku: 'BP-BEER-630', costPrice: 0, sellingPrice: 630, stock: 100, minStockLevel: 24, isActive: true },
+    ]
+  },
+  {
+    id: 'prod-bp-07',
+    name: 'Arrack',
+    categoryId: 'cat-beer-pub',
+    description: 'Arrack serve — bar counter button at Rs. 1,400.',
+    isKitchenItem: false,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    variants: [
+      { id: 'var-bp-07', productId: 'prod-bp-07', size: 'Serve', sku: 'BP-ARR-1400', costPrice: 0, sellingPrice: 1400, stock: 100, minStockLevel: 10, isActive: true },
     ]
   }
 ];

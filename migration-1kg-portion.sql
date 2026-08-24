@@ -1,11 +1,12 @@
 -- ============================================================================
--- MIGRATION: 1KG PORTION — Bulk Kitchen Food Items
+-- MIGRATION: Legacy POS menu imports — 1KG PORTION + BEER PUB
 -- ============================================================================
 -- Run this on an EXISTING Royal Hotel POS MySQL database to add:
 --   1. New category: "1KG Portion (Bulk Food)" (restaurant type → shows under
 --      the FOOD & KITCHEN quick-filter group in the POS screen)
 --   2. 36 bulk food products — ALL kitchen items (is_kitchen_item = 1 → KOT)
---   3. One portion variant per item with the menu selling price
+--   3. New category: "Beer Pub" (bar type → BAR SPIRITS group) with 7 legacy
+--      bar-counter buttons; only "Beef Noodles Medium" is a kitchen item
 --
 -- Safe to re-run: ON DUPLICATE KEY UPDATE makes every insert idempotent.
 -- Cost prices are seeded as 0.00 — update them in Admin → Products.
@@ -94,4 +95,37 @@ INSERT INTO `product_variants` (`id`, `product_id`, `size`, `sku`, `barcode`, `c
 ('var-1kg-34', 'prod-1kg-34', '1KG Portion', 'K1G-FSTW', NULL, 0.00, 6000.00, 50, 10, 1),
 ('var-1kg-35', 'prod-1kg-35', '1KG Portion', 'K1G-BSTW', NULL, 0.00, 6500.00, 50, 10, 1),
 ('var-1kg-36', 'prod-1kg-36', '1KG Portion', 'K1G-BPRN', NULL, 0.00, 7000.00, 50, 10, 1)
+ON DUPLICATE KEY UPDATE `id`=`id`;
+
+-- ============================================================================
+-- BEER PUB — Price-point bar counter buttons (from legacy POS menu)
+-- Category: 'Beer Pub' (bar type → BAR SPIRITS group). 'Beef Noodles Medium'
+-- only is a kitchen item (is_kitchen_item = 1 → KOT); the rest are bar items.
+-- ============================================================================
+
+-- 4. Category ---------------------------------------------------------------
+INSERT INTO `categories` (`id`, `name`, `type`, `icon`, `is_active`, `display_order`) VALUES
+('cat-beer-pub', 'Beer Pub', 'bar', 'beer', 1, 11)
+ON DUPLICATE KEY UPDATE `id`=`id`;
+
+-- 5. Products ---------------------------------------------------------------
+INSERT INTO `products` (`id`, `name`, `category_id`, `company_id`, `description`, `image`, `is_kitchen_item`, `tax_rate`, `is_active`, `is_archived`) VALUES
+('prod-bp-01', 'Beer 900', 'cat-beer-pub', NULL, 'Beer price-point button — serve/bottle sold at Rs. 900.', NULL, 0, 0.00, 1, 0),
+('prod-bp-02', 'Beer 950', 'cat-beer-pub', NULL, 'Beer price-point button — serve/bottle sold at Rs. 950.', NULL, 0, 0.00, 1, 0),
+('prod-bp-03', 'Beer 870', 'cat-beer-pub', NULL, 'Beer price-point button — serve/bottle sold at Rs. 870.', NULL, 0, 0.00, 1, 0),
+('prod-bp-04', 'Beer 800', 'cat-beer-pub', NULL, 'Beer price-point button — serve/bottle sold at Rs. 800.', NULL, 0, 0.00, 1, 0),
+('prod-bp-05', 'Beef Noodles Medium', 'cat-beer-pub', 'comp-kitchen', 'Stir-fried beef noodles — medium portion (kitchen item, fires KOT).', NULL, 1, 0.00, 1, 0),
+('prod-bp-06', 'Beer 630', 'cat-beer-pub', NULL, 'Beer price-point button — serve/bottle sold at Rs. 630.', NULL, 0, 0.00, 1, 0),
+('prod-bp-07', 'Arrack', 'cat-beer-pub', NULL, 'Arrack serve — bar counter button at Rs. 1,400.', NULL, 0, 0.00, 1, 0)
+ON DUPLICATE KEY UPDATE `id`=`id`;
+
+-- 6. Variants ----------------------------------------------------------------
+INSERT INTO `product_variants` (`id`, `product_id`, `size`, `sku`, `barcode`, `cost_price`, `selling_price`, `stock`, `min_stock_level`, `is_active`) VALUES
+('var-bp-01', 'prod-bp-01', 'Bottle / Serve', 'BP-BEER-900', NULL, 0.00, 900.00, 100, 24, 1),
+('var-bp-02', 'prod-bp-02', 'Bottle / Serve', 'BP-BEER-950', NULL, 0.00, 950.00, 100, 24, 1),
+('var-bp-03', 'prod-bp-03', 'Bottle / Serve', 'BP-BEER-870', NULL, 0.00, 870.00, 100, 24, 1),
+('var-bp-04', 'prod-bp-04', 'Bottle / Serve', 'BP-BEER-800', NULL, 0.00, 800.00, 100, 24, 1),
+('var-bp-05', 'prod-bp-05', 'Medium Portion', 'BP-BNDL-MED', NULL, 0.00, 1000.00, 50, 10, 1),
+('var-bp-06', 'prod-bp-06', 'Bottle / Serve', 'BP-BEER-630', NULL, 0.00, 630.00, 100, 24, 1),
+('var-bp-07', 'prod-bp-07', 'Serve', 'BP-ARR-1400', NULL, 0.00, 1400.00, 100, 10, 1)
 ON DUPLICATE KEY UPDATE `id`=`id`;
