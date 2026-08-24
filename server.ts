@@ -3119,20 +3119,27 @@ app.get('/api/reports/daily-stock-sheet', authMiddleware, (req: Request, res: Re
     });
   });
 
-  // Calculate received and adjustments
+  // Calculate received, adjustments and the exact net stock change of the day
   const receivedMap: Record<string, number> = {};
   const adjustmentMap: Record<string, number> = {};
-  
+  const netChangeMap: Record<string, number> = {};
+
   db.raw.stockMovements.forEach(m => {
     const movDate = m.createdAt.split('T')[0];
     if (movDate !== targetDate) return;
-    
+
+    const change = Number(m.quantityChange) || 0;
+    // 'opening_stock' is the baseline inventory seed itself, not day activity
+    if (m.movementType !== 'opening_stock') {
+      netChangeMap[m.variantId] = (netChangeMap[m.variantId] || 0) + change;
+    }
+
     if (m.movementType === 'stock_in' || m.movementType === 'purchase') {
-      receivedMap[m.variantId] = (receivedMap[m.variantId] || 0) + (Number(m.quantityChange) || 0);
+      receivedMap[m.variantId] = (receivedMap[m.variantId] || 0) + change;
     } else if (m.movementType === 'adjustment' && m.quantityChange > 0) {
-      receivedMap[m.variantId] = (receivedMap[m.variantId] || 0) + (Number(m.quantityChange) || 0);
+      receivedMap[m.variantId] = (receivedMap[m.variantId] || 0) + change;
     } else if (m.movementType === 'adjustment') {
-      adjustmentMap[m.variantId] = (adjustmentMap[m.variantId] || 0) + (Number(m.quantityChange) || 0);
+      adjustmentMap[m.variantId] = (adjustmentMap[m.variantId] || 0) + change;
     }
   });
 
@@ -3190,8 +3197,15 @@ app.get('/api/reports/daily-stock-sheet', authMiddleware, (req: Request, res: Re
       const balance = isShot && shotVol > 0
         ? Math.floor(Math.max(0, getAvailableShotMl(p)) / shotVol)
         : v.stock;
-      // Improved opening stock calculation: closing + sold - received - adjustments
-      const inHand = Math.max(0, balance + sold - received - adjustments);
+      // Exact opening stock from the movement ledger: closing − Σ(quantityChange of the day).
+      // Every stock change (sales, damage/breakage, expiry, manual stock-out, adjustments,
+      // bottles emptied by shot sales, void returns) writes a movement, so this balances
+      // for ALL movement types. Shot rows keep the derived approximation (their units come
+      // from the shared 750ml pool, not their own movements).
+      const netChange = netChangeMap[v.id] || 0;
+      const inHand = isShot
+        ? Math.max(0, balance + sold - received - adjustments)
+        : Math.max(0, Number((balance - netChange).toFixed(2)));
       const stock = inHand + received;
       const price = v.sellingPrice;
       const value = sold * price;
