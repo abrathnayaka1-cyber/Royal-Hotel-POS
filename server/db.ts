@@ -22,6 +22,13 @@ export interface Category {
   icon?: string;
   isActive: boolean;
   displayOrder: number;
+  /**
+   * When true the category button is HIDDEN from the cashier POS interface
+   * (sidebar). Products in a hidden category still show under the type-based
+   * quick filters (e.g. FOOD & KITCHEN) and ALL ITEMS. The category remains
+   * fully visible/manageable in the Super Admin panel only.
+   */
+  hiddenInPOS?: boolean;
 }
 
 export interface Company {
@@ -405,8 +412,10 @@ const initialCategories: Category[] = [
   { id: 'cat-9', name: 'Kottu & Rotti', type: 'restaurant', displayOrder: 9, isActive: true },
   { id: 'cat-10', name: 'Soft Drinks & Water', type: 'restaurant', displayOrder: 10, isActive: true },
   { id: 'cat-11', name: 'Bar Services & Mixers', type: 'service', displayOrder: 11, isActive: true },
-  { id: 'cat-1kg-portion', name: '1KG Portion (Bulk Food)', type: 'restaurant', displayOrder: 12, isActive: true },
-  { id: 'cat-beer-pub', name: 'Beer Pub', type: 'bar', displayOrder: 13, isActive: true },
+  // Hidden in cashier POS — items appear under the FOOD & KITCHEN filter only;
+  // the category buttons themselves are admin-panel-visible only (POS stays clean).
+  { id: 'cat-1kg-portion', name: '1KG Portion (Bulk Food)', type: 'restaurant', displayOrder: 12, isActive: true, hiddenInPOS: true },
+  { id: 'cat-beer-pub', name: 'Beer Pub', type: 'restaurant', displayOrder: 13, isActive: true, hiddenInPOS: true },
 ];
 
 const initialCompanies: Company[] = [
@@ -1480,6 +1489,21 @@ export class Database {
           // Ensure stockImports array exists (Smart Stock Import history)
           if (!Array.isArray(parsed.stockImports)) {
             parsed.stockImports = [];
+          }
+
+          // First-run visibility migration for the legacy menu categories:
+          // their category buttons stay OUT of the cashier POS (sidebar) and
+          // their items group under FOOD & KITCHEN. Only applied when the flag
+          // was never set, so later Super Admin toggles are respected.
+          if (Array.isArray(parsed.categories)) {
+            ['cat-1kg-portion', 'cat-beer-pub'].forEach(legacyId => {
+              const legacyCat = parsed.categories.find((c: Category) => c.id === legacyId);
+              if (legacyCat && legacyCat.hiddenInPOS === undefined) {
+                legacyCat.hiddenInPOS = true;
+                // Beer Pub groups under FOOD & KITCHEN (restaurant) per menu layout
+                if (legacyId === 'cat-beer-pub') legacyCat.type = 'restaurant';
+              }
+            });
           }
 
           // Normalize shot-serving products (shots pour from the 750ml bottle stock)

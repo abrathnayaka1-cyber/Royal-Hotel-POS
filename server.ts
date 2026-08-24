@@ -515,7 +515,7 @@ app.get('/api/categories', authMiddleware, (req: Request, res: Response) => {
 
 app.post('/api/categories', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   const user = (req as any).user as User;
-  const { name, type, icon } = req.body;
+  const { name, type, icon, hiddenInPOS } = req.body;
   if (!name || typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'Category name is required.' });
   if (name.trim().length > 128) return res.status(400).json({ error: 'Category name too long (max 128)' });
 
@@ -528,7 +528,8 @@ app.post('/api/categories', authMiddleware, requireRole('super_admin'), (req: Re
     type: catType as any,
     icon: (icon && typeof icon === 'string') ? icon.trim().slice(0, 64) : 'tag',
     isActive: true,
-    displayOrder: db.raw.categories.length + 1
+    displayOrder: db.raw.categories.length + 1,
+    hiddenInPOS: Boolean(hiddenInPOS)
   };
 
   db.raw.categories.push(newCat);
@@ -543,12 +544,13 @@ app.put('/api/categories/:id', authMiddleware, requireRole('super_admin'), (req:
   const cat = db.raw.categories.find(c => c.id === req.params.id);
   if (!cat) return res.status(404).json({ error: 'Category not found.' });
 
-  const { name, type, icon, isActive, displayOrder } = req.body;
+  const { name, type, icon, isActive, displayOrder, hiddenInPOS } = req.body;
   if (name && typeof name === 'string' && name.trim()) cat.name = name.trim().slice(0, 128);
   if (type && ['bar', 'restaurant', 'service', 'other'].includes(type)) cat.type = type;
   if (icon && typeof icon === 'string') cat.icon = icon.trim().slice(0, 64);
   if (isActive !== undefined) cat.isActive = Boolean(isActive);
   if (displayOrder !== undefined) cat.displayOrder = Math.max(0, Number(displayOrder) || 0);
+  if (hiddenInPOS !== undefined) cat.hiddenInPOS = Boolean(hiddenInPOS);
 
   db.save();
   db.logAudit(user.id, user.name, user.role, 'UPDATE_CATEGORY', 'CATEGORY', cat.id, `Updated category: ${cat.name}`);

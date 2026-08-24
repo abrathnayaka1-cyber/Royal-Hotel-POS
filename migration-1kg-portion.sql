@@ -2,20 +2,26 @@
 -- MIGRATION: Legacy POS menu imports — 1KG PORTION + BEER PUB
 -- ============================================================================
 -- Run this on an EXISTING Royal Hotel POS MySQL database to add:
---   1. New category: "1KG Portion (Bulk Food)" (restaurant type → shows under
---      the FOOD & KITCHEN quick-filter group in the POS screen)
+--   1. New category: "1KG Portion (Bulk Food)" (restaurant type → items show
+--      under the FOOD & KITCHEN quick-filter group in the POS screen)
 --   2. 36 bulk food products — ALL kitchen items (is_kitchen_item = 1 → KOT)
---   3. New category: "Beer Pub" (bar type → BAR SPIRITS group) with 7 legacy
---      bar-counter buttons; only "Beef Noodles Medium" is a kitchen item
+--   3. New category: "Beer Pub" (restaurant type → FOOD & KITCHEN group) with
+--      7 legacy bar-counter buttons; only "Beef Noodles Medium" is a KOT item
+--   4. hide_from_POS flag (hidden_in_pos): both categories' buttons stay OUT of
+--      the cashier POS sidebar — visible/manageable in the Super Admin panel
 --
--- Safe to re-run: ON DUPLICATE KEY UPDATE makes every insert idempotent.
+-- Safe to re-run: idempotent inserts + IF NOT EXISTS column add.
 -- Cost prices are seeded as 0.00 — update them in Admin → Products.
 -- ============================================================================
 
+-- 0. Schema: hidden_in_pos flag (safe on MariaDB / MySQL 8+; ignore error if
+--    the column already exists on older MySQL versions)
+ALTER TABLE `categories` ADD COLUMN IF NOT EXISTS `hidden_in_pos` TINYINT(1) NOT NULL DEFAULT 0 AFTER `display_order`;
+
 -- 1. Category ---------------------------------------------------------------
-INSERT INTO `categories` (`id`, `name`, `type`, `icon`, `is_active`, `display_order`) VALUES
-('cat-1kg-portion', '1KG Portion (Bulk Food)', 'restaurant', 'utensils', 1, 10)
-ON DUPLICATE KEY UPDATE `id`=`id`;
+INSERT INTO `categories` (`id`, `name`, `type`, `icon`, `is_active`, `display_order`, `hidden_in_pos`) VALUES
+('cat-1kg-portion', '1KG Portion (Bulk Food)', 'restaurant', 'utensils', 1, 10, 1)
+ON DUPLICATE KEY UPDATE `type`=VALUES(`type`), `hidden_in_pos`=VALUES(`hidden_in_pos`);
 
 -- 2. Products (all kitchen items) --------------------------------------------
 INSERT INTO `products` (`id`, `name`, `category_id`, `company_id`, `description`, `image`, `is_kitchen_item`, `tax_rate`, `is_active`, `is_archived`) VALUES
@@ -104,9 +110,12 @@ ON DUPLICATE KEY UPDATE `id`=`id`;
 -- ============================================================================
 
 -- 4. Category ---------------------------------------------------------------
-INSERT INTO `categories` (`id`, `name`, `type`, `icon`, `is_active`, `display_order`) VALUES
-('cat-beer-pub', 'Beer Pub', 'bar', 'beer', 1, 11)
-ON DUPLICATE KEY UPDATE `id`=`id`;
+-- NOTE: Beer Pub intentionally uses type 'restaurant' so its items appear
+-- under FOOD & KITCHEN in the cashier POS, with its button hidden from the
+-- cashier interface (admin-visible only).
+INSERT INTO `categories` (`id`, `name`, `type`, `icon`, `is_active`, `display_order`, `hidden_in_pos`) VALUES
+('cat-beer-pub', 'Beer Pub', 'restaurant', 'beer', 1, 11, 1)
+ON DUPLICATE KEY UPDATE `type`=VALUES(`type`), `hidden_in_pos`=VALUES(`hidden_in_pos`);
 
 -- 5. Products ---------------------------------------------------------------
 INSERT INTO `products` (`id`, `name`, `category_id`, `company_id`, `description`, `image`, `is_kitchen_item`, `tax_rate`, `is_active`, `is_archived`) VALUES

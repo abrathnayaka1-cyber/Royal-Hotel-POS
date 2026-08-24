@@ -57,6 +57,7 @@ CREATE TABLE `categories` (
   `icon` VARCHAR(64) NOT NULL DEFAULT 'tag',
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `display_order` INT NOT NULL DEFAULT 0,
+  `hidden_in_pos` TINYINT(1) NOT NULL DEFAULT 0,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_categories_is_active` (`is_active`),
@@ -392,18 +393,18 @@ INSERT INTO `system_settings` (
 ) ON DUPLICATE KEY UPDATE `id`=`id`;
 
 -- 3. Initial Bar & Restaurant Categories
-INSERT INTO `categories` (`id`, `name`, `type`, `icon`, `is_active`, `display_order`) VALUES
-('cat-arrack', 'Arrack & Local Spirits', 'bar', 'wine', 1, 1),
-('cat-whisky', 'Whisky & Scotch', 'bar', 'glass-water', 1, 2),
-('cat-beer', 'Beer & Stout', 'bar', 'beer', 1, 3),
-('cat-gin-vodka', 'Gin, Vodka & Rum', 'bar', 'wine', 1, 4),
-('cat-wine', 'Wines & Champagne', 'bar', 'wine', 1, 5),
-('cat-cocktails', 'Cocktails & Shooters', 'bar', 'martini', 1, 6),
-('cat-bites', 'Bar Bites & Devilled', 'restaurant', 'flame', 1, 7),
-('cat-mains', 'Mains, Rice & Noodles', 'restaurant', 'utensils', 1, 8),
-('cat-softdrinks', 'Chasers & Beverages', 'restaurant', 'coffee', 1, 9),
-('cat-1kg-portion', '1KG Portion (Bulk Food)', 'restaurant', 'utensils', 1, 10),
-('cat-beer-pub', 'Beer Pub', 'bar', 'beer', 1, 11)
+INSERT INTO `categories` (`id`, `name`, `type`, `icon`, `is_active`, `display_order`, `hidden_in_pos`) VALUES
+('cat-arrack', 'Arrack & Local Spirits', 'bar', 'wine', 1, 1, 0),
+('cat-whisky', 'Whisky & Scotch', 'bar', 'glass-water', 1, 2, 0),
+('cat-beer', 'Beer & Stout', 'bar', 'beer', 1, 3, 0),
+('cat-gin-vodka', 'Gin, Vodka & Rum', 'bar', 'wine', 1, 4, 0),
+('cat-wine', 'Wines & Champagne', 'bar', 'wine', 1, 5, 0),
+('cat-cocktails', 'Cocktails & Shooters', 'bar', 'martini', 1, 6, 0),
+('cat-bites', 'Bar Bites & Devilled', 'restaurant', 'flame', 1, 7, 0),
+('cat-mains', 'Mains, Rice & Noodles', 'restaurant', 'utensils', 1, 8, 0),
+('cat-softdrinks', 'Chasers & Beverages', 'restaurant', 'coffee', 1, 9, 0),
+('cat-1kg-portion', '1KG Portion (Bulk Food)', 'restaurant', 'utensils', 1, 10, 1),
+('cat-beer-pub', 'Beer Pub', 'restaurant', 'beer', 1, 11, 1)
 ON DUPLICATE KEY UPDATE `id`=`id`;
 
 -- 4. Initial Liquor Brands & Distilleries
