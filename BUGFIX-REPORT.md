@@ -44,6 +44,7 @@
 | 21 | Out-of-stock single-variant product එකක card එකට click කළ විට කෙළින්ම cart එකට ගියා | `addToCart` stock guard + පැහැදිලි message |
 | 22 | Cart quantity එක stock එකට වඩා වැඩි කළ හැකි විය | `updateCartQuantity` clamp |
 | 23 | Live preview / tunnel host වලින් app එක load නොවීය (`Blocked request. This host is not allowed`) | `allowedHosts` (vite.config + server.ts vite middleware), hardcoded HMR host ඉවත් කළා |
+| 24 | **Smart Stock Import modal එක open කළ ගමන් app එකම crash** — `Minified React error #310` ("Rendered more hooks than during the previous render") → "Something went wrong" screen | `StockImportModal` එකේ `useMemo` hook එක `if (!isOpen) return null;` ට **පස්සේ** තිබුණා. Modal එක closed වෙලා තියෙන render එකේදී hook එක run නොවී, open කළාම run වෙන නිසා hook count එක වෙනස් වී React crash වුණා. Redundant `useMemo` එක ඉවත් කර hooks ඔක්කොම early-return එකට කලින් තැබුවා + regression test (`tests/import-crash.test.tsx`) |
 
 ## 🐘 PHP Backend (Hostinger) — 2026-08-24
 

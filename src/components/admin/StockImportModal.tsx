@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { fetchApi } from '../../lib/api.ts';
 import {
@@ -478,7 +478,6 @@ export const StockImportModal: React.FC<{
   };
 
   const problemCount = summary ? summary.invalid + summary.needsReview : 0;
-  const activePreviewRows = useMemo(() => previewRows, [previewRows]);
 
   const fmt = (n?: number) => (n === undefined || n === null ? '—' : `${currencySymbol} ${Number(n).toLocaleString()}`);
 
@@ -887,7 +886,7 @@ export const StockImportModal: React.FC<{
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                    {activePreviewRows.map(row => {
+                    {previewRows.map(row => {
                       const d = decisions[row.rowId] || {};
                       const isProblem = !row.excluded && (row.status === 'INVALID' || row.status === 'NEEDS_REVIEW');
                       return (
