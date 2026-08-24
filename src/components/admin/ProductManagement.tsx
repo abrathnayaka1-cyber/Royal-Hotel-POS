@@ -359,6 +359,11 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
                             🥃 Shots from 750ml
                           </span>
                         )}
+                        {product.servesShots && (product.openBottleUsedMl || 0) > 0 && (
+                          <span className="px-1.5 py-0.2 bg-cyan-50 text-cyan-700 dark:bg-cyan-950 dark:text-cyan-300 rounded font-semibold text-[10px]" title="The currently open 750ml bottle">
+                            Open bottle: {product.openBottleUsedMl}ml used / {750 - (product.openBottleUsedMl || 0)}ml left
+                          </span>
+                        )}
                       </div>
                     </td>
 
@@ -651,6 +656,7 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
                               type="number"
                               min="0"
                               value={variant.costPrice}
+                              title={variant.isShot ? 'Leave 0 for automatic cost — calculated proportionally from the 750ml Bottle cost price' : undefined}
                               onChange={e => {
                                 const copy = [...formVariants];
                                 copy[idx].costPrice = Number(e.target.value);
@@ -658,6 +664,9 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
                               }}
                               className="w-24 px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs"
                             />
+                            {variant.isShot && !(Number(variant.costPrice) > 0) && (
+                              <span className="block text-[9px] text-slate-400 mt-0.5">0 = auto from 750ml</span>
+                            )}
                           </td>
                           <td className="py-2 px-3">
                             <input

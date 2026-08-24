@@ -118,6 +118,8 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
       const adjustments: { variantId: string; newBalance: number }[] = [];
 
       report.items.forEach(item => {
+        // Shot sizes have no independent stock — their balance is auto-derived from the 750ml bottle
+        if (item.isShot) return;
         const edited = editedBalances[item.variantId];
         if (edited !== undefined && edited !== item.balance) {
           adjustments.push({
@@ -676,6 +678,11 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
                                 {item.companyName}
                               </span>
                             )}
+                            {item.isShot && (
+                              <span className="px-1.5 py-0.2 text-[9px] font-bold bg-purple-100 dark:bg-purple-950/50 text-purple-700 dark:text-purple-300 rounded border border-purple-200 dark:border-purple-900 uppercase" title="Auto-derived from the 750ml Bottle stock">
+                                🥃 Shot • Auto
+                              </span>
+                            )}
                             <span>{item.categoryName} • {item.size}</span>
                           </span>
                         </div>
@@ -696,7 +703,7 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
                           ) : (
                             <span className="text-slate-500">-</span>
                           )}
-                          {!isAuditMode && (
+                          {!isAuditMode && !item.isShot && (
                             <button
                               type="button"
                               onClick={() => {
@@ -729,7 +736,7 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
                           ? 'text-amber-400' 
                           : 'text-slate-900 dark:text-white'
                       }`}>
-                        {isAuditMode ? (
+                        {isAuditMode && !item.isShot ? (
                           <input
                             type="number"
                             min="0"
@@ -743,6 +750,10 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
                             }}
                             className="w-16 px-1.5 py-0.5 text-right font-mono font-bold text-xs bg-slate-950 text-amber-300 border-2 border-amber-500 rounded focus:outline-none focus:ring-2 focus:ring-amber-500 shadow-inner"
                           />
+                        ) : isAuditMode && item.isShot ? (
+                          <span title="Auto-derived from the 750ml Bottle stock — adjust the 750ml row instead" className="text-slate-400 italic">
+                            {item.balance} (auto)
+                          </span>
                         ) : (
                           <span>{item.balance}</span>
                         )}
@@ -770,16 +781,22 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
                       {/* Action */}
                       {!isAuditMode && (
                         <td className="py-3 px-3 text-center print:hidden">
-                          <button
-                            onClick={() => {
-                              setAdjustingItem(item);
-                              setSingleNewBalance(item.balance);
-                            }}
-                            className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-amber-950/40 rounded-lg transition-colors cursor-pointer"
-                            title="Audit / Adjust Physical Stock"
-                          >
-                            <Edit3 className="w-3.5 h-3.5" />
-                          </button>
+                          {item.isShot ? (
+                            <span className="text-[9px] text-slate-400 italic" title="Shots have no independent stock — adjust the 750ml Bottle row instead">
+                              Auto
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => {
+                                setAdjustingItem(item);
+                                setSingleNewBalance(item.balance);
+                              }}
+                              className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-amber-950/40 rounded-lg transition-colors cursor-pointer"
+                              title="Audit / Adjust Physical Stock"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                         </td>
                       )}
                     </tr>
@@ -912,7 +929,7 @@ export const DailyStockSheet: React.FC<DailyStockSheetProps> = () => {
                     required
                   >
                     <option value="">Select a product to receive...</option>
-                    {report?.items.map(it => (
+                    {report?.items.filter(it => !it.isShot).map(it => (
                       <option key={it.variantId} value={it.variantId}>
                         {it.displayName} ({it.companyName ? `${it.companyName} - ` : ''}{it.size}) - Current: {it.balance}
                       </option>

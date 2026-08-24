@@ -9,6 +9,7 @@ export const VariantSelectorModal: React.FC = () => {
     selectedProductForVariant,
     closeVariantModal,
     addToCart,
+    availableStockFor,
     settings,
   } = usePOS();
 
@@ -61,8 +62,10 @@ export const VariantSelectorModal: React.FC = () => {
               .map(variant => {
                 const isSelected = selectedVariant?.id === variant.id;
                 const isShot = Boolean(product.servesShots && variant.isShot);
-                const isOutOfStock = variant.stock <= 0;
-                const isLowStock = !isShot && variant.stock > 0 && variant.stock <= variant.minStockLevel;
+                // Cart-aware remaining: shots & bottles share the same 750ml pool
+                const remaining = availableStockFor(variant);
+                const isOutOfStock = remaining <= 0;
+                const isLowStock = !isShot && remaining > 0 && remaining <= variant.minStockLevel;
 
                 return (
                   <button
@@ -100,11 +103,11 @@ export const VariantSelectorModal: React.FC = () => {
                         </span>
                       ) : isLowStock ? (
                         <span className="text-[10px] text-orange-500 font-bold uppercase underline">
-                          Low Stock: {variant.stock}
+                          Low Stock: {remaining}
                         </span>
                       ) : (
                         <span className="text-[10px] text-green-600 dark:text-emerald-400 font-bold uppercase">
-                          {isShot ? `Shots Left: ${variant.stock}` : `Stock: ${variant.stock}`}
+                          {isShot ? `Shots Left: ${remaining}` : `Stock: ${remaining}`}
                         </span>
                       )}
                     </div>

@@ -753,6 +753,15 @@ function validateShotSetup(servesShots: boolean, variants: any[]): string | null
   return null;
 }
 
+/** Shot cost derived proportionally from the 750ml bottle cost when the shot row has no cost of its own. */
+function deriveShotCostPrice(rawVariants: any[], shotVolumeMl: number | undefined): number {
+  const bottle = (rawVariants || []).find((v: any) => v && !v.isShot && parseMlFromSize(String(v.size || '')) === BOTTLE_ML);
+  const bottleCost = Math.max(0, Number(bottle?.costPrice || 0));
+  const vol = Number(shotVolumeMl) || 0;
+  if (!bottleCost || !vol) return 0;
+  return Number(((bottleCost / BOTTLE_ML) * vol).toFixed(2));
+}
+
 app.post('/api/products', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   const user = (req as any).user as User;
   const { name, categoryId, companyId, description, image, isKitchenItem, taxRate, variants, servesShots } = req.body;
@@ -782,7 +791,10 @@ app.post('/api/products', authMiddleware, requireRole('super_admin'), (req: Requ
     const isShot = Boolean(servesShots) && Boolean(v.isShot);
     const shotVolumeMl = isShot ? (Number(v.shotVolumeMl) || parseMlFromSize(String(v.size || '')) || 0) : undefined;
     const initialStock = isShot ? 0 : Math.max(0, Number(v.stock || 0));
-    const costPrice = Math.max(0, Number(v.costPrice || 0));
+    // Shot rows with no cost get an automatic proportional cost from the 750ml bottle
+    const costPrice = isShot && !(Number(v.costPrice) > 0)
+      ? deriveShotCostPrice(variants, shotVolumeMl)
+      : Math.max(0, Number(v.costPrice || 0));
     const sellingPrice = Math.max(0, Number(v.sellingPrice || 0));
 
     if (sellingPrice < costPrice) {
@@ -931,7 +943,9 @@ app.put('/api/products/:id', authMiddleware, requireRole('super_admin'), (req: R
           return sku;
         })(),
         barcode: v.barcode ? String(v.barcode).trim().slice(0, 128) : undefined,
-        costPrice: Math.max(0, Number(v.costPrice || 0)),
+        costPrice: isShot && !(Number(v.costPrice) > 0)
+          ? deriveShotCostPrice(variants, shotVolumeMl)
+          : Math.max(0, Number(v.costPrice || 0)),
         sellingPrice: Math.max(0, Number(v.sellingPrice || 0)),
         stock: newStock,
         minStockLevel: isShot ? 0 : Math.max(0, Number(v.minStockLevel || 5)),
@@ -993,6 +1007,11 @@ app.get('/api/inventory', authMiddleware, requireRole('super_admin'), (req: Requ
       const stockValue = isShot ? 0 : variant.stock * (variant.costPrice || 0);
       const retailValue = isShot ? 0 : variant.stock * (variant.sellingPrice || 0);
 
+      // Show how much has been poured from the currently open bottle on the 750ml row
+      const bottleOfProduct = product.servesShots ? getBottleVariant(product) : null;
+      const isShotSourceBottle = Boolean(bottleOfProduct && bottleOfProduct.id === variant.id);
+      const openBottleUsedMl = isShotSourceBottle ? Math.max(0, Number(product.openBottleUsedMl) || 0) : undefined;
+
       inventoryList.push({
         id: variant.id,
         variantId: variant.id,
@@ -1016,7 +1035,9 @@ app.get('/api/inventory', authMiddleware, requireRole('super_admin'), (req: Requ
         retailValue,
         isActive: variant.isActive && product.isActive,
         isShot: isShot || undefined,
-        shotVolumeMl: isShot ? shotVol : undefined
+        shotVolumeMl: isShot ? shotVol : undefined,
+        isShotSourceBottle: isShotSourceBottle || undefined,
+        openBottleUsedMl
       });
     }
   }
@@ -2141,7 +2162,8 @@ app.get('/api/reports/daily-stock-sheet', authMiddleware, (req: Request, res: Re
         price,
         value,
         costPrice: v.costPrice,
-        isKitchenItem: p.isKitchenItem
+        isKitchenItem: p.isKitchenItem,
+        isShot: isShot || undefined
       });
     });
   });

@@ -68,6 +68,7 @@ interface POSContextType {
   openVariantModal: (product: Product) => void;
   closeVariantModal: () => void;
   addToCart: (product: Product, variant: ProductVariant, quantity?: number, itemNotes?: string) => void;
+  availableStockFor: (variant: ProductVariant) => number;
   updateCartQuantity: (variantId: string, quantity: number) => void;
   removeFromCart: (variantId: string) => void;
   clearCart: () => void;
@@ -373,6 +374,21 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
       return Math.floor(Math.max(0, poolMl) / vol);
+    }
+
+    // The 750ml bottle of a shot-serving product: reserve bottles the cart's shots will need
+    if (product?.servesShots && !variant.isShot && /750\s*ml/i.test(variant.size)) {
+      const inCartBottles = cart.find(i => i.variantId === variant.id)?.quantity || 0;
+      let shotMlInCart = 0;
+      for (const item of cart) {
+        if (item.productId !== product.id) continue;
+        const v = product.variants.find(x => x.id === item.variantId);
+        if (v?.isShot) shotMlInCart += (shotMlOf(v) || 0) * item.quantity;
+      }
+      const poolMl = Math.max(0, Number(product.availableShotMl) || 0);
+      const openBottleRemainderMl = poolMl % 750; // ml left in the currently open bottle
+      const bottlesReservedForShots = Math.ceil(Math.max(0, shotMlInCart - openBottleRemainderMl) / 750);
+      return variant.stock - inCartBottles - bottlesReservedForShots;
     }
 
     const inCart = cart.find(i => i.variantId === variant.id)?.quantity || 0;
@@ -707,6 +723,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         openVariantModal,
         closeVariantModal,
         addToCart,
+        availableStockFor,
         updateCartQuantity,
         removeFromCart,
         clearCart,

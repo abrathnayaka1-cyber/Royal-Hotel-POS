@@ -67,6 +67,8 @@ export interface Product {
   servesShots?: boolean;
   /** Server-derived: total ml still pourable as shots from the 750ml bottle stock. */
   availableShotMl?: number;
+  /** ml already poured (sold as shots) from the currently open 750ml bottle. */
+  openBottleUsedMl?: number;
 }
 
 export interface OrderItem {
@@ -267,6 +269,8 @@ export interface InventoryItemView {
   isActive: boolean;
   isShot?: boolean;
   shotVolumeMl?: number;
+  isShotSourceBottle?: boolean;
+  openBottleUsedMl?: number;
 }
 
 export interface AuditLog {
@@ -300,6 +304,8 @@ export interface DailyStockSheetItem {
   value: number;       // Sales Value = Sold * Price (Rs.)
   costPrice?: number;
   isKitchenItem?: boolean;
+  /** Shot size — balance is auto-derived from the 750ml bottle stock and cannot be adjusted directly. */
+  isShot?: boolean;
 }
 
 export interface DailyStockSheetReport {

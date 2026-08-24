@@ -34,6 +34,8 @@ interface VariantInventoryItem {
   status: 'IN_STOCK' | 'LOW_STOCK' | 'OUT_OF_STOCK';
   isShot?: boolean;
   shotVolumeMl?: number;
+  isShotSourceBottle?: boolean;
+  openBottleUsedMl?: number;
 }
 
 export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> = ({ settings }) => {
@@ -286,6 +288,11 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
                     <span className="text-[10px] text-slate-400 block font-normal">
                       {item.isShot ? 'Shots left (auto)' : `Min: ${item.minStockLevel}`}
                     </span>
+                    {item.isShotSourceBottle && (item.openBottleUsedMl || 0) > 0 && (
+                      <span className="text-[9px] text-cyan-600 dark:text-cyan-400 block font-semibold" title="The currently open bottle serving shots">
+                        Open: {item.openBottleUsedMl}ml used
+                      </span>
+                    )}
                   </td>
 
                   <td className="py-3 px-4 text-center">
