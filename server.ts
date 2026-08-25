@@ -1208,6 +1208,10 @@ app.get('/api/inventory', authMiddleware, requireRole('super_admin'), (req: Requ
       const bottleOfProduct = product.servesShots ? getBottleVariant(product) : null;
       const isShotSourceBottle = Boolean(bottleOfProduct && bottleOfProduct.id === variant.id);
       const openBottleUsedMl = isShotSourceBottle ? Math.max(0, Number(product.openBottleUsedMl) || 0) : undefined;
+      // Total liquid still in the bar for this product = full bottles + the open bottle remainder.
+      // Every shot sale visibly shrinks this number by the poured ml.
+      const poolMl = isShot || isShotSourceBottle ? Math.max(0, getAvailableShotMl(product)) : undefined;
+      const remainingMl = isShotSourceBottle ? poolMl : undefined;
 
       inventoryList.push({
         id: variant.id,
@@ -1234,7 +1238,10 @@ app.get('/api/inventory', authMiddleware, requireRole('super_admin'), (req: Requ
         isShot: isShot || undefined,
         shotVolumeMl: isShot ? shotVol : undefined,
         isShotSourceBottle: isShotSourceBottle || undefined,
-        openBottleUsedMl
+        openBottleUsedMl,
+        // ml visibility: shots and their source bottle expose the shared 750ml pool
+        shotPoolMl: isShot ? poolMl : undefined,
+        remainingMl
       });
     }
   }
@@ -2008,6 +2015,24 @@ function processImportRows(
     if (!row.productName && !row.sku && !row.barcode && !row.size &&
         (raw.quantity === undefined || raw.quantity === null || String(raw.quantity).trim() === '')) {
       return;
+    }
+
+    // ---- Size folded into the product name ----
+    // Supplier sheets / price-list photos often print ONE label per line
+    // ("Rockland Old (Gal ) 750ml") with no separate Size column. Split a
+    // trailing ml size off the name so the matching engine still receives a
+    // Product Name + Size identity for these rows. A ml size in the MIDDLE of
+    // a label ("Lion Lager Beer 625ml Large Bottle") is extracted as the size
+    // while the original label text is kept for review/fuzzy matching.
+    if (!row.size && row.productName) {
+      const trailing = /^(.*?)[\s(\[{/\-]*(\d+(?:\.\d+)?)\s*m\s*l\b[\s)}\]]*$/i.exec(row.productName);
+      if (trailing && trailing[1].trim().length > 0) {
+        row.productName = trailing[1].replace(/[\s(\[{/\-]+$/, '').trim().slice(0, 191);
+        row.size = `${Number(trailing[2])}ml`;
+      } else {
+        const mid = /(\d+(?:\.\d+)?)\s*m\s*l\b/i.exec(row.productName);
+        if (mid && parseMlFromSize(mid[0])) row.size = `${parseMlFromSize(mid[0])}ml`;
+      }
     }
 
     // ---- Quantity ----

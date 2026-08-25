@@ -38,6 +38,10 @@ interface VariantInventoryItem {
   shotVolumeMl?: number;
   isShotSourceBottle?: boolean;
   openBottleUsedMl?: number;
+  /** Shot rows: total ml left in the shared 750ml bottle pool. */
+  shotPoolMl?: number;
+  /** Source-bottle row: total liquid ml left (full bottles + open bottle remainder). */
+  remainingMl?: number;
 }
 
 export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> = ({ settings }) => {
@@ -300,11 +304,20 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
                       {item.stock}
                     </span>
                     <span className="text-[10px] text-slate-400 block font-normal">
-                      {item.isShot ? 'Shots left (auto)' : `Min: ${item.minStockLevel}`}
+                      {item.isShot ? `Shots left (${item.shotVolumeMl || '?'}ml pour)` : `Min: ${item.minStockLevel}`}
                     </span>
-                    {item.isShotSourceBottle && (item.openBottleUsedMl || 0) > 0 && (
-                      <span className="text-[9px] text-cyan-600 dark:text-cyan-400 block font-semibold" title="The currently open bottle serving shots">
-                        Open: {item.openBottleUsedMl}ml used
+                    {item.isShot && item.shotPoolMl !== undefined && (
+                      <span className="text-[9px] text-cyan-600 dark:text-cyan-400 block font-bold" title="Total liquid left in the shared 750ml bottle pool">
+                        Pool: {item.shotPoolMl.toLocaleString()}ml left
+                      </span>
+                    )}
+                    {item.isShotSourceBottle && (
+                      <span
+                        className="text-[9px] text-cyan-600 dark:text-cyan-400 block font-bold"
+                        title="Total liquid left = full bottles + open bottle remainder — drops by every shot poured"
+                      >
+                        {(item.remainingMl ?? Math.max(0, item.stock * 750 - (item.openBottleUsedMl || 0))).toLocaleString()}ml ({((item.remainingMl ?? 0) / 1000).toFixed(2)}L) left
+                        {(item.openBottleUsedMl || 0) > 0 && ` • Open: ${item.openBottleUsedMl}ml used`}
                       </span>
                     )}
                   </td>
