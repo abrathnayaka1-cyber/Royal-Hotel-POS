@@ -25,6 +25,17 @@
 - Room service integration
 - Booking ticket printing
 
+### Food & Kitchen Module (v1.2.0 — Kitchen Manager Role)
+- New **KITCHEN_MANAGER** role using the EXISTING login & RBAC system (no second auth)
+- Restricted **Kitchen Manager Suite**: Dashboard, Ingredients, Kitchen Stock, Recipes & Production, Wastage, Physical Stock Count, Food Cost, Kitchen Reports — other sections shown 🔒 LOCKED
+- **Automatic ingredient deduction**: recipe-linked menu items sold through the POS checkout deduct ingredients (e.g. Rice −750g, Chicken −240g for 3 fried rice) with a full movement ledger; bill void restores them
+- Kitchen ingredient store with min-stock alerts, stock in/out, wastage register (spoilage, burnt, expiry, staff meal, …)
+- Physical stock counts with expected vs physical vs variance (Rs.); variances above Rs. 5,000/line require **Super Admin approval** (Kitchen Manager creates request → Admin approves/rejects → stock updated via ledger)
+- Recipes are versioned (history never destroyed) and drive Food Cost % / gross margin per menu item
+- Backend RBAC: every `/api/kitchen/*` endpoint = `authenticateUser → requireKitchenPermission → controller`; cashiers get 403, and Kitchen Managers get 403 on ALL Super Admin endpoints (users, inventory, reports, settings, backups, …)
+- All kitchen activity audit-logged (`KITCHEN_*` actions) in the existing Audit Logs
+- Super Admin keeps complete control: manage Kitchen Manager accounts (Users) and the full kitchen module incl. approvals (Admin → Food & Kitchen)
+
 ### Inventory & Stock Control
 - Real-time inventory with low-stock & out-of-stock alerts
 - Stock In / Stock Out / Adjustment with audit trail

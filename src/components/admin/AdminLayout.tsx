@@ -14,6 +14,7 @@ import { UserManagement } from './UserManagement.tsx';
 import { AuditLogsView } from './AuditLogsView.tsx';
 import { SystemSettingsView } from './SystemSettingsView.tsx';
 import { RoomManagement } from './RoomManagement.tsx';
+import { KitchenLayout } from '../kitchen/KitchenLayout.tsx';
 import {
   LayoutDashboard,
   Wine,
@@ -29,7 +30,8 @@ import {
   Settings,
   ArrowLeft,
   LogOut,
-  BedDouble
+  BedDouble,
+  ChefHat
 } from 'lucide-react';
 
 interface AdminLayoutProps {
@@ -54,6 +56,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({ onSwitchToPOS }) => {
     { id: 'inventory', label: 'Inventory Control', icon: Package },
     { id: 'daily-sheet', label: 'Daily Stock Sheet', icon: FileSpreadsheet, badge: 'REGISTER' },
     { id: 'movements', label: 'Stock Movements', icon: History },
+    { id: 'kitchen', label: 'Food & Kitchen', icon: ChefHat },
     { id: 'kot', label: 'Kitchen KOT / KDS', icon: UtensilsCrossed },
     { id: 'bills', label: 'Bills & Invoices', icon: Receipt },
     { id: 'reports', label: 'Reports & Analytics', icon: BarChart3 },
@@ -145,6 +148,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({ onSwitchToPOS }) => {
         {activeTab === 'inventory' && <InventoryManagement settings={settings} />}
         {activeTab === 'daily-sheet' && <DailyStockSheet categories={categories} />}
         {activeTab === 'movements' && <StockMovements />}
+        {activeTab === 'kitchen' && <KitchenLayout isAdmin />}
         {activeTab === 'kot' && <KOTManager />}
         {activeTab === 'bills' && <BillsInvoicesView settings={settings} />}
         {activeTab === 'reports' && <ReportsView settings={settings} />}

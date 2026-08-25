@@ -147,14 +147,17 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const loadData = useCallback(async () => {
     try {
       setIsLoading(true);
+      // Data isolation: Kitchen Managers only need the catalogue + settings for
+      // the Food & Kitchen suite — skip held bills, rooms & bookings entirely.
+      const isKitchenOnly = user?.role === 'kitchen_manager';
       const [prodsData, catsData, compsData, settsData, heldData, roomsData, bookingsData] = await Promise.all([
         fetchApi<Product[]>('/products'),
         fetchApi<Category[]>('/categories'),
         fetchApi<Company[]>('/companies'),
         fetchApi<SystemSettings>('/settings'),
-        fetchApi<HeldBill[]>('/orders/held'),
-        fetchApi<Room[]>('/rooms'),
-        fetchApi<RoomBooking[]>('/room-bookings'),
+        isKitchenOnly ? Promise.resolve([] as HeldBill[]) : fetchApi<HeldBill[]>('/orders/held'),
+        isKitchenOnly ? Promise.resolve([] as Room[]) : fetchApi<Room[]>('/rooms'),
+        isKitchenOnly ? Promise.resolve([] as RoomBooking[]) : fetchApi<RoomBooking[]>('/room-bookings'),
       ]);
 
       setProducts(prodsData || []);
@@ -169,7 +172,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [user?.role]);
 
   useEffect(() => {
     if (user) {

@@ -17,7 +17,8 @@ import {
   Phone,
   Mail,
   BadgeCheck,
-  UserCheck
+  UserCheck,
+  ChefHat
 } from 'lucide-react';
 
 export const UserManagement: React.FC = () => {
@@ -284,7 +285,9 @@ export const UserManagement: React.FC = () => {
                       <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs ${
                         user.role === 'super_admin'
                           ? 'bg-purple-100 text-purple-700 dark:bg-purple-950 dark:text-purple-300'
-                          : 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300'
+                          : user.role === 'kitchen_manager'
+                            ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300'
+                            : 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300'
                       }`}>
                         {user.name.charAt(0).toUpperCase()}
                       </div>
@@ -311,6 +314,11 @@ export const UserManagement: React.FC = () => {
                       <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300 flex items-center gap-1 w-fit">
                         <Shield className="w-3 h-3" />
                         Super Admin
+                      </span>
+                    ) : user.role === 'kitchen_manager' ? (
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 flex items-center gap-1 w-fit">
+                        <ChefHat className="w-3 h-3" />
+                        Kitchen Manager
                       </span>
                     ) : (
                       <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 flex items-center gap-1 w-fit">
@@ -476,6 +484,7 @@ export const UserManagement: React.FC = () => {
                   className="w-full text-xs font-semibold px-3 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl cursor-pointer"
                 >
                   <option value="cashier">Cashier (Bar POS & Billing Operations Only)</option>
+                  <option value="kitchen_manager">Kitchen Manager (Food & Kitchen Module Only)</option>
                   <option value="super_admin">Super Admin (Full Management, Inventory & Financial Reports)</option>
                 </select>
               </div>

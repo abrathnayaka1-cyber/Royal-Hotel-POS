@@ -1,4 +1,4 @@
-export type UserRole = 'super_admin' | 'cashier';
+export type UserRole = 'super_admin' | 'cashier' | 'kitchen_manager';
 
 export interface User {
   id: string;
@@ -352,4 +352,206 @@ export interface SystemSettings {
   thermalWidth?: '58mm' | '80mm';
   autoPrintAfterPayment?: boolean;
   allowCashierToPrint?: boolean;
+}
+
+// ==========================================
+// FOOD & KITCHEN MODULE (v1.2.0 — Kitchen Manager role)
+// ==========================================
+// Mirrors server/db.ts — additive collections using the same movement-ledger
+// architecture as the product stock system.
+
+export interface KitchenIngredient {
+  id: string;
+  name: string;
+  unit: string;
+  currentStock: number;
+  minStockLevel: number;
+  costPerUnit: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  /** Derived on GET /api/kitchen/ingredients */
+  isLowStock?: boolean;
+  isOutOfStock?: boolean;
+  stockValue?: number;
+}
+
+export type KitchenMovementType =
+  | 'opening_stock'
+  | 'stock_in'
+  | 'stock_out'
+  | 'sale'
+  | 'wastage'
+  | 'adjustment'
+  | 'count_correction';
+
+export interface KitchenStockMovement {
+  id: string;
+  ingredientId: string;
+  ingredientName: string;
+  unit: string;
+  quantityChange: number;
+  quantityBefore: number;
+  quantityAfter: number;
+  movementType: KitchenMovementType;
+  reason?: string;
+  referenceId?: string;
+  costPerUnit?: number;
+  userId: string;
+  userName: string;
+  createdAt: string;
+}
+
+export interface KitchenRecipeItem {
+  ingredientId: string;
+  ingredientName: string;
+  unit: string;
+  quantity: number;
+}
+
+export interface KitchenRecipeVersion {
+  version: number;
+  items: KitchenRecipeItem[];
+  savedAt: string;
+  savedById: string;
+  savedByName: string;
+}
+
+export interface KitchenRecipe {
+  id: string;
+  productId: string;
+  productName: string;
+  variantId: string;
+  variantSize: string;
+  servings: number;
+  items: KitchenRecipeItem[];
+  isActive: boolean;
+  version: number;
+  history: KitchenRecipeVersion[];
+  createdById: string;
+  createdByName: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Derived on GET */
+  recipeCostPerServing?: number;
+}
+
+export const KITCHEN_WASTAGE_CATEGORIES = [
+  'Spoilage',
+  'Spillage',
+  'Burnt Food',
+  'Preparation Loss',
+  'Cutting Loss',
+  'Expired Material',
+  'Damaged Material',
+  'Over Portion',
+  'Staff Meal',
+  'Other',
+] as const;
+
+export type KitchenWastageCategory = (typeof KITCHEN_WASTAGE_CATEGORIES)[number];
+
+export interface KitchenWastageRecord {
+  id: string;
+  ingredientId: string;
+  ingredientName: string;
+  quantity: number;
+  unit: string;
+  cost: number;
+  category: KitchenWastageCategory;
+  reason?: string;
+  notes?: string;
+  movementId: string;
+  userId: string;
+  userName: string;
+  createdAt: string;
+}
+
+export interface KitchenCountLine {
+  ingredientId: string;
+  ingredientName: string;
+  unit: string;
+  expected: number;
+  physical: number;
+  variance: number;
+  varianceCost: number;
+  status: 'applied' | 'pending_approval' | 'no_variance';
+}
+
+export interface KitchenPhysicalCount {
+  id: string;
+  countNumber: string;
+  lines: KitchenCountLine[];
+  totalVarianceCost: number;
+  status: 'applied' | 'partial' | 'pending_approval';
+  notes?: string;
+  userId: string;
+  userName: string;
+  createdAt: string;
+}
+
+export interface KitchenAdjustmentRequest {
+  id: string;
+  requestNumber: string;
+  type: 'stock_adjustment';
+  ingredientId: string;
+  ingredientName: string;
+  unit: string;
+  currentQty: number;
+  requestedQty: number;
+  diffQty: number;
+  varianceCost: number;
+  reason: string;
+  countNumber?: string;
+  status: 'pending' | 'approved' | 'rejected';
+  requestedById: string;
+  requestedByName: string;
+  createdAt: string;
+  reviewedById?: string;
+  reviewedByName?: string;
+  reviewedAt?: string;
+  reviewNote?: string;
+}
+
+export interface KitchenDashboardData {
+  todayFoodSales: number;
+  todayFoodCost: number;
+  foodCostPct: number;
+  grossFoodProfit: number;
+  todayFoodItemsSold: number;
+  todayFoodBillsCount: number;
+  lowStockCount: number;
+  outOfStockCount: number;
+  lowStockItems: { id: string; name: string; stock: number; min: number; unit: string; status: string }[];
+  todayWastageCost: number;
+  todayWastageCount: number;
+  pendingApprovals: number;
+  totalIngredientValue: number;
+  activeRecipeCount: number;
+  recentMovements: KitchenStockMovement[];
+  recentActivity: AuditLog[];
+}
+
+export interface KitchenMenuItem {
+  productId: string;
+  productName: string;
+  variantId: string;
+  variantSize: string;
+  sellingPrice: number;
+  recipeId: string | null;
+  recipeCost: number | null;
+}
+
+export interface KitchenFoodCostRow {
+  productId: string;
+  productName: string;
+  variantId: string;
+  variantSize: string;
+  sellingPrice: number;
+  recipeId: string | null;
+  recipeCost: number | null;
+  grossProfit: number | null;
+  foodCostPct: number | null;
+  grossMarginPct: number | null;
+  hasRecipe: boolean;
 }

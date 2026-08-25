@@ -12,11 +12,12 @@ import {
   LayoutDashboard,
   Clock,
   Layers,
+  ChefHat,
 } from 'lucide-react';
 
 interface NavbarProps {
-  currentView: 'pos' | 'admin';
-  onSwitchView: (view: 'pos' | 'admin') => void;
+  currentView: 'pos' | 'admin' | 'kitchen';
+  onSwitchView: (view: 'pos' | 'admin' | 'kitchen') => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({ currentView, onSwitchView }) => {
@@ -109,7 +110,9 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onSwitchView }) => 
 
       <div className="flex items-center gap-3 sm:gap-5">
         <div className="hidden lg:flex flex-col text-right">
-          <span className="text-[10px] text-slate-400 uppercase leading-none font-semibold">Cashier</span>
+          <span className="text-[10px] text-slate-400 uppercase leading-none font-semibold">
+            {user?.role === 'kitchen_manager' ? 'Kitchen Manager' : 'Cashier'}
+          </span>
           <span className="text-xs font-bold text-white truncate max-w-[140px]">{user?.name}</span>
         </div>
 
@@ -184,6 +187,8 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onSwitchView }) => 
           <div className="flex items-center gap-1.5 bg-slate-700/80 py-1 px-2.5 rounded-lg">
             {user?.role === 'super_admin' ? (
               <Shield className="w-3.5 h-3.5 text-purple-400" />
+            ) : user?.role === 'kitchen_manager' ? (
+              <ChefHat className="w-3.5 h-3.5 text-amber-400" />
             ) : (
               <UserIcon className="w-3.5 h-3.5 text-blue-400" />
             )}

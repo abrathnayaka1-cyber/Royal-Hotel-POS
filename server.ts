@@ -10,7 +10,7 @@ import rateLimit from 'express-rate-limit';
 import { createServer as createViteServer } from 'vite';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
-import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking, StockImport, StockImportRowResult, StockImportType } from './server/db.ts';
+import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking, StockImport, StockImportRowResult, StockImportType, KitchenIngredient, KitchenStockMovement, KitchenRecipe, KitchenRecipeItem, KitchenWastageRecord, KitchenPhysicalCount, KitchenAdjustmentRequest, KITCHEN_WASTAGE_CATEGORIES, KitchenWastageCategory } from './server/db.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -209,10 +209,75 @@ function requireRole(role: 'super_admin' | 'cashier') {
       return res.status(401).json({ error: 'Unauthorized.' });
     }
     if (role === 'super_admin' && user.role !== 'super_admin') {
+      // Also blocks KITCHEN_MANAGER from every Super Admin endpoint (users,
+      // settings, payments/bills void, reports, inventory, backups, …)
       return res.status(403).json({ error: 'Access Denied: Super Admin permissions required.' });
     }
     next();
   };
+}
+
+// ==========================================
+// FOOD & KITCHEN MODULE RBAC (v1.2.0)
+// ==========================================
+// The existing RBAC system is ROLE-BASED (requireRole). The Kitchen module
+// follows the same architecture: permissions are granted BY ROLE through the
+// middleware below. No second auth system, no separate permission tables.
+//
+//   super_admin      → holds ALL kitchen permissions (complete control) plus
+//                      the exclusive KITCHEN_REQUEST_APPROVE permission
+//                      (high-risk adjustments) — see requireKitchenAdmin().
+//   kitchen_manager  → holds every KITCHEN_* operating permission below.
+//   cashier          → holds NONE. Every /api/kitchen/* endpoint returns 403.
+//
+// Permission map (endpoint → permission):
+//   KITCHEN_DASHBOARD_VIEW        GET  /api/kitchen/dashboard
+//   KITCHEN_INGREDIENT_VIEW       GET  /api/kitchen/ingredients
+//   KITCHEN_INGREDIENT_CREATE     POST /api/kitchen/ingredients
+//   KITCHEN_INGREDIENT_EDIT       PUT  /api/kitchen/ingredients/:id
+//   KITCHEN_STOCK_VIEW            GET  /api/kitchen/stock | /api/kitchen/movements
+//   KITCHEN_STOCK_IN              POST /api/kitchen/stock-in
+//   KITCHEN_STOCK_OUT             POST /api/kitchen/stock-out
+//   KITCHEN_RECIPE_VIEW           GET  /api/kitchen/recipes | /api/kitchen/menu-items
+//   KITCHEN_RECIPE_CREATE         POST /api/kitchen/recipes
+//   KITCHEN_RECIPE_EDIT           PUT  /api/kitchen/recipes/:id
+//   KITCHEN_RECIPE_ARCHIVE        PATCH /api/kitchen/recipes/:id/archive
+//   KITCHEN_PRODUCTION_VIEW       GET  /api/kitchen/movements?type=sale (POS auto production)
+//   KITCHEN_WASTAGE_VIEW          GET  /api/kitchen/wastage
+//   KITCHEN_WASTAGE_CREATE        POST /api/kitchen/wastage
+//   KITCHEN_PHYSICAL_COUNT_VIEW   GET  /api/kitchen/counts
+//   KITCHEN_PHYSICAL_COUNT_CREATE POST /api/kitchen/counts
+//   KITCHEN_VARIANCE_VIEW         GET  /api/kitchen/counts (+ variance reports)
+//   KITCHEN_FOOD_COST_VIEW        GET  /api/kitchen/food-cost
+//   KITCHEN_REPORT_VIEW           GET  /api/kitchen/reports
+//   KITCHEN_REQUEST_APPROVE       POST /api/kitchen/requests/:id/approve|reject  (Super Admin ONLY)
+
+const KITCHEN_ROLES: User['role'][] = ['super_admin', 'kitchen_manager'];
+
+/** Grants access to Kitchen operating endpoints (kitchen_manager + super_admin). */
+function requireKitchenPermission(permission: string) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const user = (req as any).user as User;
+    if (!user) {
+      return res.status(401).json({ error: 'Unauthorized.' });
+    }
+    if (!KITCHEN_ROLES.includes(user.role)) {
+      return res.status(403).json({ error: `Access Denied: Kitchen Manager permissions required (${permission}).` });
+    }
+    next();
+  };
+}
+
+/** High-risk kitchen actions (approving large stock adjustments) — Super Admin only. */
+function requireKitchenAdmin(req: Request, res: Response, next: NextFunction) {
+  const user = (req as any).user as User;
+  if (!user) {
+    return res.status(401).json({ error: 'Unauthorized.' });
+  }
+  if (user.role !== 'super_admin') {
+    return res.status(403).json({ error: 'Access Denied: Super Admin approval required for this action.' });
+  }
+  next();
 }
 
 // Input validation schemas using Zod
@@ -226,7 +291,7 @@ const userCreateSchema = z.object({
   name: z.string().trim().min(2).max(128),
   username: z.string().trim().min(3).max(64).regex(/^[a-zA-Z0-9_.-]+$/, 'Username can only contain letters, numbers, underscore, dot and hyphen'),
   email: z.string().trim().email().max(128).optional().or(z.literal('')),
-  role: z.enum(['super_admin', 'cashier']),
+  role: z.enum(['super_admin', 'cashier', 'kitchen_manager']),
   password: z.string().min(4).max(128),
   pin: z.string().trim().min(2).max(16).optional().or(z.literal('')),
 });
@@ -433,7 +498,7 @@ app.post('/api/users', authMiddleware, requireRole('super_admin'), async (req: R
     name: name.trim(),
     username: username.toLowerCase(),
     email: (email || `${username.toLowerCase()}@pos.local`).trim().toLowerCase(),
-    role: role === 'super_admin' ? 'super_admin' : 'cashier',
+    role: role === 'super_admin' ? 'super_admin' : role === 'kitchen_manager' ? 'kitchen_manager' : 'cashier',
     passwordHash: await bcrypt.hash(password, 10),
     isActive: true,
     pin: pin?.trim() || undefined,
@@ -471,7 +536,7 @@ app.put('/api/users/:id', authMiddleware, requireRole('super_admin'), async (req
     }
     user.email = emailTrim;
   }
-  if (role && ['super_admin', 'cashier'].includes(role)) user.role = role;
+  if (role && ['super_admin', 'cashier', 'kitchen_manager'].includes(role)) user.role = role;
   if (pin !== undefined) user.pin = pin ? String(pin).trim() : undefined;
   if (isActive !== undefined) user.isActive = Boolean(isActive);
 
@@ -2716,6 +2781,116 @@ app.get('/api/bills/:id', authMiddleware, (req: Request, res: Response) => {
   res.json(bill);
 });
 
+// ==========================================
+// KITCHEN PRODUCTION ENGINE (FOOD & KITCHEN MODULE v1.2.0)
+// ==========================================
+// Automatic recipe ingredient deduction when food items are sold through the
+// EXISTING POS checkout. Menu items WITHOUT a recipe are completely unaffected
+// (their variant-level stock keeps working exactly as before).
+
+/** Finds the ACTIVE kitchen recipe attached to a POS variant. */
+function findRecipeForVariant(variantId: string): KitchenRecipe | undefined {
+  return db.raw.kitchenRecipes.find(r => r.isActive && r.variantId === variantId);
+}
+
+/**
+ * Aggregates the total ingredient quantities required to fulfil a bill
+ * (recipe quantities × item quantities, merged per ingredient).
+ * Returns null when no item on the bill is recipe-linked.
+ */
+function aggregateIngredientRequirements(items: { variantId: string; quantity: number }[]): Map<KitchenIngredient, number> | null {
+  const required = new Map<string, number>();
+  let any = false;
+  for (const item of items) {
+    const recipe = findRecipeForVariant(item.variantId);
+    if (!recipe) continue;
+    any = true;
+    const servings = recipe.servings > 0 ? recipe.servings : 1;
+    for (const line of recipe.items) {
+      const perPortion = line.quantity / servings;
+      required.set(line.ingredientId, (required.get(line.ingredientId) || 0) + perPortion * item.quantity);
+    }
+  }
+  if (!any) return null;
+  const resolved = new Map<KitchenIngredient, number>();
+  for (const [ingId, qty] of required) {
+    const ing = db.raw.kitchenIngredients.find(i => i.id === ingId && i.isActive);
+    if (ing) resolved.set(ing, qty);
+  }
+  return resolved;
+}
+
+/**
+ * Deducts recipe ingredients from the kitchen store with a full movement
+ * ledger record per ingredient (never a raw quantity mutation).
+ */
+function deductKitchenIngredientsForSale(
+  requirements: Map<KitchenIngredient, number>,
+  user: User,
+  billNumber: string,
+  billId: string
+): void {
+  for (const [ing, qty] of requirements) {
+    const rounded = Number(qty.toFixed(3));
+    if (rounded <= 0) continue;
+    const before = ing.currentStock;
+    ing.currentStock = Number((ing.currentStock - rounded).toFixed(3));
+    ing.updatedAt = new Date().toISOString();
+    db.recordKitchenMovement(
+      ing,
+      -rounded,
+      before,
+      ing.currentStock,
+      'sale',
+      user.id,
+      user.name,
+      `Auto production for sale on ${billNumber}`,
+      billNumber
+    );
+  }
+}
+
+/** Restores recipe ingredients back to the kitchen store when a bill is voided. */
+function restoreKitchenIngredientsForVoid(
+  bill: Bill,
+  user: User
+): void {
+  const requirements = aggregateIngredientRequirements(
+    bill.items.map(i => ({ variantId: i.variantId, quantity: i.quantity }))
+  );
+  if (!requirements) return;
+  for (const [ing, qty] of requirements) {
+    const rounded = Number(qty.toFixed(3));
+    if (rounded <= 0) continue;
+    const before = ing.currentStock;
+    ing.currentStock = Number((ing.currentStock + rounded).toFixed(3));
+    ing.updatedAt = new Date().toISOString();
+    db.recordKitchenMovement(
+      ing,
+      rounded,
+      before,
+      ing.currentStock,
+      'adjustment',
+      user.id,
+      user.name,
+      `Bill void reversal: ingredients returned for ${bill.billNumber}`,
+      bill.billNumber
+    );
+  }
+}
+
+/** Recipe cost per portion (Rs.) using current ingredient costs. */
+function computeRecipeCostPerServing(recipe: KitchenRecipe): number {
+  const servings = recipe.servings > 0 ? recipe.servings : 1;
+  let cost = 0;
+  for (const line of recipe.items) {
+    const ing = db.raw.kitchenIngredients.find(i => i.id === line.ingredientId);
+    const cpu = ing ? ing.costPerUnit : 0;
+    cost += (line.quantity / servings) * cpu;
+  }
+  return Number(cost.toFixed(2));
+}
+
 app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) => {
   const user = (req as any).user as User;
   const {
@@ -2817,6 +2992,23 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
     }
   }
 
+  // Kitchen ingredient pre-check (Food & Kitchen module): recipe-linked menu
+  // items must have their ingredients available before ANY stock is touched.
+  // Items without recipes are unaffected. Respects the same negative-stock
+  // setting as the existing product stock check above.
+  const kitchenRequirements = aggregateIngredientRequirements(
+    safeItems.map(i => ({ variantId: i.variantId, quantity: i.quantity }))
+  );
+  if (kitchenRequirements && !db.raw.settings.allowNegativeStock) {
+    for (const [ing, qty] of kitchenRequirements) {
+      if (ing.currentStock + 0.001 < qty) {
+        return res.status(400).json({
+          error: `Insufficient kitchen ingredient: ${ing.name}. Available: ${ing.currentStock}${ing.unit}, Required: ${Number(qty.toFixed(3))}${ing.unit}. Please update the kitchen store (Stock In / Physical Count).`
+        });
+      }
+    }
+  }
+
   const billId = `bill-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
   const billNumber = db.getNextBillNumber();
   const invoiceNumber = db.getNextInvoiceNumber();
@@ -2851,6 +3043,13 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
     if (product) {
       deductShotMl(product, totalMl, user, `Sale on ${billNumber} / ${invoiceNumber}`, billId);
     }
+  }
+
+  // 3) Auto-deduct recipe ingredients from the kitchen store (Food & Kitchen
+  //    module). Runs only when recipe-linked items were sold; every deduction
+  //    gets a kitchen movement ledger record. Cashier never enters ingredients.
+  if (kitchenRequirements) {
+    deductKitchenIngredientsForSale(kitchenRequirements, user, billNumber, billId);
   }
 
   const snapshotItems: OrderItem[] = safeItems;
@@ -2957,6 +3156,10 @@ app.post('/api/bills/:id/void', authMiddleware, requireRole('super_admin'), (req
       restoreShotMl(product, totalMl, user, `Bill void reversal: ${bill.billNumber}`, bill.id);
     }
   }
+
+  // Food & Kitchen module: return recipe ingredients that were auto-deducted
+  // for this bill's recipe-linked items (with movement ledger records).
+  restoreKitchenIngredientsForVoid(bill, user);
 
   db.save();
   db.logAudit(user.id, user.name, user.role, 'VOID_BILL', 'BILL', bill.id, `Voided bill ${bill.billNumber}. Reason: ${reason ? String(reason).slice(0, 500) : 'Not specified'}`);
@@ -3828,6 +4031,875 @@ app.get('/api/dashboard/stats', authMiddleware, requireRole('super_admin'), (req
     todayPaymentBreakdown,
     activeCashiers: db.raw.users.filter(u => u.role === 'cashier' && u.isActive).map(({ passwordHash, ...u }) => u)
   });
+});
+
+// ==========================================
+// FOOD & KITCHEN MODULE API (v1.2.0 — Kitchen Manager role)
+// ==========================================
+// Every endpoint: authenticateUser → requireKitchenPermission → controller → db.
+// Kitchen data is isolated: cashiers get 403 on ALL of these; kitchen managers
+// get 403 on every Super Admin endpoint (users, settings, reports, inventory,
+// backups, …). High-risk approvals are Super Admin only (requireKitchenAdmin).
+
+/** Per-line variance cost above this requires Super Admin approval (Rs.). */
+const KITCHEN_ADJUSTMENT_APPROVAL_THRESHOLD = 5000;
+
+function sanitizeKitchenIngredientInput(body: any): { ok: true; value: { name: string; unit: string; currentStock: number; minStockLevel: number; costPerUnit: number; openingReason?: string } } | { ok: false; error: string } {
+  const name = typeof body?.name === 'string' ? body.name.trim() : '';
+  const unit = typeof body?.unit === 'string' ? body.unit.trim() : '';
+  const currentStock = Number(body?.currentStock);
+  const minStockLevel = Number(body?.minStockLevel ?? 0);
+  const costPerUnit = Number(body?.costPerUnit);
+
+  if (name.length < 2 || name.length > 128) return { ok: false, error: 'Ingredient name must be 2-128 characters.' };
+  if (!unit || unit.length > 16) return { ok: false, error: 'Unit is required (e.g. g, kg, ml, l, pcs) — max 16 characters.' };
+  if (!Number.isFinite(currentStock) || currentStock < 0 || currentStock > 10000000) return { ok: false, error: 'Current stock must be a number between 0 and 10,000,000.' };
+  if (!Number.isFinite(minStockLevel) || minStockLevel < 0 || minStockLevel > 1000000) return { ok: false, error: 'Minimum stock level must be a number between 0 and 1,000,000.' };
+  if (!Number.isFinite(costPerUnit) || costPerUnit < 0 || costPerUnit > 1000000) return { ok: false, error: 'Cost per unit must be a number between 0 and 1,000,000.' };
+
+  return {
+    ok: true,
+    value: {
+      name,
+      unit,
+      currentStock: Number(currentStock.toFixed(3)),
+      minStockLevel: Number(minStockLevel.toFixed(3)),
+      costPerUnit: Number(costPerUnit.toFixed(2)),
+      openingReason: typeof body?.openingReason === 'string' ? body.openingReason.slice(0, 500) : undefined,
+    }
+  };
+}
+
+/** ---- Kitchen Dashboard (Kitchen-scoped ONLY — no system-wide financials) ---- */
+app.get('/api/kitchen/dashboard', authMiddleware, requireKitchenPermission('KITCHEN_DASHBOARD_VIEW'), (req: Request, res: Response) => {
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+
+  // Food sales TODAY (kitchen items on paid bills only — not system-wide revenue)
+  let todayFoodSales = 0;
+  let todayFoodItemsSold = 0;
+  let todayFoodBills = new Set<string>();
+  let todayFoodCost = 0;
+
+  for (const bill of db.raw.bills) {
+    if (bill.status !== 'paid') continue;
+    const t = new Date(bill.paidAt || bill.createdAt).getTime();
+    if (t < todayStart) continue;
+    let billHasFood = false;
+    for (const item of bill.items) {
+      if (!item.isKitchenItem) continue;
+      billHasFood = true;
+      todayFoodSales += item.total;
+      todayFoodItemsSold += item.quantity;
+      const recipe = findRecipeForVariant(item.variantId);
+      if (recipe) {
+        todayFoodCost += computeRecipeCostPerServing(recipe) * item.quantity;
+      } else {
+        todayFoodCost += (item.costPrice || 0) * item.quantity;
+      }
+    }
+    if (billHasFood) todayFoodBills.add(bill.id);
+  }
+  todayFoodSales = Number(todayFoodSales.toFixed(2));
+  todayFoodCost = Number(todayFoodCost.toFixed(2));
+
+  const grossFoodProfit = Number((todayFoodSales - todayFoodCost).toFixed(2));
+  const foodCostPct = todayFoodSales > 0 ? Number(((todayFoodCost / todayFoodSales) * 100).toFixed(2)) : 0;
+
+  // Kitchen store alerts
+  const lowStockItems: any[] = [];
+  let lowStockCount = 0;
+  let outOfStockCount = 0;
+  let totalIngredientValue = 0;
+  for (const ing of db.raw.kitchenIngredients) {
+    if (!ing.isActive) continue;
+    totalIngredientValue += ing.currentStock * ing.costPerUnit;
+    if (ing.currentStock <= 0) {
+      outOfStockCount++;
+      lowStockItems.push({ id: ing.id, name: ing.name, stock: ing.currentStock, min: ing.minStockLevel, unit: ing.unit, status: 'OUT_OF_STOCK' });
+    } else if (ing.currentStock <= ing.minStockLevel) {
+      lowStockCount++;
+      lowStockItems.push({ id: ing.id, name: ing.name, stock: ing.currentStock, min: ing.minStockLevel, unit: ing.unit, status: 'LOW_STOCK' });
+    }
+  }
+
+  // Today's wastage
+  const todayWastage = db.raw.kitchenWastage.filter(w => new Date(w.createdAt).getTime() >= todayStart);
+  const todayWastageCost = Number(todayWastage.reduce((s, w) => s + w.cost, 0).toFixed(2));
+
+  const pendingApprovals = db.raw.kitchenAdjustmentRequests.filter(r => r.status === 'pending').length;
+
+  const recentMovements = db.raw.kitchenMovements.slice(0, 10);
+  const recentActivity = db.raw.auditLogs
+    .filter(l => String(l.action || '').startsWith('KITCHEN_'))
+    .slice(0, 10);
+
+  res.json({
+    todayFoodSales,
+    todayFoodCost,
+    foodCostPct,
+    grossFoodProfit,
+    todayFoodItemsSold,
+    todayFoodBillsCount: todayFoodBills.size,
+    lowStockCount,
+    outOfStockCount,
+    lowStockItems: lowStockItems.slice(0, 8),
+    todayWastageCost,
+    todayWastageCount: todayWastage.length,
+    pendingApprovals,
+    totalIngredientValue: Number(totalIngredientValue.toFixed(2)),
+    activeRecipeCount: db.raw.kitchenRecipes.filter(r => r.isActive).length,
+    recentMovements,
+    recentActivity,
+  });
+});
+
+/** ---- Kitchen Ingredients ---- */
+app.get('/api/kitchen/ingredients', authMiddleware, requireKitchenPermission('KITCHEN_INGREDIENT_VIEW'), (req: Request, res: Response) => {
+  const list = db.raw.kitchenIngredients.map(ing => ({
+    ...ing,
+    isLowStock: ing.isActive && ing.currentStock > 0 && ing.currentStock <= ing.minStockLevel,
+    isOutOfStock: ing.isActive && ing.currentStock <= 0,
+    stockValue: Number((ing.currentStock * ing.costPerUnit).toFixed(2)),
+  }));
+  res.json(list);
+});
+
+app.post('/api/kitchen/ingredients', authMiddleware, requireKitchenPermission('KITCHEN_INGREDIENT_CREATE'), (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const parsed = sanitizeKitchenIngredientInput(req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const v = parsed.value;
+
+  const duplicate = db.raw.kitchenIngredients.find(i => i.name.trim().toLowerCase() === v.name.toLowerCase());
+  if (duplicate) return res.status(400).json({ error: `Ingredient "${duplicate.name}" already exists in the kitchen store.` });
+
+  const ing: KitchenIngredient = {
+    id: `king-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    name: v.name,
+    unit: v.unit,
+    currentStock: v.currentStock,
+    minStockLevel: v.minStockLevel,
+    costPerUnit: v.costPerUnit,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  db.raw.kitchenIngredients.push(ing);
+
+  // Opening stock goes through the movement ledger (never a silent quantity set)
+  if (ing.currentStock > 0) {
+    db.recordKitchenMovement(ing, ing.currentStock, 0, ing.currentStock, 'opening_stock', user.id, user.name, v.openingReason || 'Opening stock when ingredient was created');
+  } else {
+    db.save();
+  }
+
+  db.logAudit(user.id, user.name, user.role, 'KITCHEN_INGREDIENT_CREATED', 'KITCHEN', ing.id, `Created kitchen ingredient ${ing.name} (opening stock: ${ing.currentStock}${ing.unit}, min: ${ing.minStockLevel}${ing.unit}, cost: Rs. ${ing.costPerUnit}/${ing.unit})`);
+  res.status(201).json(ing);
+});
+
+app.put('/api/kitchen/ingredients/:id', authMiddleware, requireKitchenPermission('KITCHEN_INGREDIENT_EDIT'), (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const ing = db.raw.kitchenIngredients.find(i => i.id === req.params.id);
+  if (!ing) return res.status(404).json({ error: 'Kitchen ingredient not found.' });
+
+  const parsed = sanitizeKitchenIngredientInput({ ...req.body, currentStock: req.body?.currentStock !== undefined ? req.body.currentStock : ing.currentStock });
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const v = parsed.value;
+
+  const duplicate = db.raw.kitchenIngredients.find(i => i.id !== ing.id && i.name.trim().toLowerCase() === v.name.toLowerCase());
+  if (duplicate) return res.status(400).json({ error: `Ingredient "${duplicate.name}" already exists in the kitchen store.` });
+
+  // Cost / min-level / unit / name are editable. QUANTITY changes must go
+  // through Stock In / Stock Out / Physical Count so the ledger stays honest.
+  const before = { name: ing.name, unit: ing.unit, minStockLevel: ing.minStockLevel, costPerUnit: ing.costPerUnit };
+  ing.name = v.name;
+  ing.unit = v.unit;
+  ing.minStockLevel = v.minStockLevel;
+  ing.costPerUnit = v.costPerUnit;
+  ing.updatedAt = new Date().toISOString();
+  db.save();
+
+  db.logAudit(user.id, user.name, user.role, 'KITCHEN_INGREDIENT_UPDATED', 'KITCHEN', ing.id, `Updated ingredient ${ing.name}. Before: ${JSON.stringify(before)} → After: ${JSON.stringify({ name: ing.name, unit: ing.unit, minStockLevel: ing.minStockLevel, costPerUnit: ing.costPerUnit })}`);
+  res.json(ing);
+});
+
+/** ---- Kitchen Stock & Movements ---- */
+app.get('/api/kitchen/movements', authMiddleware, requireKitchenPermission('KITCHEN_STOCK_VIEW'), (req: Request, res: Response) => {
+  const { type, ingredientId, reference, page, limit, from, to } = req.query;
+
+  let list = db.raw.kitchenMovements.slice();
+  if (type && type !== 'all') list = list.filter(m => m.movementType === String(type));
+  if (ingredientId && ingredientId !== 'all') list = list.filter(m => m.ingredientId === String(ingredientId));
+  if (reference) list = list.filter(m => (m.referenceId || '').toLowerCase().includes(String(reference).toLowerCase()));
+  if (from) {
+    const t = new Date(String(from)).getTime();
+    if (!isNaN(t)) list = list.filter(m => new Date(m.createdAt).getTime() >= t);
+  }
+  if (to) {
+    const raw = String(to);
+    const parsedT = new Date(raw).getTime();
+    const t = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? parsedT + 86399999 : parsedT;
+    if (!isNaN(t)) list = list.filter(m => new Date(m.createdAt).getTime() <= t);
+  }
+
+  const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+  const pageSize = Math.min(200, Math.max(10, parseInt(String(limit), 10) || 50));
+  const total = list.length;
+  const items = list.slice((pageNum - 1) * pageSize, pageNum * pageSize);
+
+  res.json({ items, total, page: pageNum, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) });
+});
+
+app.post('/api/kitchen/stock-in', authMiddleware, requireKitchenPermission('KITCHEN_STOCK_IN'), (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const { ingredientId, quantity, costPerUnit, reason, reference, date } = req.body;
+
+  const numQty = Number(quantity);
+  if (!ingredientId || !Number.isFinite(numQty) || numQty <= 0 || numQty > 10000000) {
+    return res.status(400).json({ error: 'Valid ingredient and positive quantity (max 10,000,000) are required.' });
+  }
+
+  const ing = db.raw.kitchenIngredients.find(i => i.id === ingredientId && i.isActive);
+  if (!ing) return res.status(404).json({ error: 'Kitchen ingredient not found.' });
+
+  const before = ing.currentStock;
+  ing.currentStock = Number((ing.currentStock + numQty).toFixed(3));
+  if (costPerUnit !== undefined && Number(costPerUnit) > 0) {
+    ing.costPerUnit = Number(Number(costPerUnit).toFixed(2)); // latest cost wins (moving price)
+  }
+  ing.updatedAt = new Date().toISOString();
+
+  const recordTime = date ? (String(date).includes('T') ? new Date(date).toISOString() : new Date(`${date}T12:00:00.000Z`).toISOString()) : new Date().toISOString();
+
+  db.recordKitchenMovement(
+    ing,
+    numQty,
+    before,
+    ing.currentStock,
+    'stock_in',
+    user.id,
+    user.name,
+    (typeof reason === 'string' && reason.trim()) ? reason.trim().slice(0, 500) : 'Kitchen stock received',
+    (typeof reference === 'string' && reference.trim()) ? reference.trim().slice(0, 128) : undefined,
+    recordTime
+  );
+
+  db.logAudit(user.id, user.name, user.role, 'KITCHEN_STOCK_IN', 'KITCHEN', ing.id, `Stock in +${numQty}${ing.unit} for ${ing.name}. New stock: ${ing.currentStock}${ing.unit}${Number(costPerUnit) > 0 ? ` (cost updated to Rs. ${ing.costPerUnit}/${ing.unit})` : ''}`);
+  res.json({ message: 'Kitchen stock added successfully.', ingredient: ing });
+});
+
+app.post('/api/kitchen/stock-out', authMiddleware, requireKitchenPermission('KITCHEN_STOCK_OUT'), (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const { ingredientId, quantity, reason, reference } = req.body;
+
+  const numQty = Number(quantity);
+  if (!ingredientId || !Number.isFinite(numQty) || numQty <= 0 || numQty > 10000000) {
+    return res.status(400).json({ error: 'Valid ingredient and positive quantity (max 10,000,000) are required.' });
+  }
+  const note = typeof reason === 'string' ? reason.trim().slice(0, 500) : '';
+  if (note.length < 3) {
+    return res.status(400).json({ error: 'A reason is required for stock out (e.g. transfer to bar kitchen).' });
+  }
+
+  const ing = db.raw.kitchenIngredients.find(i => i.id === ingredientId && i.isActive);
+  if (!ing) return res.status(404).json({ error: 'Kitchen ingredient not found.' });
+
+  if (ing.currentStock - numQty < 0) {
+    return res.status(400).json({ error: `Cannot reduce below zero. Current stock: ${ing.currentStock}${ing.unit}, requested: ${numQty}${ing.unit}.` });
+  }
+
+  const before = ing.currentStock;
+  ing.currentStock = Number((ing.currentStock - numQty).toFixed(3));
+  ing.updatedAt = new Date().toISOString();
+
+  db.recordKitchenMovement(
+    ing,
+    -numQty,
+    before,
+    ing.currentStock,
+    'stock_out',
+    user.id,
+    user.name,
+    note,
+    (typeof reference === 'string' && reference.trim()) ? reference.trim().slice(0, 128) : undefined
+  );
+
+  db.logAudit(user.id, user.name, user.role, 'KITCHEN_STOCK_OUT', 'KITCHEN', ing.id, `Stock out -${numQty}${ing.unit} for ${ing.name}. Reason: ${note}. New stock: ${ing.currentStock}${ing.unit}`);
+  res.json({ message: 'Kitchen stock removed successfully.', ingredient: ing });
+});
+
+/** ---- Kitchen Menu Items (POS food items a recipe can attach to) ---- */
+app.get('/api/kitchen/menu-items', authMiddleware, requireKitchenPermission('KITCHEN_RECIPE_VIEW'), (req: Request, res: Response) => {
+  const items: any[] = [];
+  for (const p of db.raw.products) {
+    if (p.isArchived || !p.isActive) continue;
+    const cat = db.raw.categories.find(c => c.id === p.categoryId);
+    const isFood = p.isKitchenItem || (cat && cat.type === 'restaurant');
+    if (!isFood) continue;
+    for (const v of p.variants) {
+      if (!v.isActive || v.isShot) continue;
+      const recipe = findRecipeForVariant(v.id);
+      items.push({
+        productId: p.id,
+        productName: p.name,
+        variantId: v.id,
+        variantSize: v.size,
+        sellingPrice: v.sellingPrice,
+        recipeId: recipe ? recipe.id : null,
+        recipeCost: recipe ? computeRecipeCostPerServing(recipe) : null,
+      });
+    }
+  }
+  res.json(items);
+});
+
+/** ---- Recipes (versioned — history never destroyed) ---- */
+function sanitizeRecipeItems(rawItems: any): { ok: true; items: KitchenRecipeItem[] } | { ok: false; error: string } {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) {
+    return { ok: false, error: 'A recipe needs at least one ingredient line.' };
+  }
+  const items: KitchenRecipeItem[] = [];
+  for (const line of rawItems) {
+    const ing = db.raw.kitchenIngredients.find(i => i.id === line?.ingredientId && i.isActive);
+    if (!ing) return { ok: false, error: 'Recipe references an unknown or inactive ingredient.' };
+    const qty = Number(line?.quantity);
+    if (!Number.isFinite(qty) || qty <= 0 || qty > 1000000) {
+      return { ok: false, error: `Quantity for ${ing.name} must be a positive number.` };
+    }
+    if (items.some(i => i.ingredientId === ing.id)) {
+      return { ok: false, error: `${ing.name} is listed twice in the recipe.` };
+    }
+    items.push({ ingredientId: ing.id, ingredientName: ing.name, unit: ing.unit, quantity: Number(qty.toFixed(3)) });
+  }
+  return { ok: true, items };
+}
+
+app.get('/api/kitchen/recipes', authMiddleware, requireKitchenPermission('KITCHEN_RECIPE_VIEW'), (req: Request, res: Response) => {
+  const includeInactive = req.query.archived === 'true';
+  const list = db.raw.kitchenRecipes
+    .filter(r => includeInactive || r.isActive)
+    .map(r => ({
+      ...r,
+      recipeCostPerServing: computeRecipeCostPerServing(r),
+    }));
+  res.json(list);
+});
+
+app.post('/api/kitchen/recipes', authMiddleware, requireKitchenPermission('KITCHEN_RECIPE_CREATE'), (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const { variantId, servings, items, notes } = req.body;
+
+  const found = findVariantById(String(variantId || ''));
+  if (!found) return res.status(404).json({ error: 'Menu item variant not found.' });
+  const { product, variant } = found;
+
+  const existing = findRecipeForVariant(variant.id);
+  if (existing) return res.status(400).json({ error: `An active recipe already exists for ${product.name} (${variant.size}). Edit it instead.` });
+
+  const parsedItems = sanitizeRecipeItems(items);
+  if (!parsedItems.ok) return res.status(400).json({ error: parsedItems.error });
+
+  const numServings = Number(servings);
+  const safeServings = Number.isFinite(numServings) && numServings > 0 && numServings <= 1000 ? numServings : 1;
+
+  const recipe: KitchenRecipe = {
+    id: `krec-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    productId: product.id,
+    productName: product.name,
+    variantId: variant.id,
+    variantSize: variant.size,
+    servings: safeServings,
+    items: parsedItems.items,
+    isActive: true,
+    version: 1,
+    history: [],
+    createdById: user.id,
+    createdByName: user.name,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  db.raw.kitchenRecipes.push(recipe);
+  db.save();
+
+  db.logAudit(user.id, user.name, user.role, 'KITCHEN_RECIPE_CREATED', 'KITCHEN_RECIPE', recipe.id, `Created recipe v1 for ${product.name} (${variant.size}) — ${recipe.items.length} ingredients, cost/portion Rs. ${computeRecipeCostPerServing(recipe)}${notes ? `. Note: ${String(notes).slice(0, 300)}` : ''}`);
+  res.status(201).json({ ...recipe, recipeCostPerServing: computeRecipeCostPerServing(recipe) });
+});
+
+app.put('/api/kitchen/recipes/:id', authMiddleware, requireKitchenPermission('KITCHEN_RECIPE_EDIT'), (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const recipe = db.raw.kitchenRecipes.find(r => r.id === req.params.id);
+  if (!recipe) return res.status(404).json({ error: 'Recipe not found.' });
+
+  const { servings, items, notes } = req.body;
+  const parsedItems = sanitizeRecipeItems(items);
+  if (!parsedItems.ok) return res.status(400).json({ error: parsedItems.error });
+
+  const numServings = Number(servings);
+  const safeServings = Number.isFinite(numServings) && numServings > 0 && numServings <= 1000 ? numServings : recipe.servings;
+
+  // Preserve history — the previous version is snapshotted, never destroyed.
+  recipe.history.push({
+    version: recipe.version,
+    items: recipe.items,
+    savedAt: new Date().toISOString(),
+    savedById: user.id,
+    savedByName: user.name,
+  });
+  recipe.items = parsedItems.items;
+  recipe.servings = safeServings;
+  recipe.version += 1;
+  recipe.updatedAt = new Date().toISOString();
+  db.save();
+
+  db.logAudit(user.id, user.name, user.role, 'KITCHEN_RECIPE_UPDATED', 'KITCHEN_RECIPE', recipe.id, `Updated recipe for ${recipe.productName} (${recipe.variantSize}) to v${recipe.version} — ${recipe.items.length} ingredients, cost/portion Rs. ${computeRecipeCostPerServing(recipe)}. Previous version archived in recipe history.${notes ? ` Note: ${String(notes).slice(0, 300)}` : ''}`);
+  res.json({ ...recipe, recipeCostPerServing: computeRecipeCostPerServing(recipe) });
+});
+
+app.patch('/api/kitchen/recipes/:id/archive', authMiddleware, requireKitchenPermission('KITCHEN_RECIPE_ARCHIVE'), (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const recipe = db.raw.kitchenRecipes.find(r => r.id === req.params.id);
+  if (!recipe) return res.status(404).json({ error: 'Recipe not found.' });
+
+  recipe.isActive = !recipe.isActive;
+  recipe.updatedAt = new Date().toISOString();
+  db.save();
+
+  const action = recipe.isActive ? 'KITCHEN_RECIPE_REACTIVATED' : 'KITCHEN_RECIPE_ARCHIVED';
+  db.logAudit(user.id, user.name, user.role, action, 'KITCHEN_RECIPE', recipe.id, `${recipe.isActive ? 'Re-activated' : 'Archived'} recipe for ${recipe.productName} (${recipe.variantSize}) v${recipe.version}. History preserved.`);
+  res.json(recipe);
+});
+
+/** ---- Wastage ---- */
+app.get('/api/kitchen/wastage', authMiddleware, requireKitchenPermission('KITCHEN_WASTAGE_VIEW'), (req: Request, res: Response) => {
+  const { from, to, category } = req.query;
+  let list = db.raw.kitchenWastage.slice();
+  if (category && category !== 'all') list = list.filter(w => w.category === String(category));
+  if (from) {
+    const t = new Date(String(from)).getTime();
+    if (!isNaN(t)) list = list.filter(w => new Date(w.createdAt).getTime() >= t);
+  }
+  if (to) {
+    const raw = String(to);
+    const parsedT = new Date(raw).getTime();
+    const t = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? parsedT + 86399999 : parsedT;
+    if (!isNaN(t)) list = list.filter(w => new Date(w.createdAt).getTime() <= t);
+  }
+  const totalCost = Number(list.reduce((s, w) => s + w.cost, 0).toFixed(2));
+  res.json({ items: list, totalCost });
+});
+
+app.post('/api/kitchen/wastage', authMiddleware, requireKitchenPermission('KITCHEN_WASTAGE_CREATE'), (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const { ingredientId, quantity, category, reason, notes } = req.body;
+
+  const ing = db.raw.kitchenIngredients.find(i => i.id === ingredientId && i.isActive);
+  if (!ing) return res.status(404).json({ error: 'Kitchen ingredient not found.' });
+
+  const numQty = Number(quantity);
+  if (!Number.isFinite(numQty) || numQty <= 0 || numQty > 10000000) {
+    return res.status(400).json({ error: 'Wasted quantity must be a positive number.' });
+  }
+  if (!KITCHEN_WASTAGE_CATEGORIES.includes(category)) {
+    return res.status(400).json({ error: 'Invalid wastage category.' });
+  }
+  const note = typeof reason === 'string' ? reason.trim().slice(0, 500) : '';
+  if (note.length < 3) {
+    return res.status(400).json({ error: 'Please describe the reason for the wastage.' });
+  }
+  if (ing.currentStock - numQty < 0) {
+    return res.status(400).json({ error: `Cannot waste more than stock on hand. Current: ${ing.currentStock}${ing.unit}, requested: ${numQty}${ing.unit}.` });
+  }
+
+  const before = ing.currentStock;
+  ing.currentStock = Number((ing.currentStock - numQty).toFixed(3));
+  ing.updatedAt = new Date().toISOString();
+
+  const cost = Number((numQty * ing.costPerUnit).toFixed(2));
+  const movement = db.recordKitchenMovement(
+    ing,
+    -numQty,
+    before,
+    ing.currentStock,
+    'wastage',
+    user.id,
+    user.name,
+    `Wastage (${category}): ${note}`,
+    undefined
+  );
+
+  const record: KitchenWastageRecord = {
+    id: `kwst-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    ingredientId: ing.id,
+    ingredientName: ing.name,
+    quantity: numQty,
+    unit: ing.unit,
+    cost,
+    category,
+    reason: note,
+    notes: typeof notes === 'string' && notes.trim() ? notes.trim().slice(0, 500) : undefined,
+    movementId: movement.id,
+    userId: user.id,
+    userName: user.name,
+    createdAt: new Date().toISOString(),
+  };
+  db.raw.kitchenWastage.unshift(record);
+  db.save();
+
+  db.logAudit(user.id, user.name, user.role, 'KITCHEN_WASTAGE_CREATED', 'KITCHEN', ing.id, `Wastage recorded: ${numQty}${ing.unit} of ${ing.name} (${category}) — Cost Rs. ${cost}. Reason: ${note}. New stock: ${ing.currentStock}${ing.unit}`);
+  res.status(201).json(record);
+});
+
+/** ---- Physical Stock Count (variance + approval workflow) ---- */
+app.get('/api/kitchen/counts', authMiddleware, requireKitchenPermission('KITCHEN_PHYSICAL_COUNT_VIEW'), (req: Request, res: Response) => {
+  const list = db.raw.kitchenCounts.slice(0, 200);
+  const expected: any[] = db.raw.kitchenIngredients
+    .filter(i => i.isActive)
+    .map(i => ({ ingredientId: i.id, name: i.name, unit: i.unit, expected: i.currentStock, costPerUnit: i.costPerUnit }));
+  res.json({ counts: list, expected });
+});
+
+app.post('/api/kitchen/counts', authMiddleware, requireKitchenPermission('KITCHEN_PHYSICAL_COUNT_CREATE'), (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const { lines, notes } = req.body;
+
+  if (!Array.isArray(lines) || lines.length === 0) {
+    return res.status(400).json({ error: 'A physical count needs at least one counted ingredient.' });
+  }
+
+  const countNumber = db.getNextKitchenCountNumber();
+  const countLines: KitchenPhysicalCount['lines'] = [];
+  const createdRequests: KitchenAdjustmentRequest[] = [];
+  let autoApplied = 0;
+  let pendingLines = 0;
+
+  for (const line of lines) {
+    const ing = db.raw.kitchenIngredients.find(i => i.id === line?.ingredientId && i.isActive);
+    if (!ing) return res.status(404).json({ error: 'Count references an unknown or inactive ingredient.' });
+    const physical = Number(line?.physical);
+    if (!Number.isFinite(physical) || physical < 0 || physical > 10000000) {
+      return res.status(400).json({ error: `Physical count for ${ing.name} must be a number between 0 and 10,000,000.` });
+    }
+
+    const expected = ing.currentStock;
+    const variance = Number((physical - expected).toFixed(3));
+    const varianceCost = Number((Math.abs(variance) * ing.costPerUnit).toFixed(2));
+
+    if (Math.abs(variance) < 0.001) {
+      countLines.push({ ingredientId: ing.id, ingredientName: ing.name, unit: ing.unit, expected, physical, variance, varianceCost, status: 'no_variance' });
+      continue;
+    }
+
+    // Small variances are applied immediately (audited count_correction movement).
+    // Large variances require Super Admin approval before stock changes.
+    if (varianceCost <= KITCHEN_ADJUSTMENT_APPROVAL_THRESHOLD) {
+      const before = ing.currentStock;
+      ing.currentStock = Number(physical.toFixed(3));
+      ing.updatedAt = new Date().toISOString();
+      db.recordKitchenMovement(
+        ing,
+        variance,
+        before,
+        ing.currentStock,
+        'count_correction',
+        user.id,
+        user.name,
+        `Physical count ${countNumber} variance correction (${variance > 0 ? 'surplus' : 'shortage'} Rs. ${varianceCost})`,
+        countNumber
+      );
+      countLines.push({ ingredientId: ing.id, ingredientName: ing.name, unit: ing.unit, expected, physical, variance, varianceCost, status: 'applied' });
+      autoApplied++;
+    } else {
+      const request: KitchenAdjustmentRequest = {
+        id: `kadj-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+        requestNumber: db.getNextKitchenRequestNumber(),
+        type: 'stock_adjustment',
+        ingredientId: ing.id,
+        ingredientName: ing.name,
+        unit: ing.unit,
+        currentQty: expected,
+        requestedQty: physical,
+        diffQty: variance,
+        varianceCost,
+        reason: typeof line?.reason === 'string' && line.reason.trim() ? line.reason.trim().slice(0, 500) : 'Large physical count variance — needs approval',
+        countNumber,
+        status: 'pending',
+        requestedById: user.id,
+        requestedByName: user.name,
+        createdAt: new Date().toISOString(),
+      };
+      db.raw.kitchenAdjustmentRequests.unshift(request);
+      createdRequests.push(request);
+      countLines.push({ ingredientId: ing.id, ingredientName: ing.name, unit: ing.unit, expected, physical, variance, varianceCost, status: 'pending_approval' });
+      pendingLines++;
+    }
+  }
+
+  const totalVarianceCost = Number(countLines.reduce((s, l) => s + l.varianceCost, 0).toFixed(2));
+  const count: KitchenPhysicalCount = {
+    id: `kcnt-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    countNumber,
+    lines: countLines,
+    totalVarianceCost,
+    status: pendingLines === 0 ? 'applied' : autoApplied > 0 ? 'partial' : 'pending_approval',
+    notes: typeof notes === 'string' && notes.trim() ? notes.trim().slice(0, 500) : undefined,
+    userId: user.id,
+    userName: user.name,
+    createdAt: new Date().toISOString(),
+  };
+  db.raw.kitchenCounts.unshift(count);
+  db.save();
+
+  db.logAudit(
+    user.id,
+    user.name,
+    user.role,
+    'KITCHEN_PHYSICAL_COUNT',
+    'KITCHEN',
+    count.id,
+    `Physical count ${countNumber}: ${countLines.length} ingredients, variance cost Rs. ${totalVarianceCost}, ${autoApplied} line(s) auto-corrected, ${pendingLines} line(s) sent for Super Admin approval.`
+  );
+
+  res.status(201).json({ count, createdRequests });
+});
+
+/** ---- Adjustment Requests (high-risk workflow) ---- */
+app.get('/api/kitchen/requests', authMiddleware, requireKitchenPermission('KITCHEN_VARIANCE_VIEW'), (req: Request, res: Response) => {
+  const { status } = req.query;
+  let list = db.raw.kitchenAdjustmentRequests.slice(0, 200);
+  if (status && status !== 'all') list = list.filter(r => r.status === String(status));
+  res.json(list);
+});
+
+app.post('/api/kitchen/requests/:id/approve', authMiddleware, requireKitchenAdmin, (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const request = db.raw.kitchenAdjustmentRequests.find(r => r.id === req.params.id);
+  if (!request) return res.status(404).json({ error: 'Adjustment request not found.' });
+  if (request.status !== 'pending') return res.status(400).json({ error: `Request is already ${request.status}.` });
+
+  const ing = db.raw.kitchenIngredients.find(i => i.id === request.ingredientId);
+  if (!ing) return res.status(404).json({ error: 'Ingredient no longer exists.' });
+
+  const before = ing.currentStock;
+  ing.currentStock = Number(request.requestedQty.toFixed(3));
+  ing.updatedAt = new Date().toISOString();
+  db.recordKitchenMovement(
+    ing,
+    request.diffQty,
+    before,
+    ing.currentStock,
+    'adjustment',
+    user.id,
+    user.name,
+    `Approved adjustment ${request.requestNumber} (from count ${request.countNumber || 'n/a'}): ${request.reason}`,
+    request.requestNumber
+  );
+
+  request.status = 'approved';
+  request.reviewedById = user.id;
+  request.reviewedByName = user.name;
+  request.reviewedAt = new Date().toISOString();
+  request.reviewNote = typeof req.body?.note === 'string' ? req.body.note.trim().slice(0, 500) : undefined;
+  db.save();
+
+  db.logAudit(user.id, user.name, user.role, 'KITCHEN_REQUEST_APPROVED', 'KITCHEN', request.id, `Approved adjustment ${request.requestNumber}: ${ing.name} ${before}${ing.unit} → ${ing.currentStock}${ing.unit} (diff ${request.diffQty}${ing.unit}, Rs. ${request.varianceCost}). Requested by ${request.requestedByName}.`);
+  res.json({ message: 'Adjustment approved and stock updated.', request });
+});
+
+app.post('/api/kitchen/requests/:id/reject', authMiddleware, requireKitchenAdmin, (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const request = db.raw.kitchenAdjustmentRequests.find(r => r.id === req.params.id);
+  if (!request) return res.status(404).json({ error: 'Adjustment request not found.' });
+  if (request.status !== 'pending') return res.status(400).json({ error: `Request is already ${request.status}.` });
+
+  const note = typeof req.body?.note === 'string' ? req.body.note.trim().slice(0, 500) : '';
+  if (note.length < 3) {
+    return res.status(400).json({ error: 'A rejection note is required.' });
+  }
+
+  request.status = 'rejected';
+  request.reviewedById = user.id;
+  request.reviewedByName = user.name;
+  request.reviewedAt = new Date().toISOString();
+  request.reviewNote = note;
+  db.save();
+
+  db.logAudit(user.id, user.name, user.role, 'KITCHEN_REQUEST_REJECTED', 'KITCHEN', request.id, `Rejected adjustment ${request.requestNumber}: ${request.ingredientName} ${request.currentQty}→${request.requestedQty}${request.unit} (Rs. ${request.varianceCost}). Requested by ${request.requestedByName}. Note: ${note}`);
+  res.json({ message: 'Adjustment request rejected. Stock unchanged.', request });
+});
+
+/** ---- Food Cost (view only — prices come from the POS catalogue) ---- */
+app.get('/api/kitchen/food-cost', authMiddleware, requireKitchenPermission('KITCHEN_FOOD_COST_VIEW'), (req: Request, res: Response) => {
+  const rows: any[] = [];
+  for (const p of db.raw.products) {
+    if (p.isArchived || !p.isActive) continue;
+    const cat = db.raw.categories.find(c => c.id === p.categoryId);
+    if (!p.isKitchenItem && !(cat && cat.type === 'restaurant')) continue;
+    for (const v of p.variants) {
+      if (!v.isActive || v.isShot) continue;
+      const recipe = findRecipeForVariant(v.id);
+      const recipeCost = recipe ? computeRecipeCostPerServing(recipe) : null;
+      const sellingPrice = v.sellingPrice;
+      const grossProfit = recipeCost !== null ? Number((sellingPrice - recipeCost).toFixed(2)) : null;
+      const foodCostPct = recipeCost !== null && sellingPrice > 0 ? Number(((recipeCost / sellingPrice) * 100).toFixed(2)) : null;
+      const grossMarginPct = foodCostPct !== null ? Number((100 - foodCostPct).toFixed(2)) : null;
+      rows.push({
+        productId: p.id,
+        productName: p.name,
+        variantId: v.id,
+        variantSize: v.size,
+        sellingPrice,
+        recipeId: recipe ? recipe.id : null,
+        recipeCost,
+        grossProfit,
+        foodCostPct,
+        grossMarginPct,
+        hasRecipe: Boolean(recipe),
+      });
+    }
+  }
+  res.json(rows);
+});
+
+/** ---- Kitchen Reports (kitchen-scoped ONLY) ---- */
+app.get('/api/kitchen/reports', authMiddleware, requireKitchenPermission('KITCHEN_REPORT_VIEW'), (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const { type, from, to } = req.query;
+
+  let start: number | undefined;
+  let end: number | undefined;
+  if (from) {
+    const t = new Date(String(from)).getTime();
+    if (!isNaN(t)) start = t;
+  }
+  if (to) {
+    const raw = String(to);
+    const parsedT = new Date(raw).getTime();
+    end = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? parsedT + 86399999 : parsedT;
+  }
+  const inRange = (iso: string) => {
+    const t = new Date(iso).getTime();
+    if (start !== undefined && t < start) return false;
+    if (end !== undefined && t > end) return false;
+    return true;
+  };
+
+  let payload: any = null;
+
+  switch (String(type)) {
+    case 'consumption': {
+      // Ingredient consumption per movement type (sale production, wastage, stock out)
+      const map = new Map<string, { ingredientId: string; ingredientName: string; unit: string; consumedBySales: number; wastage: number; stockOut: number; totalConsumed: number; costValue: number }>();
+      for (const m of db.raw.kitchenMovements) {
+        if (m.quantityChange >= 0) continue;
+        if (!inRange(m.createdAt)) continue;
+        if (!map.has(m.ingredientId)) {
+          map.set(m.ingredientId, { ingredientId: m.ingredientId, ingredientName: m.ingredientName, unit: m.unit, consumedBySales: 0, wastage: 0, stockOut: 0, totalConsumed: 0, costValue: 0 });
+        }
+        const row = map.get(m.ingredientId)!;
+        const qty = Math.abs(m.quantityChange);
+        if (m.movementType === 'sale') row.consumedBySales += qty;
+        else if (m.movementType === 'wastage') row.wastage += qty;
+        else if (m.movementType === 'stock_out') row.stockOut += qty;
+        row.totalConsumed += qty;
+        row.costValue += qty * (m.costPerUnit || 0);
+      }
+      const rows = Array.from(map.values()).map(r => ({
+        ...r,
+        consumedBySales: Number(r.consumedBySales.toFixed(3)),
+        wastage: Number(r.wastage.toFixed(3)),
+        stockOut: Number(r.stockOut.toFixed(3)),
+        totalConsumed: Number(r.totalConsumed.toFixed(3)),
+        costValue: Number(r.costValue.toFixed(2)),
+      })).sort((a, b) => b.costValue - a.costValue);
+      payload = { rows, totalCostValue: Number(rows.reduce((s, r) => s + r.costValue, 0).toFixed(2)) };
+      break;
+    }
+    case 'wastage': {
+      const list = db.raw.kitchenWastage.filter(w => inRange(w.createdAt));
+      const byCategory = new Map<string, { category: string; count: number; cost: number }>();
+      for (const w of list) {
+        if (!byCategory.has(w.category)) byCategory.set(w.category, { category: w.category, count: 0, cost: 0 });
+        const row = byCategory.get(w.category)!;
+        row.count++;
+        row.cost += w.cost;
+      }
+      payload = {
+        rows: list.slice(0, 500),
+        totalCost: Number(list.reduce((s, w) => s + w.cost, 0).toFixed(2)),
+        byCategory: Array.from(byCategory.values()).map(r => ({ ...r, cost: Number(r.cost.toFixed(2)) })).sort((a, b) => b.cost - a.cost),
+      };
+      break;
+    }
+    case 'variance': {
+      const list = db.raw.kitchenCounts.filter(c => inRange(c.createdAt));
+      const rows = list.flatMap(c => c.lines.filter(l => l.status !== 'no_variance').map(l => ({ countNumber: c.countNumber, createdAt: c.createdAt, ...l })));
+      payload = {
+        rows: rows.slice(0, 500),
+        totalVarianceCost: Number(rows.reduce((s, r) => s + r.varianceCost, 0).toFixed(2)),
+      };
+      break;
+    }
+    case 'purchases': {
+      const list = db.raw.kitchenMovements.filter(m => m.movementType === 'stock_in' && inRange(m.createdAt));
+      const rows = list.map(m => ({
+        createdAt: m.createdAt,
+        ingredientName: m.ingredientName,
+        unit: m.unit,
+        quantity: m.quantityChange,
+        costPerUnit: m.costPerUnit || 0,
+        costValue: Number((m.quantityChange * (m.costPerUnit || 0)).toFixed(2)),
+        reference: m.referenceId || '',
+        receivedBy: m.userName,
+      }));
+      payload = { rows: rows.slice(0, 500), totalCostValue: Number(rows.reduce((s, r) => s + r.costValue, 0).toFixed(2)) };
+      break;
+    }
+    case 'movements': {
+      const list = db.raw.kitchenMovements.filter(m => inRange(m.createdAt)).slice(0, 500);
+      payload = { rows: list, totalRows: list.length };
+      break;
+    }
+    case 'food-cost':
+    default: {
+      // Food cost & profitability per recipe-linked menu item over the period
+      const map = new Map<string, { productName: string; variantSize: string; quantitySold: number; foodSales: number; foodCost: number }>();
+      for (const bill of db.raw.bills) {
+        if (bill.status !== 'paid' || !inRange(bill.paidAt || bill.createdAt)) continue;
+        for (const item of bill.items) {
+          if (!item.isKitchenItem) continue;
+          const recipe = findRecipeForVariant(item.variantId);
+          const cost = recipe ? computeRecipeCostPerServing(recipe) : (item.costPrice || 0);
+          const key = `${item.productId}_${item.variantId}`;
+          if (!map.has(key)) map.set(key, { productName: item.productName, variantSize: item.size, quantitySold: 0, foodSales: 0, foodCost: 0 });
+          const row = map.get(key)!;
+          row.quantitySold += item.quantity;
+          row.foodSales += item.total;
+          row.foodCost += cost * item.quantity;
+        }
+      }
+      const rows = Array.from(map.values()).map(r => {
+        const grossProfit = r.foodSales - r.foodCost;
+        return {
+          ...r,
+          foodSales: Number(r.foodSales.toFixed(2)),
+          foodCost: Number(r.foodCost.toFixed(2)),
+          grossProfit: Number(grossProfit.toFixed(2)),
+          foodCostPct: r.foodSales > 0 ? Number(((r.foodCost / r.foodSales) * 100).toFixed(2)) : 0,
+        };
+      }).sort((a, b) => b.foodSales - a.foodSales);
+      payload = {
+        rows,
+        totalFoodSales: Number(rows.reduce((s, r) => s + r.foodSales, 0).toFixed(2)),
+        totalFoodCost: Number(rows.reduce((s, r) => s + r.foodCost, 0).toFixed(2)),
+        totalGrossProfit: Number(rows.reduce((s, r) => s + r.grossProfit, 0).toFixed(2)),
+      };
+      break;
+    }
+  }
+
+  db.logAudit(user.id, user.name, user.role, 'KITCHEN_REPORT_VIEWED', 'KITCHEN', undefined, `Viewed kitchen report '${type || 'food-cost'}'${from ? ` from ${from}` : ''}${to ? ` to ${to}` : ''}`);
+  res.json(payload);
 });
 
 // ==========================================
