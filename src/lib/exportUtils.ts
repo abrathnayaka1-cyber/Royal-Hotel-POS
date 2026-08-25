@@ -120,7 +120,10 @@ export function generateInvoicePDF(bill: Bill, settings: SystemSettings | null) 
 
   if (bill.serviceCharge && bill.serviceCharge > 0) {
     curY += 6;
-    doc.text(`Service Charge (${settings?.serviceChargeRate || 10}%):`, startX, curY);
+    // Use the rate that was in effect when the bill was created (persisted on
+    // the bill since v1.1.0); fall back to the current settings for legacy bills.
+    const svcRate = bill.serviceChargeRate ?? settings?.serviceChargeRate ?? 10;
+    doc.text(`Service Charge (${svcRate}%):`, startX, curY);
     doc.text(`+ ${currencySymbol} ${bill.serviceCharge.toLocaleString()}`, valX, curY, { align: 'right' });
   }
 

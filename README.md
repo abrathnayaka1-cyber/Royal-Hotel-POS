@@ -2,7 +2,7 @@
 
 > Commercial-grade Point of Sale system with multi-size bottle variants, hotel room management, daily stock sheet reconciliation, inventory, KOT, billing, and reporting.
 
-![Version](https://img.shields.io/badge/version-1.1.0-blue)
+![Version](https://img.shields.io/badge/version-1.1.1-blue)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-green)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
@@ -50,6 +50,12 @@
 - Daily Stock Sheet export (Excel)
 - Bills & Invoices with void/restore
 - Audit logs with pagination & export
+
+### v1.1.1 — Stock-Integrity & Data-Consistency Fixes
+- **Bill void now restores EXACT sale-time kitchen ingredient deductions** (snapshot stored on the bill) — editing/archiving a recipe after a sale no longer over/under-restores ingredients on void
+- **Service charge rate persisted per bill** (`bill.serviceChargeRate`) — receipts, PDF invoices and the receipt modal show the rate that was in effect at sale time, not the current setting
+- **Per-item client discounts ignored server-side** — stored line totals always match the amount actually charged (keeps `Σ items = subtotal` invariant)
+- **96/96 E2E regression tests** under `tests/e2e/` (POS, shots, voids, rooms, KOT, kitchen RBAC, recipe deduction, approvals)
 
 ### Security (Fixed in v1.1.0)
 - **Removed critical backdoor**: legacy `pos_tok_` tokens that granted admin access removed

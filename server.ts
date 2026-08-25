@@ -10,7 +10,7 @@ import rateLimit from 'express-rate-limit';
 import { createServer as createViteServer } from 'vite';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
-import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking, StockImport, StockImportRowResult, StockImportType, KitchenIngredient, KitchenStockMovement, KitchenRecipe, KitchenRecipeItem, KitchenWastageRecord, KitchenPhysicalCount, KitchenAdjustmentRequest, KITCHEN_WASTAGE_CATEGORIES, KitchenWastageCategory } from './server/db.ts';
+import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking, StockImport, StockImportRowResult, StockImportType, KitchenIngredient, KitchenStockMovement, KitchenRecipe, KitchenRecipeItem, KitchenWastageRecord, KitchenPhysicalCount, KitchenAdjustmentRequest, KITCHEN_WASTAGE_CATEGORIES, KitchenWastageCategory, KitchenDeductionSnapshot } from './server/db.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -311,7 +311,7 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    version: '1.1.0',
+    version: '1.1.1',
     uptime: process.uptime(),
   });
 });
@@ -1298,7 +1298,12 @@ function sanitizeOrderItems(rawItems: unknown): { items: OrderItem[]; error?: st
     }
 
     const unitPrice = Math.max(0, Number(found.variant.sellingPrice) || 0);
-    const lineDiscount = Math.max(0, Math.min(unitPrice * quantity, Number(raw.discount) || 0));
+    // Item-level discounts sent by the client are intentionally ignored: the
+    // pricing model only applies a single bill-level discount (clamped by
+    // maxDiscountPercentage) on the server. Accepting raw.discount here used
+    // to store line totals that summed to LESS than the bill's subtotal even
+    // though the customer was charged the full amount.
+    const lineDiscount = 0;
     const lineTotal = Number((unitPrice * quantity - lineDiscount).toFixed(2));
 
     items.push({
@@ -2850,11 +2855,46 @@ function deductKitchenIngredientsForSale(
   }
 }
 
-/** Restores recipe ingredients back to the kitchen store when a bill is voided. */
+/**
+ * Restores recipe ingredients back to the kitchen store when a bill is voided.
+ *
+ * Uses the EXACT deduction snapshot stored on the bill at sale time, so a void
+ * returns precisely what the sale took — even if the recipe was edited,
+ * archived or replaced after the sale. Without the snapshot (legacy bills
+ * created before the snapshot existed) it falls back to recomputing from the
+ * current recipe.
+ */
 function restoreKitchenIngredientsForVoid(
   bill: Bill,
   user: User
 ): void {
+  if (Array.isArray(bill.kitchenDeductions) && bill.kitchenDeductions.length > 0) {
+    for (const line of bill.kitchenDeductions) {
+      // Look up regardless of isActive: deactivated ingredients must still
+      // get their stock back.
+      const ing = db.raw.kitchenIngredients.find(i => i.id === line.ingredientId);
+      if (!ing) continue;
+      const rounded = Number(Number(line.quantity).toFixed(3));
+      if (!Number.isFinite(rounded) || rounded <= 0) continue;
+      const before = ing.currentStock;
+      ing.currentStock = Number((ing.currentStock + rounded).toFixed(3));
+      ing.updatedAt = new Date().toISOString();
+      db.recordKitchenMovement(
+        ing,
+        rounded,
+        before,
+        ing.currentStock,
+        'adjustment',
+        user.id,
+        user.name,
+        `Bill void reversal: ingredients returned for ${bill.billNumber}`,
+        bill.billNumber
+      );
+    }
+    return;
+  }
+
+  // Legacy fallback: recompute from the current recipe (best effort).
   const requirements = aggregateIngredientRequirements(
     bill.items.map(i => ({ variantId: i.variantId, quantity: i.quantity }))
   );
@@ -3048,8 +3088,25 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
   // 3) Auto-deduct recipe ingredients from the kitchen store (Food & Kitchen
   //    module). Runs only when recipe-linked items were sold; every deduction
   //    gets a kitchen movement ledger record. Cashier never enters ingredients.
+  //    The exact deductions are snapshotted on the bill so a later void can
+  //    restore precisely what was deducted, even if the recipe was edited or
+  //    archived in the meantime.
+  let kitchenDeductions: KitchenDeductionSnapshot[] | undefined;
   if (kitchenRequirements) {
     deductKitchenIngredientsForSale(kitchenRequirements, user, billNumber, billId);
+    kitchenDeductions = [];
+    for (const [ing, qty] of kitchenRequirements) {
+      const rounded = Number(qty.toFixed(3));
+      if (rounded > 0) {
+        kitchenDeductions.push({
+          ingredientId: ing.id,
+          ingredientName: ing.name,
+          unit: ing.unit,
+          quantity: rounded,
+        });
+      }
+    }
+    if (kitchenDeductions.length === 0) kitchenDeductions = undefined;
   }
 
   const snapshotItems: OrderItem[] = safeItems;
@@ -3071,6 +3128,7 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
     tax: totals.tax,
     taxRate: totals.taxRate,
     serviceCharge: totals.serviceCharge,
+    serviceChargeRate: totals.serviceChargeRate,
     grandTotal: numGrandTotal,
     amountReceived: numReceived,
     changeAmount: Number(Math.max(0, numReceived - numGrandTotal).toFixed(2)),
@@ -3078,6 +3136,7 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
     paymentDetails: paymentDetails || undefined,
     status: 'paid',
     notes: notes ? String(notes).slice(0, 1000) : undefined,
+    kitchenDeductions,
     createdAt: new Date().toISOString(),
     paidAt: new Date().toISOString()
   };

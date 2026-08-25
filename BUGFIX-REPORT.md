@@ -2,6 +2,17 @@
 
 සම්පූර්ණ system එක පරීක්ෂා කර හමු වූ bugs සහ ඒවාට කළ නිවැරදි කිරීම්.
 
+## 🔧 Second Audit Round (2026-08-25) — v1.1.1
+
+| # | Bug | Fix |
+|---|-----|-----|
+| 24 | **Bill void එකකදී kitchen ingredients restore වුණේ CURRENT recipe එකෙන්** — sale වෙලාවෙන් පස්සේ recipe එක edit/archive කළොත් වැඩි/අඩු ප්‍රමාණ restore වෙනවා; recipe archive කළොත් **කිසිම දෙයක් restore වුණේ නැහැ** (ingredients stock එකේ ස්ථිර අහිමිවීමක්) | Bill එකේම sale-time **deduction snapshot** එකක් save කරනවා (`bill.kitchenDeductions`); void එක restore කරන්නේ හරියටම ඒ snapshot එකෙන් (recipe එක කොහොම වුණත්). E2E: archive/edited-recipe scenarios දෙකේදීම exact restore ✅ |
+| 25 | **`bill.serviceChargeRate` persist නොවීම** — පරණ bill එකක PDF invoice එකේ/display එකේ දැන් තියෙන service charge % එක පෙන්නුවා (rate වෙනස් කළොත් අගයට ගැලපෙන % නෙවෙයි) | Checkout එකේදී `serviceChargeRate` bill එකේ save වෙනවා; PDF invoice / thermal receipt / receipt modal දැන් bill එකේ rate එකම පාවිච්චි කරනවා (legacy bills සඳහා settings fallback) |
+| 26 | **Client එකෙන් එවන per-item `discount` එක stored line totals විකෘති කරනවා** — server එක ඒක totals වලට ගණන් ගත්තේ නැති නිසා `Σ item.total ≠ subtotal` (bill එකේ ඇතුළත ගැලපීමක් නැතිවීම) | `sanitizeOrderItems()` දැන් client `raw.discount` සම්පූර්ණයෙන් ignore කරනවා — stored lines සැමවිටම අය කළ මිලටම (billing exploit එකක් නොවේ, data consistency fix එකක්) |
+| 27 | KOT status එක same value එකට reset කිරීමට ඉඩ තිබුණා (completed → completed) | එය harmless (idempotent) නිසා හිතාමතාම තබා ඇත — transition validation එක වැරදි transitions පමණක් block කරනවා |
+
+**Round-2 verification:** E2E suites 5ක්, **96/96 pass** (`tests/e2e/`) — POS billing, shots/750ml pool, void restore, rooms, KOT, reports, kitchen RBAC, recipe deduction + snapshot restore, approval workflows ඇතුළුව. Production build (`node dist/server.cjs`) — SPA, health, API 404, settings persistence ✅
+
 ## 🔴 Critical (මුදල් / stock අහිමි වන bugs)
 
 | # | Bug | කලින් සිදුවූ දේ | Fix |

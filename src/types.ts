@@ -204,6 +204,7 @@ export interface Bill {
   tax: number;
   taxRate?: number;
   serviceCharge?: number;
+  serviceChargeRate?: number;
   grandTotal: number;
   amountReceived: number;
   changeAmount: number;
@@ -211,6 +212,8 @@ export interface Bill {
   paymentDetails?: any;
   status: BillStatus;
   notes?: string;
+  /** Kitchen ingredient deductions made for this bill (snapshot at sale time). */
+  kitchenDeductions?: { ingredientId: string; ingredientName: string; unit: string; quantity: number }[];
   createdAt: string;
   paidAt?: string;
 }

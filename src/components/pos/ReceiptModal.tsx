@@ -126,7 +126,7 @@ export const ReceiptModal: React.FC = () => {
             {/* Financial Breakdown */}
             <div className="space-y-1.5 text-xs pt-1 border-b border-dashed border-slate-400 dark:border-slate-600 pb-2">
               <div className="flex justify-between text-slate-700 dark:text-slate-300">
-                <span>Service Charge</span>
+                <span>Service Charge{bill.serviceChargeRate ? ` (${bill.serviceChargeRate}%)` : ''}</span>
                 <span>{Number(bill.serviceCharge || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
               </div>
               <div className="flex justify-between text-slate-700 dark:text-slate-300">
