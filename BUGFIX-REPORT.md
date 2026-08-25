@@ -2,6 +2,13 @@
 
 සම්පූර්ණ system එක පරීක්ෂා කර හමු වූ bugs සහ ඒවාට කළ නිවැරදි කිරීම්.
 
+## 🔧 Fourth Audit Round (2026-08-25) — Smart Import crash fix
+
+| # | Bug | Fix |
+|---|-----|-----|
+| 35 | **"Smart Import" button එක click කළ විට React error #310 ("Something went wrong")** — `StockImportModal` එකේ Rules-of-Hooks violation එකක්. `if (!isOpen) return null;` කියන early return එකට **පස්සේ** `const activePreviewRows = useMemo(() => previewRows, [previewRows]);` කියන hook එක call වුණා. Modal එක **closed** වෙලා තියෙද්දී component එක hook 29කින් (27 `useState` + 2 `useEffect`) early return වුණා; click කළාම (`isOpen` → `true`) එකම instance එක නැවත render වෙලා 30th hook එකත් call කළා → "Rendered more hooks than during the previous render." → **React error #310** → whole app crash. Backend හරියටම වැඩ කරයි; මෙය pure frontend hooks bug එකක් | `useMemo` hook එක ඉවත් කළා (එය `previewRows` එකම unchanged return කළා — අවශ්‍ය නොවේ); `activePreviewRows` → `previewRows` වෙනස් කළා; unused `useMemo` import එකත් ඉවත් කළා. Verified: closed → open transition එකේදී **no crash** ✅ · `tsc --noEmit` clean ✅ · production build OK ✅ |
+| 36 | **Smart Import — Bar items only + wrong matches & duplicates** — Excel upload කළාම (1) **restaurant/food/service items වලටත් stock update වුණා** (e.g. `Special Chicken Fried Rice` MATCHED), (2) **duplicates** හැදුණා (`Rockland Gal Arrack` → NEW `Rockland Gal Arrack` කියා), (3) **වැරදි items/sizes** match වුණා (`Extra Special Arrack` → `Navy Special Arrack`; ඊටත් පස්සේ fuzzy matcher එක exact match එක override කළා). **Root causes:** matching engine එක `type:bar` scope එක නොදැන හැම product එකක්ම match කළා; name එක exact නොගැලපුණු විට "near match" එක වෙනුවට NEW_ITEM හැදුවා (duplicate); ඒ වගේම exact match එක full-name එකට පමණක් ගැලපුණු නිසා කෙටි invoice names අසාර්ථක වුණා | **Scope `bar` (default):** `buildImportMatchIndex(scope)` bar-type categories පමණක් index කරයි; non-Bar matched rows **INVALID** (blocked); new items bar category එකට පමණයි. **Fuzzy auto-match:** name token similarity (`importNameScore` — coverage·0.7 + jaccard·0.3) එකෙන් කෙටි names auto-match (run only when no exact Barcode/SKU/Name+Size match — `!hit` guard, so it never overrides a correct match) → `Lion Lager`→`Lion Lager Beer 4.8%`, `Rockland Gal Arrack`→`Rockland Old Arrack (Gal Arrack)`, `Extra Special Arrack`→`Extra Special Arrack`. Duplicates → 0. **UI:** modal එකට "Bar Items Only / All Items" toggle (`scope` state → server). Verified: bar probe → 6 MATCHED, 1 INVALID (food), **0 duplicates / 0 NEW_ITEM**; scope=all → food matches; commit updates correct rows only; duplicate file re-import → 409; `tsc` + production build clean ✅ |
+
 ## 🔧 Second Audit Round (2026-08-25) — v1.1.1
 
 | # | Bug | Fix |

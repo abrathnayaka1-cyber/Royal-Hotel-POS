@@ -1707,6 +1707,8 @@ interface ImportPreviewRow {
   candidates?: { variantId: string; label: string }[];
 }
 
+type ImportScope = 'bar' | 'all';
+
 interface ImportMeta {
   fileName?: string;
   fileType?: string;
@@ -1714,9 +1716,16 @@ interface ImportMeta {
   supplier?: string;
   invoiceNumber?: string;
   invoiceDate?: string;
+  /** 'bar' (default) matches & creates only Bar-category items; 'all' matches anything. */
+  scope?: ImportScope;
 }
 
 const IMPORT_MAX_ROWS = 2000;
+const IMPORT_DEFAULT_SCOPE: ImportScope = 'bar';
+/** Fuzzy name scores above this auto-match (when unambiguous). */
+const IMPORT_AUTO_MATCH_SCORE = 0.55;
+/** Fuzzy name scores at/above this are offered as NEEDS_REVIEW candidates. */
+const IMPORT_CANDIDATE_SCORE = 0.3;
 
 /** Normalizes text for matching: lowercase, collapse whitespace, strip punctuation, unify "750 ML" -> "750ml". */
 function importNormText(s: unknown): string {
@@ -1733,6 +1742,37 @@ function importSizeKey(s: unknown): string {
   const ml = parseMlFromSize(String(s ?? ''));
   if (ml) return `${ml}ml`;
   return importNormText(s);
+}
+
+/** Generic words that don't identify a product — dropped before fuzzy name scoring. */
+const IMPORT_STOPWORDS = new Set([
+  'the', 'a', 'an', 'and', 'of', 'for', 'with', 'on', 'in', 'x', '&', 'plus',
+  'serves', 'bottle', 'bottles', 'can', 'cans', 'ml', 'size', 'pack', 'gen', 'new',
+]);
+
+/** Splits a name into meaningful tokens for fuzzy matching (drops stopwords & pure numbers). */
+function importNameTokens(s: string): string[] {
+  return importNormText(s)
+    .split(/\s+/)
+    .filter(t => t.length >= 2 && !IMPORT_STOPWORDS.has(t) && !/^\d+$/.test(t));
+}
+
+/**
+ * 0..1 similarity between an uploaded row name and a product name.
+ * Favours the short upload name being fully covered by the product name (so
+ * "Lion Lager" reliably resolves to "Lion Lager Beer 4.8%"), and boosts the
+ * Jaccard overlap to avoid wildly different names colliding.
+ */
+function importNameScore(rowName: string, productName: string): number {
+  const a = importNameTokens(rowName);
+  const b = importNameTokens(productName);
+  if (a.length === 0 || b.length === 0) return 0;
+  const bSet = new Set(b);
+  const common = a.filter(t => bSet.has(t)).length;
+  const coverage = common / a.length;
+  const unionSize = new Set([...a, ...b]).size;
+  const jaccard = unionSize > 0 ? common / unionSize : 0;
+  return Number((coverage * 0.7 + jaccard * 0.3).toFixed(3));
 }
 
 /** Parses money values like "Rs. 3,200", "3,200", "3200.50". Returns undefined when blank, NaN when invalid. */
@@ -1759,8 +1799,13 @@ function importVariantLabel(hit: MatchHit): string {
   return `${hit.product.name} — ${hit.variant.size} [${hit.variant.sku || hit.variant.id}]`;
 }
 
+/** True when a product belongs to a Bar-type category. */
+function importProductIsBar(p: Product, categoryTypeById: Map<string, Category['type']>): boolean {
+  return categoryTypeById.get(p.categoryId) === 'bar';
+}
+
 /** Builds lookup indexes across all live products for the matching engine. */
-function buildImportMatchIndex() {
+function buildImportMatchIndex(scope: ImportScope = IMPORT_DEFAULT_SCOPE) {
   const byBarcode = new Map<string, MatchHit>();
   const bySku = new Map<string, MatchHit>();
   const byNameSizeBrand = new Map<string, MatchHit[]>();
@@ -1769,12 +1814,15 @@ function buildImportMatchIndex() {
   const productByName = new Map<string, Product[]>();
   const companyByName = new Map<string, Company>();
   const categoryByName = new Map<string, Category>();
+  const categoryTypeById = new Map(db.raw.categories.map(c => [c.id, c.type]));
 
   db.raw.companies.forEach(c => companyByName.set(importNormText(c.name), c));
   db.raw.categories.forEach(c => categoryByName.set(importNormText(c.name), c));
 
   for (const p of db.raw.products) {
     if (p.isArchived) continue;
+    // Bar-only scope: the matching engine must never touch food/restaurant/service items.
+    if (scope === 'bar' && !importProductIsBar(p, categoryTypeById)) continue;
     const nName = importNormText(p.name);
     const comp = p.companyId ? db.raw.companies.find(c => c.id === p.companyId) : undefined;
     const nComp = comp ? importNormText(comp.name) : '';
@@ -1801,7 +1849,7 @@ function buildImportMatchIndex() {
       byNameSizeBrand.get(k3)!.push(hit);
     }
   }
-  return { byBarcode, bySku, byNameSizeBrand, byNameSize, bySizeKey, productByName, companyByName, categoryByName };
+  return { byBarcode, bySku, byNameSizeBrand, byNameSize, bySizeKey, productByName, companyByName, categoryByName, categoryTypeById };
 }
 
 /** Infers a sensible category type for auto-created categories. */
@@ -1819,7 +1867,8 @@ function inferCategoryType(name: string): Category['type'] {
 function processImportRows(
   importType: StockImportType,
   rawRows: RawImportRow[],
-  decisions: Record<string, ImportRowDecision> = {}
+  decisions: Record<string, ImportRowDecision> = {},
+  scope: ImportScope = IMPORT_DEFAULT_SCOPE
 ): {
   rows: ImportPreviewRow[];
   summary: {
@@ -1828,7 +1877,7 @@ function processImportRows(
     needsReview: number; invalid: number; duplicates: number; excluded: number;
   };
 } {
-  const idx = buildImportMatchIndex();
+  const idx = buildImportMatchIndex(scope);
   const rows: ImportPreviewRow[] = [];
   const seenIdentity = new Map<string, ImportPreviewRow>();
   const newCategorySet = new Set<string>();
@@ -1944,6 +1993,41 @@ function processImportRows(
       return;
     }
 
+    // Purchase mode: fuzzy auto-match by name within the SAME size/ML, so short invoice
+    // names ("Lion Lager", "Rockland Gal Arrack") resolve to the correct existing product
+    // instead of being surfaced for review or (worse) created as a duplicate. Only runs
+    // when no exact Barcode/SKU/Name+Size match was found, so it never overrides a correct one.
+    if (row.productName && row.size && !decision.resolvedVariantId && !hit) {
+      const nName = importNormText(row.productName);
+      const sameSize = idx.bySizeKey.get(importSizeKey(row.size)) || [];
+      const scored = sameSize
+        .filter(h => importNormText(h.product.name) !== nName)
+        .map(h => ({ hit: h, score: importNameScore(nName, h.product.name) }))
+        .filter(s => s.score > 0)
+        .sort((a, b) => b.score - a.score);
+      if (scored.length > 0) {
+        const best = scored[0];
+        const second = scored[1];
+        // Auto-match only when the best candidate is clearly better / the only strong one.
+        const isUnambiguous = best.score >= IMPORT_AUTO_MATCH_SCORE &&
+          (!second || second.score < best.score - 0.15 || second.score < 0.5);
+        if (isUnambiguous) {
+          hit = best.hit;
+        } else if (best.score >= IMPORT_CANDIDATE_SCORE) {
+          row.status = 'NEEDS_REVIEW';
+          row.note = `Possible matches found — confirm the correct item (or create as NEW).`;
+          row.candidates = scored
+            .filter(s => s.score >= IMPORT_CANDIDATE_SCORE)
+            .slice(0, 10)
+            .map(s => ({ variantId: s.hit.variant.id, label: importVariantLabel(s.hit) }));
+          seenIdentity.set(`n:${importNormText(row.productName)}|${importSizeKey(row.size)}`, row);
+          rows.push(row);
+          return;
+        }
+      }
+    }
+
+
     // ---- In-file duplicate detection / merging ----
     const identityKey = hit
       ? `v:${hit.variant.id}`
@@ -1979,6 +2063,14 @@ function processImportRows(
 
     if (hit) {
       // ---- MATCHED path ----
+      // Bar-only scope must never update a food/restaurant/service item, even if a
+      // row was manually resolved to one.
+      if (scope === 'bar' && !importProductIsBar(hit.product, idx.categoryTypeById)) {
+        row.status = 'INVALID';
+        row.note = 'Only Bar items can be updated in this mode — this row matched a non-Bar item. Switch the scope to "All items" if you need it.';
+        rows.push(row);
+        return;
+      }
       if (isShotVariant(hit.product, hit.variant)) {
         row.status = 'INVALID';
         row.note = 'Shot size — shots pour from the 750ml Bottle stock. Import to the 750ml Bottle row instead.';
@@ -2037,27 +2129,6 @@ function processImportRows(
       return;
     }
 
-    // Purchase mode: check for NEAR matches first — same size, similar (but not identical)
-    // product name. Never guess: surface them as NEEDS_REVIEW instead of creating duplicates.
-    if (row.productName && row.size && !decision.resolvedVariantId) {
-      const nName = importNormText(row.productName);
-      if (nName.length >= 4) {
-        const sameSize = idx.bySizeKey.get(importSizeKey(row.size)) || [];
-        const near = sameSize.filter(h => {
-          const hn = importNormText(h.product.name);
-          return hn !== nName && (hn.includes(nName) || nName.includes(hn));
-        });
-        if (near.length > 0) {
-          row.status = 'NEEDS_REVIEW';
-          row.note = `Possible match found ("${near[0].product.name}") — confirm whether this is the same item or a brand-new product.`;
-          row.candidates = near.slice(0, 10).map(h => ({ variantId: h.variant.id, label: importVariantLabel(h) }));
-          seenIdentity.set(identityKey, row);
-          rows.push(row);
-          return;
-        }
-      }
-    }
-
     // Purchase mode: NEW ITEM (new product or new size of an existing product)
     row.status = 'NEW_ITEM';
     if (!row.productName || !row.size) {
@@ -2066,6 +2137,19 @@ function processImportRows(
       seenIdentity.set(identityKey, row);
       rows.push(row);
       return;
+    }
+
+    // In Bar-only mode a NEW item must belong to a Bar category (never create a food
+    // duplicate). If the row's category maps to an existing non-Bar category, refuse it.
+    if (scope === 'bar') {
+      const catName = row.category || 'General';
+      const existingCat = db.raw.categories.find(c => importNormText(c.name) === importNormText(catName));
+      if (existingCat && existingCat.type !== 'bar') {
+        row.status = 'INVALID';
+        row.note = 'Only Bar items can be imported in this mode — "' + (row.category || 'General') + '" is a non-Bar category. Switch the scope to "All items" or fix the category.';
+        rows.push(row);
+        return;
+      }
     }
     if (row.sellingPrice === undefined || row.sellingPrice <= 0) {
       row.status = 'INVALID';
@@ -2152,6 +2236,7 @@ function sanitizeImportMeta(body: any): ImportMeta {
     supplier: body?.supplier ? String(body.supplier).trim().slice(0, 191) : undefined,
     invoiceNumber: body?.invoiceNumber ? String(body.invoiceNumber).trim().slice(0, 128) : undefined,
     invoiceDate: body?.invoiceDate ? String(body.invoiceDate).trim().slice(0, 32) : undefined,
+    scope: body?.scope === 'all' ? 'all' : 'bar',
   };
 }
 
@@ -2186,7 +2271,7 @@ app.post('/api/inventory/import/preview', authMiddleware, requireRole('super_adm
   if ('error' in parsed) return res.status(400).json({ error: parsed.error });
 
   try {
-    const { rows, summary } = processImportRows(parsed.importType, parsed.rows, parsed.decisions);
+    const { rows, summary } = processImportRows(parsed.importType, parsed.rows, parsed.decisions, parsed.meta.scope || IMPORT_DEFAULT_SCOPE);
     const duplicateImport = findDuplicateImport(parsed.meta, parsed.importType);
     res.json({
       rows,
@@ -2216,7 +2301,7 @@ app.post('/api/inventory/import/confirm', authMiddleware, requireRole('super_adm
   const force = Boolean(req.body?.force);
 
   // Re-run the full engine server-side — never trust client-computed results
-  const { rows, summary } = processImportRows(parsed.importType, parsed.rows, parsed.decisions);
+  const { rows, summary } = processImportRows(parsed.importType, parsed.rows, parsed.decisions, parsed.meta.scope || IMPORT_DEFAULT_SCOPE);
 
   const problems = rows.filter(r => !r.excluded && (r.status === 'INVALID' || r.status === 'NEEDS_REVIEW'));
   if (problems.length > 0) {
@@ -2278,10 +2363,12 @@ app.post('/api/inventory/import/confirm', authMiddleware, requireRole('super_adm
       const key = importNormText(name);
       const existing = catCache.get(key);
       if (existing) return existing;
+      // Bar-only scope: new categories are Bar categories (a bar import never spawns food).
+      const type: Category['type'] = (parsed.meta.scope || IMPORT_DEFAULT_SCOPE) === 'bar' ? 'bar' : inferCategoryType(name);
       const cat: Category = {
         id: `cat-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
         name: name.trim().slice(0, 128),
-        type: inferCategoryType(name),
+        type,
         isActive: true,
         displayOrder: db.raw.categories.length + 1,
       };
