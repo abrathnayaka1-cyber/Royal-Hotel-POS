@@ -2,7 +2,7 @@
 
 > Commercial-grade Point of Sale system with multi-size bottle variants, hotel room management, daily stock sheet reconciliation, inventory, KOT, billing, and reporting.
 
-![Version](https://img.shields.io/badge/version-1.1.2-blue)
+![Version](https://img.shields.io/badge/version-1.1.3-blue)
 ![Node](https://img.shields.io/badge/node-%3E%3D22-green)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
@@ -137,12 +137,70 @@ npm start
 - `data/pos_database.json` contains all data (products, bills, etc)
 - `data/backups/` contains auto snapshots (keeps last 30)
 
-### Hostinger / Shared Hosting Deployment
+### Production Deployment Checklist
+
+Run through this before going live. The server enforces items 1–3 itself and
+will refuse to start if they are wrong, rather than failing silently later.
+
+| # | Item | Why |
+|---|------|-----|
+| 1 | `NODE_ENV=production` | Serves the built `dist/` bundle instead of the Vite dev server |
+| 2 | Strong `SESSION_SECRET` (32+ chars, not the placeholder) | **Startup fails otherwise.** Keep it stable or every cashier is logged out on each restart; use the same value on all instances |
+| 3 | `POS_DATA_DIR` = writable absolute path outside the deploy folder | Redeploys can't wipe live sales data. **Startup fails if unwritable** |
+| 4 | `npm run build` before `npm start` | Startup fails with a clear message if `dist/` is missing |
+| 5 | Run behind HTTPS (Nginx/Apache/Cloudflare) | Login tokens must not cross the network in plaintext |
+| 6 | Use a process manager (PM2/systemd) with auto-restart | Restarts cleanly on crash; the app handles SIGTERM gracefully |
+| 7 | Change the default `Admin` password | Default is publicly documented |
+| 8 | Schedule off-machine copies of `POS_DATA_DIR` | Local snapshots don't survive disk loss |
+
+The app resolves `dist/` and its database **relative to the application folder,
+not the current working directory**, so PM2 / systemd / cPanel / cron can launch
+it from anywhere safely.
+
+#### PM2
+
+```bash
+npm ci && npm run build
+pm2 start dist/server.cjs --name royal-pos --time
+pm2 save && pm2 startup
+```
+
+#### systemd
+
+```ini
+[Service]
+WorkingDirectory=/opt/royal-hotel-pos
+EnvironmentFile=/opt/royal-hotel-pos/.env
+ExecStart=/usr/bin/node dist/server.cjs
+Restart=always
+KillSignal=SIGTERM
+TimeoutStopSec=20
+```
+
+#### Hostinger / Shared Hosting
 
 1. Set env variable `POS_DATA_DIR=/home/uXXXXXX/pos_data` (outside webroot)
-2. Upload `dist/` and `server.js` wrapper
-3. Ensure `data/` directory is writable
-4. Set `NODE_ENV=production` and strong `SESSION_SECRET`
+2. Upload the whole app folder including the built `dist/` and `server.js` wrapper
+3. Ensure `POS_DATA_DIR` is writable by the app user
+4. Set `NODE_ENV=production` and a strong `SESSION_SECRET`
+
+### Health Monitoring
+
+`GET /api/health` returns `200` when healthy and **`503` when the database
+cannot be written to**, so a load balancer stops sending sales to a node that
+can no longer persist them.
+
+```json
+{ "status": "ok", "version": "1.1.3", "uptime": 1234.5,
+  "database": { "writable": true } }
+```
+
+### Data Safety Behaviour
+
+- Saves are atomic (temp file → `fsync` → `rename`), so a power cut cannot leave a half-written database.
+- If the database file is ever unreadable, the server **quarantines** it as `pos_database.json.corrupt.<timestamp>`, automatically restores the newest valid file from `data/backups/`, and only then continues.
+- If nothing is recoverable it **refuses to start** instead of seeding an empty shop over a real installation.
+- `SIGTERM`/`SIGINT` drain in-flight requests and force a final flush to disk.
 
 ### Database Backup & Restore
 
