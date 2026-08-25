@@ -118,6 +118,4 @@ E2E: 6 suites ........................... 117 passed, 0 failed
 
 සම්පූර්ණ විස්තර → `README.md` → *Production Deployment Checklist*.
 
-> ⚠️ `xlsx@0.18.5` — prototype pollution + ReDoS advisories, upstream fix නැහැ.
-> Excel import එක **admin-only** (authenticated) නිසා exposure එක අඩුයි, නමුත්
-> දැනගෙන ඉන්න. Upstream release එකක් ආවොත් update කරන්න.
+> ✅ `xlsx@0.18.5` vulnerability එක විසඳන ලදී — Prototype pollution සහ ReDoS අවදානම් සහිත පැරණි `xlsx` වෙනුවට modern & secure `read-excel-file`, `write-excel-file` සහ `papaparse` libraries වලට migrate කර ඇත (`npm audit`: 0 vulnerabilities).

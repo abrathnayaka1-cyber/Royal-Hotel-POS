@@ -1,6 +1,6 @@
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import * as XLSX from 'xlsx';
+import writeXlsxFile, { type SheetData } from 'write-excel-file/browser';
 import { Bill, SystemSettings, StockMovement, InventoryItemView } from '../types.ts';
 
 // Generate A4 or 80mm Thermal Receipt PDF for Bills / Invoices
@@ -268,11 +268,40 @@ export function generateSalesReportPDF(
 }
 
 // Generate Excel Export (.xlsx)
-export function exportToExcel(data: any[], fileName: string, sheetName: string = 'Sheet1') {
-  const worksheet = XLSX.utils.json_to_sheet(data);
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
-  XLSX.writeFile(workbook, `${fileName}.xlsx`);
+export async function exportToExcel(data: Record<string, any>[], fileName: string, sheetName: string = 'Sheet1') {
+  if (!data || data.length === 0) {
+    const emptyData: SheetData = [[{ value: 'No Data', fontWeight: 'bold' }]];
+    await writeXlsxFile(emptyData, { sheet: sheetName }).toFile(`${fileName}.xlsx`);
+    return;
+  }
+
+  const headers = Object.keys(data[0]);
+  const headerRow = headers.map(h => ({
+    value: h,
+    fontWeight: 'bold' as const,
+  }));
+
+  const dataRows = data.map(item =>
+    headers.map(h => {
+      const val = item[h];
+      if (val === null || val === undefined) {
+        return { type: String, value: '' };
+      }
+      if (typeof val === 'number') {
+        return { type: Number, value: val };
+      }
+      if (typeof val === 'boolean') {
+        return { type: Boolean, value: val };
+      }
+      if (val instanceof Date) {
+        return { type: Date, value: val, format: 'yyyy-mm-dd hh:mm' };
+      }
+      return { type: String, value: String(val) };
+    })
+  );
+
+  const sheetData: SheetData = [headerRow, ...dataRows];
+  await writeXlsxFile(sheetData, { sheet: sheetName }).toFile(`${fileName}.xlsx`);
 }
 
 // Export Bills / Sales to Excel

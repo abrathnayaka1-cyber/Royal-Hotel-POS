@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import * as XLSX from 'xlsx';
+import { readSheet } from 'read-excel-file/browser';
+import writeXlsxFile, { type SheetData } from 'write-excel-file/browser';
+import Papa from 'papaparse';
 import { fetchApi } from '../../lib/api.ts';
 import {
   X,
@@ -314,8 +316,8 @@ export const StockImportModal: React.FC<{
     onClose();
   };
 
-  // ---- Template download (uses the existing xlsx dependency) ----
-  const downloadTemplate = () => {
+  // ---- Template download ----
+  const downloadTemplate = async () => {
     const template = [
       {
         'SKU': 'LION-LAG-625', 'Barcode': '4791111222333', 'Category': 'Beer',
@@ -330,10 +332,15 @@ export const StockImportModal: React.FC<{
         'Supplier': '', 'Invoice Number': '', 'Invoice Date': '',
       },
     ];
-    const ws = XLSX.utils.json_to_sheet(template);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Stock Import');
-    XLSX.writeFile(wb, 'royal_pos_stock_import_template.xlsx');
+    const headers = Object.keys(template[0]);
+    const headerRow = headers.map(h => ({ value: h, fontWeight: 'bold' as const }));
+    const dataRows = template.map(row => headers.map(h => {
+      const val = (row as Record<string, unknown>)[h];
+      if (typeof val === 'number') return { type: Number, value: val };
+      return { type: String, value: val ? String(val) : '' };
+    }));
+    const sheetData: SheetData = [headerRow, ...dataRows];
+    await writeXlsxFile(sheetData, { sheet: 'Stock Import' }).toFile('royal_pos_stock_import_template.xlsx');
   };
 
   // ---- File parsing ----
@@ -367,12 +374,54 @@ export const StockImportModal: React.FC<{
         });
         setRawRows((result.rows || []).map((r, i) => ({ ...r, rowNumber: i + 1 })));
         setParseNote(result.note || 'PDF rows extracted — verify quantities and prices carefully in the preview.');
+      } else if (ext === 'csv') {
+        const text = new TextDecoder().decode(buffer);
+        const parsed = Papa.parse<Record<string, unknown>>(text, {
+          header: true,
+          skipEmptyLines: true,
+          dynamicTyping: true,
+        });
+        const rows = mapSheetRows(parsed.data || []).filter(r =>
+          r.productName || r.sku || r.barcode || r.size ||
+          (r.quantity !== undefined && String(r.quantity).trim() !== '')
+        );
+        if (rows.length === 0) {
+          setErrorMsg('No valid product rows found. Check the column headers — download the template for the expected format.');
+          return;
+        }
+        setRawRows(rows);
+        setParseNote(`${rows.length} row(s) detected in "${file.name}".`);
+        const first = rows.find(r => r.supplier || r.invoiceNumber || r.invoiceDate);
+        if (first) {
+          if (!supplier && first.supplier) setSupplier(String(first.supplier));
+          if (!invoiceNumber && first.invoiceNumber) setInvoiceNumber(String(first.invoiceNumber));
+          if (!invoiceDate && first.invoiceDate) setInvoiceDate(String(first.invoiceDate));
+        }
       } else {
-        const wb = XLSX.read(buffer, { type: 'array' });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        if (!ws) throw new Error('No sheets found');
-        const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '' });
-        const rows = mapSheetRows(json).filter(r =>
+        const rawSheetData = await readSheet(buffer);
+        if (!rawSheetData || rawSheetData.length === 0) {
+          throw new Error('No sheets or data found in spreadsheet');
+        }
+        const headers = (rawSheetData[0] || []).map(h => String(h ?? '').trim());
+        const jsonRows: Record<string, unknown>[] = [];
+        for (let i = 1; i < rawSheetData.length; i++) {
+          const rowData = rawSheetData[i];
+          if (!rowData || rowData.length === 0) continue;
+          const obj: Record<string, unknown> = {};
+          let hasVal = false;
+          headers.forEach((header, colIdx) => {
+            const cellVal = rowData[colIdx];
+            if (header && cellVal !== null && cellVal !== undefined && cellVal !== '') {
+              obj[header] = cellVal;
+              hasVal = true;
+            }
+          });
+          if (hasVal) {
+            jsonRows.push(obj);
+          }
+        }
+
+        const rows = mapSheetRows(jsonRows).filter(r =>
           r.productName || r.sku || r.barcode || r.size ||
           (r.quantity !== undefined && String(r.quantity).trim() !== '')
         );
