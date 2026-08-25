@@ -8,6 +8,7 @@ interface AuthContextType {
   isLoading: boolean;
   isSuperAdmin: boolean;
   isCashier: boolean;
+  isKitchenManager: boolean;
   login: (
     credentialsOrUsername: string | { username?: string; password?: string; pin?: string },
     passwordArg?: string
@@ -143,6 +144,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isLoading,
         isSuperAdmin: user?.role === 'super_admin',
         isCashier: user?.role === 'cashier',
+        isKitchenManager: user?.role === 'kitchen_manager',
         login,
         logout,
         refreshUser,

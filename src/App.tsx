@@ -5,6 +5,7 @@ import { LoginScreen } from './components/auth/LoginScreen.tsx';
 import { Navbar } from './components/layout/Navbar.tsx';
 import { POSScreen } from './components/pos/POSScreen.tsx';
 import { AdminLayout } from './components/admin/AdminLayout.tsx';
+import { KitchenLayout } from './components/kitchen/KitchenLayout.tsx';
 import { Loader2, AlertTriangle, RefreshCw } from 'lucide-react';
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: Error | null }> {
@@ -57,7 +58,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boole
 
 const AppContent: React.FC = () => {
   const { user, isLoading } = useAuth();
-  const [currentView, setCurrentView] = useState<'pos' | 'admin'>('pos');
+  const [currentView, setCurrentView] = useState<'pos' | 'admin' | 'kitchen'>('pos');
 
   if (isLoading) {
     return (
@@ -76,7 +77,11 @@ const AppContent: React.FC = () => {
   }
 
   const isSuperAdmin = user.role === 'super_admin';
-  const effectiveView = isSuperAdmin ? currentView : 'pos';
+  // Kitchen Managers land on their restricted Food & Kitchen suite (never the
+  // POS register or the Super Admin dashboard). Super Admins keep the existing
+  // pos/admin switching; cashiers keep the POS register exactly as before.
+  const isKitchenManager = user.role === 'kitchen_manager';
+  const effectiveView = isSuperAdmin ? currentView : isKitchenManager ? 'kitchen' : 'pos';
 
   return (
     <POSProvider>
@@ -88,6 +93,8 @@ const AppContent: React.FC = () => {
         <div className="flex-1 flex overflow-hidden">
           {effectiveView === 'pos' ? (
             <POSScreen />
+          ) : effectiveView === 'kitchen' ? (
+            <KitchenLayout />
           ) : (
             <AdminLayout onSwitchToPOS={() => setCurrentView('pos')} />
           )}

@@ -6,7 +6,14 @@ export interface User {
   name: string;
   email: string;
   username: string;
-  role: 'super_admin' | 'cashier';
+  /**
+   * KITCHEN_MANAGER (v1.2.0): restricted role with access ONLY to the
+   * Food & Kitchen module (ingredients, recipes, wastage, counts, food cost,
+   * kitchen reports). Uses the SAME authentication system as every other
+   * role — no separate login. All Super-Admin-only APIs continue to reject
+   * this role through requireRole('super_admin') → 403.
+   */
+  role: 'super_admin' | 'cashier' | 'kitchen_manager';
   passwordHash: string; // bcrypt hash
   isActive: boolean;
   pin?: string;
@@ -246,6 +253,188 @@ export interface AuditLog {
 }
 
 // ==========================================
+// FOOD & KITCHEN MODULE (v1.2.0 — Kitchen Manager role)
+// ==========================================
+// Additive collections that follow the SAME architecture as the existing
+// product/variant stock system: every ingredient quantity change goes through
+// a movement ledger record (recordKitchenMovement mirrors recordStockMovement),
+// and every action is written to the existing auditLogs via logAudit().
+// No existing table is modified; these arrays are ensured on DB load.
+
+/** Kitchen ingredient (Rice, Chicken, Cooking Oil, …) tracked in the kitchen store. */
+export interface KitchenIngredient {
+  id: string;
+  name: string;
+  /** Unit label, e.g. 'g', 'kg', 'ml', 'l', 'pcs'. */
+  unit: string;
+  /** Current quantity on hand (in `unit`). */
+  currentStock: number;
+  /** Minimum stock level before the LOW STOCK alert fires. */
+  minStockLevel: number;
+  /** Latest cost per 1 unit (Rs.). Used for wastage/variance/food cost. */
+  costPerUnit: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Movement ledger for kitchen ingredients — mirrors StockMovement for products. */
+export type KitchenMovementType =
+  | 'opening_stock'
+  | 'stock_in'
+  | 'stock_out'
+  | 'sale'
+  | 'wastage'
+  | 'adjustment'
+  | 'count_correction';
+
+export interface KitchenStockMovement {
+  id: string;
+  ingredientId: string;
+  ingredientName: string;
+  unit: string;
+  quantityChange: number; // signed
+  quantityBefore: number;
+  quantityAfter: number;
+  movementType: KitchenMovementType;
+  reason?: string;
+  /** Bill number (sale / void restore), count number, request number, … */
+  referenceId?: string;
+  costPerUnit?: number;
+  userId: string;
+  userName: string;
+  createdAt: string;
+}
+
+/** One ingredient line of a recipe. */
+export interface KitchenRecipeItem {
+  ingredientId: string;
+  ingredientName: string;
+  unit: string;
+  /** Quantity per ONE portion of the menu item. */
+  quantity: number;
+}
+
+/** Historical snapshot of a recipe (never destroyed — required by past sales). */
+export interface KitchenRecipeVersion {
+  version: number;
+  items: KitchenRecipeItem[];
+  savedAt: string;
+  savedById: string;
+  savedByName: string;
+}
+
+/**
+ * Recipe linking a POS menu item variant (e.g. "Special Chicken Fried Rice —
+ * Regular Portion") to its ingredient quantities per portion. When the variant
+ * is sold through the EXISTING POS checkout, ingredients are deducted
+ * automatically from the kitchen store.
+ */
+export interface KitchenRecipe {
+  id: string;
+  productId: string;
+  productName: string;
+  variantId: string;
+  variantSize: string;
+  /** Portions the ingredient quantities produce (default 1). */
+  servings: number;
+  items: KitchenRecipeItem[];
+  isActive: boolean;
+  version: number;
+  /** Previous versions kept for history. */
+  history: KitchenRecipeVersion[];
+  createdById: string;
+  createdByName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const KITCHEN_WASTAGE_CATEGORIES = [
+  'Spoilage',
+  'Spillage',
+  'Burnt Food',
+  'Preparation Loss',
+  'Cutting Loss',
+  'Expired Material',
+  'Damaged Material',
+  'Over Portion',
+  'Staff Meal',
+  'Other',
+] as const;
+
+export type KitchenWastageCategory = (typeof KITCHEN_WASTAGE_CATEGORIES)[number];
+
+export interface KitchenWastageRecord {
+  id: string;
+  ingredientId: string;
+  ingredientName: string;
+  quantity: number;
+  unit: string;
+  /** Rs. value of the wasted quantity. */
+  cost: number;
+  category: KitchenWastageCategory;
+  reason?: string;
+  notes?: string;
+  movementId: string;
+  userId: string;
+  userName: string;
+  createdAt: string;
+}
+
+export interface KitchenCountLine {
+  ingredientId: string;
+  ingredientName: string;
+  unit: string;
+  expected: number;
+  physical: number;
+  variance: number; // physical - expected
+  varianceCost: number;
+  /** Applied immediately (within approval threshold) or waiting for admin approval. */
+  status: 'applied' | 'pending_approval' | 'no_variance';
+}
+
+export interface KitchenPhysicalCount {
+  id: string;
+  countNumber: string;
+  lines: KitchenCountLine[];
+  totalVarianceCost: number;
+  /** applied = every variance line applied; partial = some lines pending approval. */
+  status: 'applied' | 'partial' | 'pending_approval';
+  notes?: string;
+  userId: string;
+  userName: string;
+  createdAt: string;
+}
+
+/**
+ * High-risk adjustment approval workflow (large stock corrections).
+ * Kitchen Manager creates the request; Super Admin approves/rejects;
+ * only approval updates stock (through a movement record).
+ */
+export interface KitchenAdjustmentRequest {
+  id: string;
+  requestNumber: string;
+  type: 'stock_adjustment';
+  ingredientId: string;
+  ingredientName: string;
+  unit: string;
+  currentQty: number;
+  requestedQty: number;
+  diffQty: number;
+  varianceCost: number;
+  reason: string;
+  countNumber?: string;
+  status: 'pending' | 'approved' | 'rejected';
+  requestedById: string;
+  requestedByName: string;
+  createdAt: string;
+  reviewedById?: string;
+  reviewedByName?: string;
+  reviewedAt?: string;
+  reviewNote?: string;
+}
+
+// ==========================================
 // SMART STOCK IMPORT (Excel / CSV / PDF)
 // ==========================================
 
@@ -348,6 +537,13 @@ export interface DatabaseSchema {
   stockMovements: StockMovement[];
   stockImports: StockImport[];
   auditLogs: AuditLog[];
+  // Food & Kitchen module (v1.2.0) — additive, ensured on load
+  kitchenIngredients: KitchenIngredient[];
+  kitchenMovements: KitchenStockMovement[];
+  kitchenRecipes: KitchenRecipe[];
+  kitchenWastage: KitchenWastageRecord[];
+  kitchenCounts: KitchenPhysicalCount[];
+  kitchenAdjustmentRequests: KitchenAdjustmentRequest[];
   settings: SystemSettings;
   counters: {
     billSeq: number;
@@ -356,6 +552,8 @@ export interface DatabaseSchema {
     bookingSeq: number;
     holdSeq?: number;
     importSeq?: number;
+    kitchenCountSeq?: number;
+    kitchenRequestSeq?: number;
   };
 }
 
@@ -1421,6 +1619,62 @@ import bcrypt from 'bcryptjs';
 
 const DEFAULT_ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || 'Araliya2000';
 
+// ==========================================
+// FOOD & KITCHEN SEED DATA (fresh databases only)
+// ==========================================
+// Only used when a BRAND NEW database is created. Existing databases simply
+// get empty kitchen arrays (ensured on load) — no existing data is touched.
+
+const initialKitchenIngredients: KitchenIngredient[] = [
+  { id: 'king-1',  name: 'Rice (Samba)',       unit: 'g',  currentStock: 25000, minStockLevel: 5000, costPerUnit: 0.28, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-2',  name: 'Chicken (Boneless)', unit: 'g',  currentStock: 8000,  minStockLevel: 2000, costPerUnit: 1.60, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-3',  name: 'Fish (Tuna)',        unit: 'g',  currentStock: 4000,  minStockLevel: 1500, costPerUnit: 1.80, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-4',  name: 'Prawns',             unit: 'g',  currentStock: 2000,  minStockLevel: 800,  costPerUnit: 3.20, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-5',  name: 'Karawala (Dried Fish)', unit: 'g', currentStock: 1200, minStockLevel: 500, costPerUnit: 2.10, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-6',  name: 'Mixed Vegetables',   unit: 'g',  currentStock: 10000, minStockLevel: 3000, costPerUnit: 0.45, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-7',  name: 'Eggs',               unit: 'pcs', currentStock: 300,   minStockLevel: 90,   costPerUnit: 28.0, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-8',  name: 'Potatoes',           unit: 'g',  currentStock: 12000, minStockLevel: 4000, costPerUnit: 0.32, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-9',  name: 'Carrots',            unit: 'g',  currentStock: 6000,  minStockLevel: 2000, costPerUnit: 0.40, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-10', name: 'Onions (Big)',       unit: 'g',  currentStock: 9000,  minStockLevel: 3000, costPerUnit: 0.35, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-11', name: 'Garlic',             unit: 'g',  currentStock: 1500,  minStockLevel: 500,  costPerUnit: 0.90, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-12', name: 'Ginger',             unit: 'g',  currentStock: 1200,  minStockLevel: 400,  costPerUnit: 0.85, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-13', name: 'Turmeric Powder',    unit: 'g',  currentStock: 800,   minStockLevel: 200,  costPerUnit: 1.20, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-14', name: 'Chili (Kochchi)',    unit: 'g',  currentStock: 1000,  minStockLevel: 300,  costPerUnit: 1.50, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-15', name: 'Curry Powder',       unit: 'g',  currentStock: 1500,  minStockLevel: 400,  costPerUnit: 1.10, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-16', name: 'Salt & Pepper',      unit: 'g',  currentStock: 2000,  minStockLevel: 500,  costPerUnit: 0.20, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-17', name: 'Cooking Oil',        unit: 'ml', currentStock: 15000, minStockLevel: 4000, costPerUnit: 0.22, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-18', name: 'Coconut Milk',       unit: 'ml', currentStock: 6000,  minStockLevel: 2000, costPerUnit: 0.30, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-19', name: 'Sauces & Paste',     unit: 'g',  currentStock: 3000,  minStockLevel: 800,  costPerUnit: 0.75, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: 'king-20', name: 'Godamba Rotti',      unit: 'pcs', currentStock: 120,  minStockLevel: 40,   costPerUnit: 45.0, isActive: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+];
+
+const initialKitchenRecipes: KitchenRecipe[] = [
+  {
+    id: 'krec-1',
+    productId: 'prod-9',
+    productName: 'Special Chicken Fried Rice',
+    variantId: 'var-9-reg',
+    variantSize: 'Regular Portion',
+    servings: 1,
+    items: [
+      { ingredientId: 'king-1',  ingredientName: 'Rice (Samba)',     unit: 'g',  quantity: 250 },
+      { ingredientId: 'king-2',  ingredientName: 'Chicken (Boneless)', unit: 'g', quantity: 80 },
+      { ingredientId: 'king-9',  ingredientName: 'Carrots',          unit: 'g',  quantity: 20 },
+      { ingredientId: 'king-10', ingredientName: 'Onions (Big)',     unit: 'g',  quantity: 15 },
+      { ingredientId: 'king-7',  ingredientName: 'Eggs',             unit: 'pcs', quantity: 1 },
+      { ingredientId: 'king-17', ingredientName: 'Cooking Oil',      unit: 'ml', quantity: 15 },
+      { ingredientId: 'king-14', ingredientName: 'Chili (Kochchi)',  unit: 'g',  quantity: 2 },
+    ],
+    isActive: true,
+    version: 1,
+    history: [],
+    createdById: 'user-admin',
+    createdByName: 'Super Admin',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+];
+
 const initialUsers: User[] = [
   {
     id: 'user-admin',
@@ -1490,6 +1744,23 @@ export class Database {
           if (!Array.isArray(parsed.stockImports)) {
             parsed.stockImports = [];
           }
+
+          // ==========================================
+          // FOOD & KITCHEN MODULE (v1.2.0) — SAFE ADDITIVE MIGRATION
+          // Only ensures the new collections exist. Never drops, truncates,
+          // deletes or rewrites any existing data.
+          // ==========================================
+          if (!Array.isArray(parsed.kitchenIngredients)) parsed.kitchenIngredients = [];
+          if (!Array.isArray(parsed.kitchenMovements)) parsed.kitchenMovements = [];
+          if (!Array.isArray(parsed.kitchenRecipes)) parsed.kitchenRecipes = [];
+          if (!Array.isArray(parsed.kitchenWastage)) parsed.kitchenWastage = [];
+          if (!Array.isArray(parsed.kitchenCounts)) parsed.kitchenCounts = [];
+          if (!Array.isArray(parsed.kitchenAdjustmentRequests)) parsed.kitchenAdjustmentRequests = [];
+          if (parsed.counters) {
+            if (!parsed.counters.kitchenCountSeq) parsed.counters.kitchenCountSeq = 1;
+            if (!parsed.counters.kitchenRequestSeq) parsed.counters.kitchenRequestSeq = 1;
+          }
+
 
           // First-run visibility migration for the legacy menu categories:
           // their category buttons stay OUT of the cashier POS (sidebar) and
@@ -1566,13 +1837,21 @@ export class Database {
           createdAt: new Date().toISOString()
         }
       ],
+      kitchenIngredients: initialKitchenIngredients,
+      kitchenMovements: [],
+      kitchenRecipes: initialKitchenRecipes,
+      kitchenWastage: [],
+      kitchenCounts: [],
+      kitchenAdjustmentRequests: [],
       settings: defaultSettings,
       counters: {
         billSeq: 1001,
         invoiceSeq: 5001,
         kotSeq: 101,
         bookingSeq: 2001,
-        holdSeq: 1
+        holdSeq: 1,
+        kitchenCountSeq: 1,
+        kitchenRequestSeq: 1
       }
     };
 
@@ -1594,6 +1873,24 @@ export class Database {
           userName: 'Ruwan Perera (Super Admin)',
           createdAt: new Date().toISOString()
         });
+      });
+    });
+
+    // Populate opening kitchen ingredient movements (Food & Kitchen module)
+    initialKitchenIngredients.forEach(ing => {
+      initialDb.kitchenMovements.push({
+        id: `kmov-init-${ing.id}`,
+        ingredientId: ing.id,
+        ingredientName: ing.name,
+        unit: ing.unit,
+        quantityChange: ing.currentStock,
+        quantityBefore: 0,
+        quantityAfter: ing.currentStock,
+        movementType: 'opening_stock',
+        reason: 'Initial kitchen store opening stock setup',
+        userId: 'user-admin',
+        userName: 'Super Admin',
+        createdAt: new Date().toISOString()
       });
     });
 
@@ -1692,6 +1989,68 @@ export class Database {
     const seq = this.data.counters.bookingSeq++;
     this.save();
     return `${prefix}${seq}`;
+  }
+
+  /** Unique Kitchen Physical Count reference, e.g. KCOUNT-0001 */
+  public getNextKitchenCountNumber(): string {
+    if (!this.data.counters.kitchenCountSeq) {
+      this.data.counters.kitchenCountSeq = 1;
+    }
+    const seq = this.data.counters.kitchenCountSeq++;
+    this.save();
+    return `KCOUNT-${String(seq).padStart(4, '0')}`;
+  }
+
+  /** Unique Kitchen Adjustment Request reference, e.g. KADJ-0001 */
+  public getNextKitchenRequestNumber(): string {
+    if (!this.data.counters.kitchenRequestSeq) {
+      this.data.counters.kitchenRequestSeq = 1;
+    }
+    const seq = this.data.counters.kitchenRequestSeq++;
+    this.save();
+    return `KADJ-${String(seq).padStart(4, '0')}`;
+  }
+
+  /**
+   * Kitchen movement ledger helper — mirrors recordStockMovement() for product
+   * variants. EVERY kitchen ingredient quantity change MUST go through this so
+   * the audit trail stays complete (stock is never mutated without a record).
+   */
+  public recordKitchenMovement(
+    ingredient: KitchenIngredient,
+    quantityChange: number,
+    quantityBefore: number,
+    quantityAfter: number,
+    movementType: KitchenStockMovement['movementType'],
+    userId: string,
+    userName: string,
+    reason?: string,
+    referenceId?: string,
+    customCreatedAt?: string
+  ): KitchenStockMovement {
+    const movement: KitchenStockMovement = {
+      id: `kmov-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+      ingredientId: ingredient.id,
+      ingredientName: ingredient.name,
+      unit: ingredient.unit,
+      quantityChange,
+      quantityBefore,
+      quantityAfter,
+      movementType,
+      reason,
+      referenceId,
+      costPerUnit: ingredient.costPerUnit,
+      userId,
+      userName,
+      createdAt: customCreatedAt || new Date().toISOString()
+    };
+    this.data.kitchenMovements.unshift(movement);
+    // Keep the ledger bounded like the existing audit log (5000 records)
+    if (this.data.kitchenMovements.length > 5000) {
+      this.data.kitchenMovements.pop();
+    }
+    this.save();
+    return movement;
   }
 
   // Audit Logging helper
@@ -1797,6 +2156,13 @@ export class Database {
     this.data.stockMovements = this.data.stockMovements || [];
     this.data.stockImports = this.data.stockImports || [];
     this.data.auditLogs = this.data.auditLogs || [];
+    // Food & Kitchen module collections (additive — never destructive)
+    this.data.kitchenIngredients = this.data.kitchenIngredients || [];
+    this.data.kitchenMovements = this.data.kitchenMovements || [];
+    this.data.kitchenRecipes = this.data.kitchenRecipes || [];
+    this.data.kitchenWastage = this.data.kitchenWastage || [];
+    this.data.kitchenCounts = this.data.kitchenCounts || [];
+    this.data.kitchenAdjustmentRequests = this.data.kitchenAdjustmentRequests || [];
     this.data.settings = { ...defaultSettings, ...this.data.settings };
     this.save();
     return true;
