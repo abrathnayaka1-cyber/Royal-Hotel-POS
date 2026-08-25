@@ -6,7 +6,7 @@
   "type": "module",
   "main": "server.js",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "dev": "tsx server.ts",
@@ -29,7 +29,6 @@
   ],
   "dependencies": {
     "@tailwindcss/vite": "^4.1.14",
-    "@types/bcryptjs": "^3.0.0",
     "@types/canvas-confetti": "^1.9.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^4.17.21",
