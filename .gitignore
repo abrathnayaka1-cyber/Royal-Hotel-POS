@@ -8,6 +8,7 @@ coverage/
 .env.local
 .env.development.local
 .env.production.local
+.session-secret
 data/
 data/*.json
 data/backups/

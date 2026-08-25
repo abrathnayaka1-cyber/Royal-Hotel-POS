@@ -12,7 +12,7 @@ import rateLimit from 'express-rate-limit';
 import { createServer as createViteServer } from 'vite';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
-import { APP_ROOT, DIST_DIR } from './server/paths.ts';
+import { APP_ROOT, DIST_DIR, resolveDataDir } from './server/paths.ts';
 import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking, StockImport, StockImportRowResult, StockImportType, KitchenIngredient, KitchenStockMovement, KitchenRecipe, KitchenRecipeItem, KitchenWastageRecord, KitchenPhysicalCount, KitchenAdjustmentRequest, KITCHEN_WASTAGE_CATEGORIES, KitchenWastageCategory, KitchenDeductionSnapshot } from './server/db.ts';
 
 const app = express();
@@ -118,12 +118,18 @@ const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 /**
  * Session secret resolution.
  *
- * In production an absent or placeholder secret is a hard failure rather than
- * a warning. Previously the server booted with a random ephemeral secret,
- * which silently signed every cashier out on each restart/redeploy (mid-shift,
- * mid-sale) and made tokens unverifiable across a PM2 cluster. Worse, shipping
- * the .env.example placeholder unchanged left a publicly-known signing key that
- * lets anyone forge a super-admin token.
+ * Resolution order:
+ *   1. `SESSION_SECRET` env var (explicit, highest priority).
+ *   2. A persisted secret file (`<dataDir>/.session-secret`) — auto-generated
+ *      on first boot and reused on every subsequent start so tokens survive
+ *      restarts, redeploys and PM2 reloads without any manual .env setup.
+ *   3. (Development only) An ephemeral random secret with a clear warning.
+ *
+ * In production the placeholder values from .env.example are rejected (they
+ * are publicly known and would let anyone forge a super-admin token). When
+ * neither the env var nor the persisted file provides a usable secret, one is
+ * generated, written to the data directory with restrictive permissions, and
+ * used immediately — the server NEVER crashes for a missing SESSION_SECRET.
  */
 const PLACEHOLDER_SECRETS = new Set([
   'change_this_to_a_very_long_random_secret_key_at_least_64_characters!',
@@ -134,28 +140,56 @@ const PLACEHOLDER_SECRETS = new Set([
 function resolveSessionSecret(): string {
   const provided = process.env.SESSION_SECRET?.trim();
 
-  if (IS_PRODUCTION) {
-    const problems: string[] = [];
-    if (!provided) problems.push('SESSION_SECRET is not set.');
-    else {
-      if (PLACEHOLDER_SECRETS.has(provided)) problems.push('SESSION_SECRET is still the example placeholder value.');
-      if (provided.length < 32) problems.push(`SESSION_SECRET is too short (${provided.length} chars, need 32+).`);
-    }
-
-    if (problems.length > 0) {
-      console.error('[SECURITY][FATAL] Refusing to start in production:');
-      problems.forEach(p => console.error(`  - ${p}`));
-      console.error('  Generate one with:  node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'hex\'))"');
-      console.error('  Then set it in your .env file as SESSION_SECRET=<value>');
-      process.exit(1);
-    }
-    return provided!;
+  // 1) Explicit env var — validate it isn't a placeholder or too short.
+  if (provided && !PLACEHOLDER_SECRETS.has(provided) && provided.length >= 32) {
+    return provided;
   }
 
-  if (provided) return provided;
-  console.warn('[SECURITY] SESSION_SECRET not set — using an ephemeral development secret.');
-  console.warn('[SECURITY] Logins will not survive a restart. Set SESSION_SECRET in .env.');
-  return crypto.randomBytes(64).toString('hex');
+  if (provided && IS_PRODUCTION) {
+    const problems: string[] = [];
+    if (PLACEHOLDER_SECRETS.has(provided)) problems.push('SESSION_SECRET is still the example placeholder value.');
+    if (provided.length < 32) problems.push(`SESSION_SECRET is too short (${provided.length} chars, need 32+).`);
+    console.warn('[SECURITY] Ignoring invalid SESSION_SECRET from .env:');
+    problems.forEach(p => console.warn(`  - ${p}`));
+  }
+
+  // 2) Persisted secret file — survives restarts without any env configuration.
+  const secretFilePath = path.join(resolveDataDir(), '.session-secret');
+  try {
+    if (fs.existsSync(secretFilePath)) {
+      const saved = fs.readFileSync(secretFilePath, 'utf-8').trim();
+      if (saved.length >= 32 && !PLACEHOLDER_SECRETS.has(saved)) {
+        console.log('[SECURITY] Using persisted SESSION_SECRET from ' + secretFilePath);
+        return saved;
+      }
+      // Corrupted or placeholder — regenerate below.
+      console.warn('[SECURITY] Persisted secret file is invalid — regenerating.');
+    }
+  } catch (err) {
+    console.warn('[SECURITY] Could not read persisted secret file:', err);
+  }
+
+  // 3) Generate a new secret and persist it so it survives the next restart.
+  const generated = crypto.randomBytes(48).toString('hex');
+
+  if (IS_PRODUCTION) {
+    console.warn('[SECURITY] No valid SESSION_SECRET found — generated a new one and saved it to:');
+    console.warn(`[SECURITY]   ${secretFilePath}`);
+    console.warn('[SECURITY] This secret persists across restarts. All existing login tokens are now invalid.');
+    console.warn('[SECURITY] To use your own secret, set SESSION_SECRET in .env (minimum 32 characters).');
+  } else {
+    console.warn('[SECURITY] SESSION_SECRET not set — generated and persisted to ' + secretFilePath);
+  }
+
+  try {
+    // Write with restrictive permissions (owner-only on POSIX).
+    fs.writeFileSync(secretFilePath, generated, { mode: 0o600 });
+  } catch (err) {
+    console.warn('[SECURITY] Could not persist generated secret to file:', err);
+    console.warn('[SECURITY] Secret will be ephemeral — logins will not survive a restart.');
+  }
+
+  return generated;
 }
 
 const SESSION_SECRET = resolveSessionSecret();
@@ -5575,7 +5609,7 @@ async function start() {
     console.log(`[ENV] NODE_ENV=${process.env.NODE_ENV || 'development'}`);
     console.log(`[SECURITY] Helmet enabled, Rate limiting active`);
     if (!process.env.SESSION_SECRET) {
-      console.warn(`[SECURITY] Using ephemeral SESSION_SECRET - set in .env for production!`);
+      console.warn(`[SECURITY] SESSION_SECRET was auto-generated and persisted to the data directory. Set SESSION_SECRET in .env for explicit control.`);
     }
   });
 
