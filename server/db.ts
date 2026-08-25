@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { resolveDataDir } from './paths.ts';
 
 export interface User {
@@ -1644,7 +1645,30 @@ const initialRooms: Room[] = [
 // Initial Users - Only Super Admin seeded. Zero default cashiers.
 import bcrypt from 'bcryptjs';
 
-const DEFAULT_ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || 'Araliya2000';
+/**
+ * First-run Super Admin password.
+ *
+ * - `DEFAULT_ADMIN_PASSWORD` env → used as-is.
+ * - Production with NO env → a random one-time password is generated and
+ *   printed to the server log (only when a fresh database is actually seeded,
+ *   or a legacy account with no hash is repaired). The publicly-known default
+ *   `Araliya2000` is NEVER used in production, so a fresh install cannot be
+ *   taken over with a documented credential.
+ * - Development (or explicit env) → the documented `Araliya2000` so the local
+ *   quick-start and the E2E test suite keep working.
+ */
+function resolveDefaultAdminPassword(): string {
+  if (process.env.DEFAULT_ADMIN_PASSWORD) return process.env.DEFAULT_ADMIN_PASSWORD;
+  if (process.env.NODE_ENV === 'production') {
+    const generated = crypto.randomBytes(18).toString('base64url');
+    console.warn('[SECURITY] No DEFAULT_ADMIN_PASSWORD set — generated a random one-time Super Admin password for this fresh database.');
+    console.warn('[SECURITY]   Username: Admin');
+    console.warn(`[SECURITY]   Password: ${generated}`);
+    console.warn('[SECURITY] Log in now and change it immediately (Admin → Users). This value is shown once and is never stored in plain text.');
+    return generated;
+  }
+  return 'Araliya2000';
+}
 
 // ==========================================
 // FOOD & KITCHEN SEED DATA (fresh databases only)
@@ -1702,18 +1726,20 @@ const initialKitchenRecipes: KitchenRecipe[] = [
   },
 ];
 
-const initialUsers: User[] = [
-  {
-    id: 'user-admin',
-    name: 'Super Admin',
-    email: 'admin@pos.local',
-    username: 'Admin',
-    role: 'super_admin',
-    passwordHash: bcrypt.hashSync(DEFAULT_ADMIN_PASSWORD, 10),
-    isActive: true,
-    createdAt: new Date().toISOString(),
-  }
-];
+function makeInitialUsers(): User[] {
+  return [
+    {
+      id: 'user-admin',
+      name: 'Super Admin',
+      email: 'admin@pos.local',
+      username: 'Admin',
+      role: 'super_admin',
+      passwordHash: bcrypt.hashSync(resolveDefaultAdminPassword(), 10),
+      isActive: true,
+      createdAt: new Date().toISOString(),
+    }
+  ];
+}
 
 export class Database {
   private data: DatabaseSchema;
@@ -1733,7 +1759,9 @@ export class Database {
           // Clean legacy demo cashiers if they exist
           parsed.users = parsed.users.filter((u: User) => u.id !== 'user-cashier-1' && u.id !== 'user-cashier-2');
 
-          // Ensure Admin user exists with correct credentials (Admin / Araliya2000)
+          // Ensure a usable Super Admin account exists. The stored password hash
+          // is never overwritten; a missing hash is repaired with the (random in
+          // production) first-run password, see resolveDefaultAdminPassword().
           const adminUserIndex = parsed.users.findIndex((u: User) => u.role === 'super_admin' || u.username.toLowerCase() === 'admin');
           if (adminUserIndex !== -1) {
             // Only guarantee that a usable super admin account exists.
@@ -1744,7 +1772,7 @@ export class Database {
             admin.isActive = true;
             if (!admin.name) admin.name = 'Super Admin';
             if (!admin.username) admin.username = 'Admin';
-            if (!admin.passwordHash) admin.passwordHash = bcrypt.hashSync(DEFAULT_ADMIN_PASSWORD, 10);
+            if (!admin.passwordHash) admin.passwordHash = bcrypt.hashSync(resolveDefaultAdminPassword(), 10);
           } else {
             parsed.users.unshift({
               id: 'user-admin',
@@ -1752,7 +1780,7 @@ export class Database {
               email: 'admin@pos.local',
               username: 'Admin',
               role: 'super_admin',
-              passwordHash: bcrypt.hashSync(DEFAULT_ADMIN_PASSWORD, 10),
+              passwordHash: bcrypt.hashSync(resolveDefaultAdminPassword(), 10),
               isActive: true,
               createdAt: new Date().toISOString(),
             });
@@ -1880,7 +1908,7 @@ export class Database {
 
     // Seed default database
     const initialDb: DatabaseSchema = {
-      users: initialUsers,
+      users: makeInitialUsers(),
       categories: initialCategories,
       companies: initialCompanies,
       products: initialProducts,

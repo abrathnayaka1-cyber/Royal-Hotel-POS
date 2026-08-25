@@ -69,7 +69,7 @@ export const LoginScreen: React.FC = () => {
               Enter your credentials to access the system
             </p>
             <p className="text-[10px] text-slate-500 mt-2">
-              Default: Admin / Araliya2000
+              Access is restricted to authorised staff
             </p>
           </div>
 

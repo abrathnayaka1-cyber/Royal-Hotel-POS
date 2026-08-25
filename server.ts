@@ -48,9 +48,39 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
 }));
 
-// CORS - Allow all origins for POS flexibility, but with credentials support
+// CORS - Reflect any origin by default (a POS floor is a mix of tablets,
+// phones and the admin PC), but allow a strict allowlist to be pinned in
+// production via CORS_ORIGINS (comma-separated). Auth is Bearer-token based
+// (no cookies), so a reflected origin cannot be used to steal a session, but
+// pinning the allowlist still hardens against cross-site requests from a
+// malicious page that somehow obtains a token.
+const CORS_ALLOWLIST = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+// Matches the `cors` package's StaticOrigin type so the delegate is assignable
+// under strictFunctionTypes without importing the package's internal types.
+type CorsOriginValue = boolean | string | RegExp | (string | RegExp)[];
+
+const corsOrigin = (origin: string | undefined, callback: (err: Error | null, allow?: CorsOriginValue) => void): void => {
+  // Non-browser clients (curl, the POS hardware) send no Origin header.
+  if (!origin || CORS_ALLOWLIST.length === 0) {
+    callback(null, true);
+    return;
+  }
+  if (CORS_ALLOWLIST.includes(origin)) {
+    callback(null, true);
+    return;
+  }
+  // Disallowed origin → no CORS headers are set, so the browser's same-origin
+  // policy blocks the cross-origin request. Returning false (rather than an
+  // Error) keeps this a clean policy rejection instead of a 500.
+  callback(null, false);
+};
+
 app.use(cors({
-  origin: true,
+  origin: corsOrigin,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID'],

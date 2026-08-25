@@ -21,14 +21,19 @@ if (empty($newPassword) || strlen($newPassword) < 4) {
 
 $pdo = Database::getConnection();
 
-// If current password provided, verify it first
-if (!empty($currentPassword)) {
-    $stmt = $pdo->prepare("SELECT password_hash FROM users WHERE id = ?");
-    $stmt->execute([$user['id']]);
-    $row = $stmt->fetch();
-    if (!$row || !password_verify($currentPassword, $row['password_hash'])) {
-        sendError('Current password is incorrect.', 400);
-    }
+// The current password is ALWAYS required. Previously it was optional — an
+// empty currentPassword silently skipped verification, so anyone holding a
+// session token (or a stolen cookie) could change the password and take over
+// the account without knowing it.
+if (empty($currentPassword)) {
+    sendError('Current password is required.', 400);
+}
+
+$stmt = $pdo->prepare("SELECT password_hash FROM users WHERE id = ?");
+$stmt->execute([$user['id']]);
+$row = $stmt->fetch();
+if (!$row || !password_verify($currentPassword, $row['password_hash'])) {
+    sendError('Current password is incorrect.', 400);
 }
 
 $newHash = password_hash($newPassword, PASSWORD_BCRYPT);
