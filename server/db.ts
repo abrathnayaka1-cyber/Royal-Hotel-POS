@@ -1647,6 +1647,26 @@ const initialRooms: Room[] = [
 import bcrypt from 'bcryptjs';
 
 /**
+ * Read and validate a password supplied through an environment variable.
+ * Login accepts at most 128 characters, so hashing a longer value would create
+ * an account that can never pass the login schema.
+ */
+function readAdminPasswordEnv(name: 'DEFAULT_ADMIN_PASSWORD' | 'ADMIN_PASSWORD_RESET'): string | undefined {
+  const value = process.env[name];
+  if (value === undefined || value === '') return undefined;
+  if (value.length < 4 || value.length > 128) {
+    throw new Error(`${name} must be between 4 and 128 characters.`);
+  }
+  return value;
+}
+
+// Resolve these before Database.loadDatabase() enters its corruption-recovery
+// try/catch. A bad environment value is a configuration error, not a damaged
+// database, and must never cause the live database to be quarantined.
+const CONFIGURED_DEFAULT_ADMIN_PASSWORD = readAdminPasswordEnv('DEFAULT_ADMIN_PASSWORD');
+const ADMIN_PASSWORD_RESET = readAdminPasswordEnv('ADMIN_PASSWORD_RESET');
+
+/**
  * First-run Super Admin password.
  *
  * - `DEFAULT_ADMIN_PASSWORD` env → used as-is.
@@ -1658,17 +1678,33 @@ import bcrypt from 'bcryptjs';
  * - Development (or explicit env) → the documented `Araliya2000` so the local
  *   quick-start and the E2E test suite keep working.
  */
+let cachedDefaultAdminPassword: string | undefined;
 function resolveDefaultAdminPassword(): string {
-  if (process.env.DEFAULT_ADMIN_PASSWORD) return process.env.DEFAULT_ADMIN_PASSWORD;
+  if (cachedDefaultAdminPassword !== undefined) return cachedDefaultAdminPassword;
+
+  if (CONFIGURED_DEFAULT_ADMIN_PASSWORD) {
+    cachedDefaultAdminPassword = CONFIGURED_DEFAULT_ADMIN_PASSWORD;
+    return cachedDefaultAdminPassword;
+  }
   if (process.env.NODE_ENV === 'production') {
-    const generated = crypto.randomBytes(18).toString('base64url');
+    cachedDefaultAdminPassword = crypto.randomBytes(18).toString('base64url');
     console.warn('[SECURITY] No DEFAULT_ADMIN_PASSWORD set — generated a random one-time Super Admin password for this fresh database.');
     console.warn('[SECURITY]   Username: Admin');
-    console.warn(`[SECURITY]   Password: ${generated}`);
+    console.warn(`[SECURITY]   Password: ${cachedDefaultAdminPassword}`);
     console.warn('[SECURITY] Log in now and change it immediately (Admin → Users). This value is shown once and is never stored in plain text.');
-    return generated;
+    return cachedDefaultAdminPassword;
   }
-  return 'Araliya2000';
+  cachedDefaultAdminPassword = 'Araliya2000';
+  return cachedDefaultAdminPassword;
+}
+
+function passwordMatches(password: string, hash: unknown): boolean {
+  if (typeof hash !== 'string' || !hash) return false;
+  try {
+    return bcrypt.compareSync(password, hash);
+  } catch {
+    return false;
+  }
 }
 
 // ==========================================
@@ -1757,25 +1793,42 @@ export class Database {
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
         if (parsed && Array.isArray(parsed.products) && Array.isArray(parsed.users)) {
-          // Clean legacy demo cashiers if they exist
-          parsed.users = parsed.users.filter((u: User) => u.id !== 'user-cashier-1' && u.id !== 'user-cashier-2');
+          // Older databases did not contain every collection in today's schema.
+          // In particular, a missing auditLogs array made db.logAudit() throw
+          // during login, turning otherwise-correct Admin credentials into a 500.
+          if (!Array.isArray(parsed.auditLogs)) parsed.auditLogs = [];
+          if (!Array.isArray(parsed.heldBills)) parsed.heldBills = [];
+          if (!Array.isArray(parsed.kots)) parsed.kots = [];
+          if (!Array.isArray(parsed.bills)) parsed.bills = [];
+          if (!Array.isArray(parsed.stockMovements)) parsed.stockMovements = [];
+          if (!Array.isArray(parsed.companies)) parsed.companies = [];
+          if (!Array.isArray(parsed.categories)) parsed.categories = [];
 
-          // Ensure a usable Super Admin account exists. The stored password hash
-          // is never overwritten; a missing hash is repaired with the (random in
-          // production) first-run password, see resolveDefaultAdminPassword().
-          const adminUserIndex = parsed.users.findIndex((u: User) => u.role === 'super_admin' || u.username.toLowerCase() === 'admin');
+          // Clean legacy demo cashiers if they exist. Ignore malformed/null rows
+          // rather than allowing one old row to crash every login lookup.
+          parsed.users = parsed.users.filter(
+            (u: User | null) => u && u.id !== 'user-cashier-1' && u.id !== 'user-cashier-2'
+          );
+
+          // Ensure a usable Super Admin account exists. A stored password is not
+          // normally overwritten: that would silently undo an Admin's password
+          // change every time the server restarts.
+          const adminUserIndex = parsed.users.findIndex(
+            (u: User) => u.role === 'super_admin' || String(u.username || '').toLowerCase() === 'admin'
+          );
+          let admin: User;
           if (adminUserIndex !== -1) {
-            // Only guarantee that a usable super admin account exists.
-            // The stored password hash is NEVER overwritten here - doing so silently
-            // reverted every password change on the next server restart.
-            const admin = parsed.users[adminUserIndex];
+            admin = parsed.users[adminUserIndex];
             admin.role = 'super_admin';
             admin.isActive = true;
+            if (!admin.id) admin.id = 'user-admin';
             if (!admin.name) admin.name = 'Super Admin';
             if (!admin.username) admin.username = 'Admin';
+            if (!admin.email) admin.email = 'admin@pos.local';
+            if (!admin.createdAt) admin.createdAt = new Date().toISOString();
             if (!admin.passwordHash) admin.passwordHash = bcrypt.hashSync(resolveDefaultAdminPassword(), 10);
           } else {
-            parsed.users.unshift({
+            admin = {
               id: 'user-admin',
               name: 'Super Admin',
               email: 'admin@pos.local',
@@ -1784,7 +1837,58 @@ export class Database {
               passwordHash: bcrypt.hashSync(resolveDefaultAdminPassword(), 10),
               isActive: true,
               createdAt: new Date().toISOString(),
+            };
+            parsed.users.unshift(admin);
+          }
+
+          // Before this release, dotenv was loaded after server/db.ts evaluated.
+          // A password supplied in .env was therefore ignored while an initial
+          // database was seeded. Honour that explicit first-run password once,
+          // but only while the Admin account has NEVER logged in. This repairs
+          // affected installs without resetting established Admin passwords.
+          const hasAdminLoggedIn = Boolean(admin.lastLogin || admin.lastLoginAt) || parsed.auditLogs.some(
+            (log: AuditLog) => log?.action === 'USER_LOGIN' && log?.userId === admin.id
+          );
+          if (
+            CONFIGURED_DEFAULT_ADMIN_PASSWORD &&
+            !hasAdminLoggedIn &&
+            !passwordMatches(CONFIGURED_DEFAULT_ADMIN_PASSWORD, admin.passwordHash)
+          ) {
+            admin.passwordHash = bcrypt.hashSync(CONFIGURED_DEFAULT_ADMIN_PASSWORD, 10);
+            parsed.auditLogs.unshift({
+              id: `audit-${Date.now()}-admin-password-repair`,
+              userId: admin.id,
+              userName: admin.name,
+              userRole: 'super_admin',
+              action: 'INITIAL_ADMIN_PASSWORD_APPLIED',
+              entity: 'AUTH',
+              entityId: admin.id,
+              details: 'Applied DEFAULT_ADMIN_PASSWORD to an initial Admin account that had never logged in.',
+              createdAt: new Date().toISOString(),
             });
+            console.warn('[AUTH] Repaired untouched Admin credentials using DEFAULT_ADMIN_PASSWORD from the environment.');
+          }
+
+          // Emergency recovery for an established/forgotten Admin password.
+          // This is intentionally explicit and never has a default. Remove the
+          // variable immediately after login; while it remains set, a later
+          // restart can apply it again if the password was changed in the UI.
+          if (ADMIN_PASSWORD_RESET && !passwordMatches(ADMIN_PASSWORD_RESET, admin.passwordHash)) {
+            admin.passwordHash = bcrypt.hashSync(ADMIN_PASSWORD_RESET, 10);
+            admin.isActive = true;
+            parsed.auditLogs.unshift({
+              id: `audit-${Date.now()}-admin-password-reset`,
+              userId: admin.id,
+              userName: admin.name,
+              userRole: 'super_admin',
+              action: 'ADMIN_PASSWORD_ENV_RESET',
+              entity: 'AUTH',
+              entityId: admin.id,
+              details: 'Super Admin password reset through the ADMIN_PASSWORD_RESET recovery environment variable.',
+              createdAt: new Date().toISOString(),
+            });
+            console.warn(`[AUTH RECOVERY] Password reset for Super Admin "${admin.username}".`);
+            console.warn('[AUTH RECOVERY] Remove ADMIN_PASSWORD_RESET from the environment now, then restart after signing in.');
           }
 
           // Ensure rooms array exists
@@ -2236,6 +2340,10 @@ export class Database {
 
   // Audit Logging helper
   public logAudit(userId: string, userName: string, userRole: string, action: string, entity: string, entityId?: string, details?: string) {
+    // Defensive fallback for very old/restored databases. loadDatabase() also
+    // migrates this field, but auditing must never be able to break login.
+    if (!Array.isArray(this.data.auditLogs)) this.data.auditLogs = [];
+
     const log: AuditLog = {
       id: `audit-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
       userId,

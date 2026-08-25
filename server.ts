@@ -1,5 +1,9 @@
-import dotenv from 'dotenv';
-dotenv.config();
+// Load .env BEFORE server/db.ts is evaluated. With ESM, calling
+// `dotenv.config()` in this module body is too late: every static dependency is
+// evaluated first, so the database used to miss DEFAULT_ADMIN_PASSWORD,
+// POS_DATA_DIR and NODE_ENV from .env. That could seed Admin with a different
+// password (and even write the database to the wrong directory).
+import 'dotenv/config';
 
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
@@ -481,8 +485,9 @@ app.post('/api/auth/login', authLimiter, async (req: Request, res: Response) => 
 
     if (username) {
       const normalizedUser = username.toLowerCase();
-      user = db.raw.users.find(
-        u => u.username.toLowerCase() === normalizedUser || u.email.toLowerCase() === normalizedUser
+      user = db.raw.users.find(u =>
+        String(u?.username || '').toLowerCase() === normalizedUser ||
+        String(u?.email || '').toLowerCase() === normalizedUser
       );
     } else if (pin) {
       user = db.raw.users.find(u => u.pin === pin);
@@ -507,7 +512,12 @@ app.post('/api/auth/login', authLimiter, async (req: Request, res: Response) => 
 
     let isValid = false;
     if (password && user.passwordHash) {
-      isValid = await bcrypt.compare(password, user.passwordHash);
+      try {
+        isValid = await bcrypt.compare(password, user.passwordHash);
+      } catch {
+        // A malformed legacy hash is an invalid credential, not a server error.
+        isValid = false;
+      }
     } else if (pin && user.pin) {
       // Use timingSafeEqual for PIN as well
       try {
