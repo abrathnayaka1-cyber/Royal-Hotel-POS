@@ -10,7 +10,7 @@ import rateLimit from 'express-rate-limit';
 import { createServer as createViteServer } from 'vite';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
-import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking, StockImport, StockImportRowResult, StockImportType, KitchenIngredient, KitchenStockMovement, KitchenRecipe, KitchenRecipeItem, KitchenWastageRecord, KitchenPhysicalCount, KitchenAdjustmentRequest, KITCHEN_WASTAGE_CATEGORIES, KitchenWastageCategory } from './server/db.ts';
+import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking, StockImport, StockImportRowResult, StockImportType, KitchenIngredient, KitchenStockMovement, KitchenRecipe, KitchenRecipeItem, KitchenWastageRecord, KitchenPhysicalCount, KitchenAdjustmentRequest, KITCHEN_WASTAGE_CATEGORIES, KitchenWastageCategory, KitchenDeductionSnapshot } from './server/db.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -311,7 +311,7 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    version: '1.1.0',
+    version: '1.1.2',
     uptime: process.uptime(),
   });
 });
@@ -568,6 +568,31 @@ app.patch('/api/users/:id/toggle', authMiddleware, requireRole('super_admin'), (
 
   const { passwordHash, ...safeUser } = user;
   res.json(safeUser);
+});
+
+app.delete('/api/users/:id', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
+  const currentUser = (req as any).user as User;
+  const index = db.raw.users.findIndex(u => u.id === req.params.id);
+  if (index === -1) return res.status(404).json({ error: 'User not found.' });
+
+  const user = db.raw.users[index];
+
+  if (user.id === currentUser.id) {
+    return res.status(400).json({ error: 'You cannot delete your own account.' });
+  }
+  if (user.role === 'super_admin') {
+    const otherAdmins = db.raw.users.filter(u => u.role === 'super_admin' && u.isActive && u.id !== user.id);
+    if (otherAdmins.length === 0) {
+      return res.status(400).json({ error: 'Cannot delete the last active Super Admin account.' });
+    }
+  }
+
+  db.raw.users.splice(index, 1);
+  db.save();
+
+  db.logAudit(currentUser.id, currentUser.name, currentUser.role, 'DELETE_USER', 'USER', user.id, `Deleted user account: ${user.username} (${user.name}, ${user.role})`);
+
+  res.json({ success: true, message: `User ${user.username} deleted successfully.` });
 });
 
 // ==========================================
@@ -1298,7 +1323,12 @@ function sanitizeOrderItems(rawItems: unknown): { items: OrderItem[]; error?: st
     }
 
     const unitPrice = Math.max(0, Number(found.variant.sellingPrice) || 0);
-    const lineDiscount = Math.max(0, Math.min(unitPrice * quantity, Number(raw.discount) || 0));
+    // Item-level discounts sent by the client are intentionally ignored: the
+    // pricing model only applies a single bill-level discount (clamped by
+    // maxDiscountPercentage) on the server. Accepting raw.discount here used
+    // to store line totals that summed to LESS than the bill's subtotal even
+    // though the customer was charged the full amount.
+    const lineDiscount = 0;
     const lineTotal = Number((unitPrice * quantity - lineDiscount).toFixed(2));
 
     items.push({
@@ -2850,11 +2880,46 @@ function deductKitchenIngredientsForSale(
   }
 }
 
-/** Restores recipe ingredients back to the kitchen store when a bill is voided. */
+/**
+ * Restores recipe ingredients back to the kitchen store when a bill is voided.
+ *
+ * Uses the EXACT deduction snapshot stored on the bill at sale time, so a void
+ * returns precisely what the sale took — even if the recipe was edited,
+ * archived or replaced after the sale. Without the snapshot (legacy bills
+ * created before the snapshot existed) it falls back to recomputing from the
+ * current recipe.
+ */
 function restoreKitchenIngredientsForVoid(
   bill: Bill,
   user: User
 ): void {
+  if (Array.isArray(bill.kitchenDeductions) && bill.kitchenDeductions.length > 0) {
+    for (const line of bill.kitchenDeductions) {
+      // Look up regardless of isActive: deactivated ingredients must still
+      // get their stock back.
+      const ing = db.raw.kitchenIngredients.find(i => i.id === line.ingredientId);
+      if (!ing) continue;
+      const rounded = Number(Number(line.quantity).toFixed(3));
+      if (!Number.isFinite(rounded) || rounded <= 0) continue;
+      const before = ing.currentStock;
+      ing.currentStock = Number((ing.currentStock + rounded).toFixed(3));
+      ing.updatedAt = new Date().toISOString();
+      db.recordKitchenMovement(
+        ing,
+        rounded,
+        before,
+        ing.currentStock,
+        'adjustment',
+        user.id,
+        user.name,
+        `Bill void reversal: ingredients returned for ${bill.billNumber}`,
+        bill.billNumber
+      );
+    }
+    return;
+  }
+
+  // Legacy fallback: recompute from the current recipe (best effort).
   const requirements = aggregateIngredientRequirements(
     bill.items.map(i => ({ variantId: i.variantId, quantity: i.quantity }))
   );
@@ -3048,8 +3113,25 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
   // 3) Auto-deduct recipe ingredients from the kitchen store (Food & Kitchen
   //    module). Runs only when recipe-linked items were sold; every deduction
   //    gets a kitchen movement ledger record. Cashier never enters ingredients.
+  //    The exact deductions are snapshotted on the bill so a later void can
+  //    restore precisely what was deducted, even if the recipe was edited or
+  //    archived in the meantime.
+  let kitchenDeductions: KitchenDeductionSnapshot[] | undefined;
   if (kitchenRequirements) {
     deductKitchenIngredientsForSale(kitchenRequirements, user, billNumber, billId);
+    kitchenDeductions = [];
+    for (const [ing, qty] of kitchenRequirements) {
+      const rounded = Number(qty.toFixed(3));
+      if (rounded > 0) {
+        kitchenDeductions.push({
+          ingredientId: ing.id,
+          ingredientName: ing.name,
+          unit: ing.unit,
+          quantity: rounded,
+        });
+      }
+    }
+    if (kitchenDeductions.length === 0) kitchenDeductions = undefined;
   }
 
   const snapshotItems: OrderItem[] = safeItems;
@@ -3071,6 +3153,7 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
     tax: totals.tax,
     taxRate: totals.taxRate,
     serviceCharge: totals.serviceCharge,
+    serviceChargeRate: totals.serviceChargeRate,
     grandTotal: numGrandTotal,
     amountReceived: numReceived,
     changeAmount: Number(Math.max(0, numReceived - numGrandTotal).toFixed(2)),
@@ -3078,6 +3161,7 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
     paymentDetails: paymentDetails || undefined,
     status: 'paid',
     notes: notes ? String(notes).slice(0, 1000) : undefined,
+    kitchenDeductions,
     createdAt: new Date().toISOString(),
     paidAt: new Date().toISOString()
   };
@@ -4134,6 +4218,29 @@ app.get('/api/kitchen/dashboard', authMiddleware, requireKitchenPermission('KITC
     .filter(l => String(l.action || '').startsWith('KITCHEN_'))
     .slice(0, 10);
 
+  // Food & Kitchen menu variants WITHOUT a recipe: selling them does NOT deduct
+  // any materials from the kitchen store. Surface them so the Kitchen Manager
+  // can add recipes (otherwise daily food cost stays understated).
+  const menuItemsWithoutRecipe: { productId: string; productName: string; variantId: string; variantSize: string; sellingPrice: number }[] = [];
+  for (const p of db.raw.products) {
+    if (p.isArchived || !p.isActive) continue;
+    const cat = db.raw.categories.find(c => c.id === p.categoryId);
+    const isFood = p.isKitchenItem || (cat && cat.type === 'restaurant');
+    if (!isFood) continue;
+    for (const v of p.variants) {
+      if (!v.isActive || v.isShot) continue;
+      if (!findRecipeForVariant(v.id)) {
+        menuItemsWithoutRecipe.push({
+          productId: p.id,
+          productName: p.name,
+          variantId: v.id,
+          variantSize: v.size,
+          sellingPrice: v.sellingPrice,
+        });
+      }
+    }
+  }
+
   res.json({
     todayFoodSales,
     todayFoodCost,
@@ -4151,6 +4258,7 @@ app.get('/api/kitchen/dashboard', authMiddleware, requireKitchenPermission('KITC
     activeRecipeCount: db.raw.kitchenRecipes.filter(r => r.isActive).length,
     recentMovements,
     recentActivity,
+    menuItemsWithoutRecipe,
   });
 });
 
@@ -4222,6 +4330,24 @@ app.put('/api/kitchen/ingredients/:id', authMiddleware, requireKitchenPermission
 
   db.logAudit(user.id, user.name, user.role, 'KITCHEN_INGREDIENT_UPDATED', 'KITCHEN', ing.id, `Updated ingredient ${ing.name}. Before: ${JSON.stringify(before)} → After: ${JSON.stringify({ name: ing.name, unit: ing.unit, minStockLevel: ing.minStockLevel, costPerUnit: ing.costPerUnit })}`);
   res.json(ing);
+});
+
+app.delete('/api/kitchen/ingredients/:id', authMiddleware, requireKitchenPermission('KITCHEN_INGREDIENT_EDIT'), (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const ing = db.raw.kitchenIngredients.find(i => i.id === req.params.id);
+  if (!ing) return res.status(404).json({ error: 'Kitchen ingredient not found.' });
+
+  // Archive instead of hard-delete: the movement ledger, recipes and any
+  // bills that referenced this ingredient keep working (restore-on-void still
+  // finds it by id). Archived ingredients disappear from counts/reports.
+  if (ing.isActive === false) {
+    return res.status(400).json({ error: 'Ingredient is already archived.' });
+  }
+  ing.isActive = false;
+  ing.updatedAt = new Date().toISOString();
+  db.save();
+  db.logAudit(user.id, user.name, user.role, 'KITCHEN_INGREDIENT_ARCHIVED', 'KITCHEN', ing.id, `Archived kitchen ingredient ${ing.name} (${ing.unit}). Ledger history preserved.`);
+  res.json({ success: true, message: `Ingredient ${ing.name} archived. Movement history preserved.`, ingredient: ing });
 });
 
 /** ---- Kitchen Stock & Movements ---- */
@@ -4382,8 +4508,93 @@ app.get('/api/kitchen/recipes', authMiddleware, requireKitchenPermission('KITCHE
     .map(r => ({
       ...r,
       recipeCostPerServing: computeRecipeCostPerServing(r),
+      stockImpact: computeRecipeStockImpact(r),
     }));
   res.json(list);
+});
+
+/**
+ * Live stock impact of a recipe: per-ingredient deduction for ONE portion
+ * (line.quantity ÷ servings) and whether the kitchen store currently has
+ * enough material to sell one portion or the whole batch.
+ */
+function computeRecipeStockImpact(recipe: KitchenRecipe): {
+  ingredientId: string;
+  ingredientName: string;
+  unit: string;
+  perPortion: number;
+  batchQuantity: number;
+  availableStock: number;
+  remainingAfterOne: number;
+  sufficientForOne: boolean;
+  sufficientForBatch: boolean;
+}[] {
+  const servings = recipe.servings > 0 ? recipe.servings : 1;
+  return recipe.items.map(line => {
+    const ing = db.raw.kitchenIngredients.find(i => i.id === line.ingredientId);
+    const perPortion = Number((line.quantity / servings).toFixed(3));
+    const availableStock = ing ? Number(ing.currentStock) : 0;
+    return {
+      ingredientId: line.ingredientId,
+      ingredientName: line.ingredientName,
+      unit: line.unit,
+      perPortion,
+      batchQuantity: Number(line.quantity.toFixed(3)),
+      availableStock,
+      remainingAfterOne: Number((availableStock - perPortion).toFixed(3)),
+      sufficientForOne: availableStock + 0.001 >= perPortion,
+      sufficientForBatch: availableStock + 0.001 >= line.quantity,
+    };
+  });
+}
+
+/**
+ * VERIFY endpoint — "1000% check": given a recipe and a number of portions,
+ * returns exactly what would be deducted from each material and whether the
+ * kitchen store has enough stock. Used by the recipe editor's Stock Check.
+ */
+app.get('/api/kitchen/recipes/:id/impact', authMiddleware, requireKitchenPermission('KITCHEN_RECIPE_VIEW'), (req: Request, res: Response) => {
+  const recipe = db.raw.kitchenRecipes.find(r => r.id === req.params.id);
+  if (!recipe) return res.status(404).json({ error: 'Recipe not found.' });
+
+  const rawPortions = Number(req.query.portions);
+  const portions = Number.isFinite(rawPortions) && rawPortions >= 1 && rawPortions <= 100000 ? Math.floor(rawPortions) : 1;
+
+  const servings = recipe.servings > 0 ? recipe.servings : 1;
+  const items = recipe.items.map(line => {
+    const ing = db.raw.kitchenIngredients.find(i => i.id === line.ingredientId);
+    const perPortion = Number((line.quantity / servings).toFixed(3));
+    const needed = Number((perPortion * portions).toFixed(3));
+    const availableStock = ing ? Number(ing.currentStock) : 0;
+    const shortBy = Number(Math.max(0, needed - availableStock).toFixed(3));
+    return {
+      ingredientId: line.ingredientId,
+      ingredientName: line.ingredientName,
+      unit: line.unit,
+      perPortion,
+      neededForPortions: needed,
+      availableStock,
+      remainingAfter: Number((availableStock - needed).toFixed(3)),
+      sufficient: availableStock + 0.001 >= needed,
+      shortBy,
+      costValue: Number((needed * (ing ? ing.costPerUnit : 0)).toFixed(2)),
+    };
+  });
+
+  const shortages = items.filter(i => !i.sufficient);
+  const totalCost = Number(items.reduce((s, i) => s + i.costValue, 0).toFixed(2));
+
+  res.json({
+    recipeId: recipe.id,
+    productName: recipe.productName,
+    variantSize: recipe.variantSize,
+    servings,
+    portions,
+    items,
+    allSufficient: shortages.length === 0,
+    shortages: shortages.map(s => ({ ingredientName: s.ingredientName, unit: s.unit, shortBy: s.shortBy })),
+    totalCostForPortions: totalCost,
+  });
 });
 
 app.post('/api/kitchen/recipes', authMiddleware, requireKitchenPermission('KITCHEN_RECIPE_CREATE'), (req: Request, res: Response) => {

@@ -204,6 +204,7 @@ export interface Bill {
   tax: number;
   taxRate?: number;
   serviceCharge?: number;
+  serviceChargeRate?: number;
   grandTotal: number;
   amountReceived: number;
   changeAmount: number;
@@ -211,6 +212,8 @@ export interface Bill {
   paymentDetails?: any;
   status: BillStatus;
   notes?: string;
+  /** Kitchen ingredient deductions made for this bill (snapshot at sale time). */
+  kitchenDeductions?: { ingredientId: string; ingredientName: string; unit: string; quantity: number }[];
   createdAt: string;
   paidAt?: string;
 }
@@ -417,6 +420,41 @@ export interface KitchenRecipeVersion {
   savedByName: string;
 }
 
+export interface KitchenRecipeStockImpactLine {
+  ingredientId: string;
+  ingredientName: string;
+  unit: string;
+  perPortion: number;
+  batchQuantity: number;
+  availableStock: number;
+  remainingAfterOne: number;
+  sufficientForOne: boolean;
+  sufficientForBatch: boolean;
+}
+
+export interface KitchenRecipeImpactResponse {
+  recipeId: string;
+  productName: string;
+  variantSize: string;
+  servings: number;
+  portions: number;
+  items: {
+    ingredientId: string;
+    ingredientName: string;
+    unit: string;
+    perPortion: number;
+    neededForPortions: number;
+    availableStock: number;
+    remainingAfter: number;
+    sufficient: boolean;
+    shortBy: number;
+    costValue: number;
+  }[];
+  allSufficient: boolean;
+  shortages: { ingredientName: string; unit: string; shortBy: number }[];
+  totalCostForPortions: number;
+}
+
 export interface KitchenRecipe {
   id: string;
   productId: string;
@@ -434,6 +472,8 @@ export interface KitchenRecipe {
   updatedAt: string;
   /** Derived on GET */
   recipeCostPerServing?: number;
+  /** Derived on GET — per-ingredient stock impact for one portion */
+  stockImpact?: KitchenRecipeStockImpactLine[];
 }
 
 export const KITCHEN_WASTAGE_CATEGORIES = [
@@ -530,6 +570,8 @@ export interface KitchenDashboardData {
   activeRecipeCount: number;
   recentMovements: KitchenStockMovement[];
   recentActivity: AuditLog[];
+  /** Food & Kitchen menu variants that have NO recipe — materials stock is NOT deducted when they sell. */
+  menuItemsWithoutRecipe: { productId: string; productName: string; variantId: string; variantSize: string; sellingPrice: number }[];
 }
 
 export interface KitchenMenuItem {

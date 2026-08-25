@@ -155,6 +155,7 @@ export interface Bill {
   tax: number;
   taxRate?: number;
   serviceCharge?: number;
+  serviceChargeRate?: number;
   grandTotal: number;
   amountReceived: number;
   changeAmount: number;
@@ -162,8 +163,23 @@ export interface Bill {
   paymentDetails?: any;
   status: 'paid' | 'held' | 'cancelled' | 'voided';
   notes?: string;
+  /** Kitchen ingredient deductions made for this bill (snapshot at sale time). */
+  kitchenDeductions?: KitchenDeductionSnapshot[];
   createdAt: string;
   paidAt?: string;
+}
+
+/**
+ * Snapshot of kitchen-ingredient deductions made for a bill at sale time.
+ * Stored on the Bill so a void restores EXACTLY what was deducted, even if
+ * the recipe was edited, archived or replaced after the sale.
+ */
+export interface KitchenDeductionSnapshot {
+  ingredientId: string;
+  ingredientName: string;
+  unit: string;
+  /** Total quantity deducted for this bill (positive number). */
+  quantity: number;
 }
 
 export interface StockMovement {

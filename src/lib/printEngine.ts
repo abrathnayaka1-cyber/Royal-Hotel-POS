@@ -319,7 +319,7 @@ export async function printThermalReceipt(bill: Bill, settings: SystemSettings |
         <!-- Financial Summary Breakdown -->
         <table class="summary-table">
           <tr>
-            <td style="width: 60%;">Service Charge</td>
+            <td style="width: 60%;">Service Charge${bill.serviceChargeRate ? ` (${bill.serviceChargeRate}%)` : ''}</td>
             <td style="width: 40%;" class="text-right">${Number(bill.serviceCharge || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
           </tr>
           <tr>

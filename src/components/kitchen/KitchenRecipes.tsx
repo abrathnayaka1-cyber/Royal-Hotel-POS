@@ -9,6 +9,7 @@ import {
   Archive,
   ArchiveRestore,
   AlertCircle,
+  AlertTriangle,
   RefreshCw,
   CheckCircle2,
   X,
@@ -38,6 +39,7 @@ export const KitchenRecipes: React.FC = () => {
   const [formServings, setFormServings] = useState<string>('1');
   const [formLines, setFormLines] = useState<KitchenRecipeItem[]>([]);
   const [historyRecipe, setHistoryRecipe] = useState<KitchenRecipe | null>(null);
+  const [checkPortions, setCheckPortions] = useState<string>('1');
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -103,6 +105,35 @@ export const KitchenRecipes: React.FC = () => {
       const ing = ingredients.find(i => i.id === line.ingredientId);
       return sum + (line.quantity / servings) * (ing ? ing.costPerUnit : 0);
     }, 0);
+  };
+
+  /** Live stock-impact check for the CURRENT form contents (create & edit). */
+  const stockCheck = () => {
+    const servings = Number(formServings) > 0 ? Number(formServings) : 1;
+    const portions = Math.max(1, Math.floor(Number(checkPortions) || 1));
+    const lines = formLines.map(line => {
+      const ing = ingredients.find(i => i.id === line.ingredientId);
+      const perPortion = servings > 0 ? Number((line.quantity / servings).toFixed(3)) : line.quantity;
+      const needed = Number((perPortion * portions).toFixed(3));
+      const available = ing ? Number(ing.currentStock) : 0;
+      return {
+        name: line.ingredientName || ing?.name || '?',
+        unit: ing?.unit || line.unit,
+        perPortion,
+        needed,
+        available,
+        shortBy: Number(Math.max(0, needed - available).toFixed(3)),
+        sufficient: available + 0.001 >= needed,
+        costValue: Number((needed * (ing ? ing.costPerUnit : 0)).toFixed(2)),
+      };
+    });
+    return {
+      portions,
+      lines,
+      allSufficient: lines.every(l => l.sufficient),
+      shortages: lines.filter(l => !l.sufficient),
+      totalCost: Number(lines.reduce((s, l) => s + l.costValue, 0).toFixed(2)),
+    };
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -279,14 +310,26 @@ export const KitchenRecipes: React.FC = () => {
             </div>
             <div className="p-4">
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1.5">
-                {r.items.map(item => (
-                  <div key={item.ingredientId} className="flex items-center justify-between text-[11px] border-b border-dashed border-slate-100 dark:border-slate-800 pb-1">
-                    <span className="text-slate-600 dark:text-slate-300 truncate pr-2">{item.ingredientName}</span>
-                    <span className="font-mono font-bold text-slate-800 dark:text-slate-100 whitespace-nowrap">
-                      {(item.quantity / (r.servings > 0 ? r.servings : 1)).toLocaleString()} {item.unit}
-                    </span>
-                  </div>
-                ))}
+                {r.items.map(item => {
+                  const imp = r.stockImpact?.find(si => si.ingredientId === item.ingredientId);
+                  const perPortion = r.servings > 0 ? Number((item.quantity / r.servings).toFixed(3)) : item.quantity;
+                  return (
+                    <div key={item.ingredientId} className="border-b border-dashed border-slate-100 dark:border-slate-800 pb-1">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="text-slate-600 dark:text-slate-300 truncate pr-2">{item.ingredientName}</span>
+                        <span className="font-mono font-bold text-slate-800 dark:text-slate-100 whitespace-nowrap">
+                          −{perPortion.toLocaleString()} {item.unit}
+                        </span>
+                      </div>
+                      {imp && (
+                        <div className={`flex items-center justify-between text-[10px] mt-0.5 font-semibold ${imp.sufficientForOne ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                          <span>Stock {Number(imp.availableStock).toLocaleString()}{imp.unit}</span>
+                          <span>→ {Number(imp.remainingAfterOne).toLocaleString()}{imp.unit}</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -382,35 +425,54 @@ export const KitchenRecipes: React.FC = () => {
                   )}
                   {formLines.map((line, idx) => {
                     const ing = ingredients.find(i => i.id === line.ingredientId);
+                    const servings = Number(formServings) > 0 ? Number(formServings) : 1;
+                    const perPortion = servings > 0 && line.quantity > 0 ? Number((line.quantity / servings).toFixed(3)) : 0;
+                    const available = ing ? Number(ing.currentStock) : 0;
+                    const remaining = Number((available - perPortion).toFixed(3));
+                    const okOne = available + 0.001 >= perPortion;
                     return (
-                      <div key={idx} className="flex items-center gap-2">
-                        <select
-                          value={line.ingredientId}
-                          onChange={e => {
-                            const newIng = ingredients.find(i => i.id === e.target.value);
-                            updateLine(idx, newIng ? { ingredientId: newIng.id, ingredientName: newIng.name, unit: newIng.unit } : {});
-                          }}
-                          className="flex-1 text-xs font-semibold px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl cursor-pointer"
-                        >
-                          {ingredients.map(i => <option key={i.id} value={i.id}>{i.name} ({i.unit})</option>)}
-                        </select>
-                        <input
-                          type="number"
-                          step="0.001"
-                          min="0"
-                          placeholder="Qty"
-                          value={line.quantity || ''}
-                          onChange={e => updateLine(idx, { quantity: Number(e.target.value) })}
-                          className="w-24 text-xs font-semibold px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl font-mono"
-                        />
-                        <span className="text-[11px] font-bold text-slate-500 w-8">{ing?.unit || line.unit}</span>
-                        <button
-                          type="button"
-                          onClick={() => removeLine(idx)}
-                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                      <div key={idx} className="border border-slate-100 dark:border-slate-800 rounded-xl p-2">
+                        <div className="flex items-center gap-2">
+                          <select
+                            value={line.ingredientId}
+                            onChange={e => {
+                              const newIng = ingredients.find(i => i.id === e.target.value);
+                              updateLine(idx, newIng ? { ingredientId: newIng.id, ingredientName: newIng.name, unit: newIng.unit } : {});
+                            }}
+                            className="flex-1 text-xs font-semibold px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl cursor-pointer"
+                          >
+                            {ingredients.map(i => <option key={i.id} value={i.id}>{i.name} ({i.unit})</option>)}
+                          </select>
+                          <input
+                            type="number"
+                            step="0.001"
+                            min="0"
+                            placeholder="Qty"
+                            value={line.quantity || ''}
+                            onChange={e => updateLine(idx, { quantity: Number(e.target.value) })}
+                            className="w-24 text-xs font-semibold px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl font-mono"
+                          />
+                          <span className="text-[11px] font-bold text-slate-500 w-8">{ing?.unit || line.unit}</span>
+                          <button
+                            type="button"
+                            onClick={() => removeLine(idx)}
+                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        {ing && perPortion > 0 && (
+                          <div className={`flex items-center justify-between text-[10px] mt-1.5 px-1 font-semibold ${okOne ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                            <span>1 portion deducts: <b>−{perPortion.toLocaleString()} {ing.unit}</b></span>
+                            <span>Stock: {available.toLocaleString()} → {remaining.toLocaleString()} {ing.unit}</span>
+                          </div>
+                        )}
+                        {ing && perPortion > 0 && !okOne && (
+                          <div className="text-[10px] text-rose-600 dark:text-rose-400 mt-0.5 px-1 font-bold flex items-center gap-1">
+                            <AlertTriangle className="w-3 h-3" />
+                            Not enough {ing.name} in stock for 1 portion (short {Number((perPortion - available).toFixed(3)).toLocaleString()} {ing.unit})
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -422,6 +484,53 @@ export const KitchenRecipes: React.FC = () => {
                   </p>
                 )}
               </div>
+
+              {/* Live Stock Check — "1000% check" before saving the recipe */}
+              {formLines.length > 0 && (() => {
+                const check = stockCheck();
+                return (
+                  <div className={`p-3 rounded-xl border ${check.allSufficient ? 'border-emerald-200 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-950/30' : 'border-rose-200 dark:border-rose-800 bg-rose-50/60 dark:bg-rose-950/30'}`}>
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <label className="text-xs font-black uppercase tracking-wider text-slate-600 dark:text-slate-300">
+                        Stock Check — Portions:
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={checkPortions}
+                        onChange={e => setCheckPortions(e.target.value)}
+                        className="w-28 text-xs font-bold px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg font-mono"
+                      />
+                    </div>
+                    <div className="mt-2 space-y-1">
+                      {check.lines.map((l, i) => (
+                        <div key={i} className={`flex items-center justify-between text-[11px] px-2 py-1 rounded-lg ${l.sufficient ? 'bg-white/70 dark:bg-slate-900/40' : 'bg-rose-100/70 dark:bg-rose-950/40'}`}>
+                          <span className="font-bold text-slate-700 dark:text-slate-200 truncate pr-2">{l.name}</span>
+                          <span className="font-mono whitespace-nowrap">
+                            need <b>{l.needed.toLocaleString()}{l.unit}</b>
+                            <span className="text-slate-400"> / stock </span>
+                            <b>{l.available.toLocaleString()}{l.unit}</b>
+                            {l.sufficient
+                              ? <span className="text-emerald-600 dark:text-emerald-400 font-black"> ✓</span>
+                              : <span className="text-rose-600 dark:text-rose-400 font-black"> ✗ short {l.shortBy.toLocaleString()}{l.unit}</span>}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-2 flex items-center justify-between text-[11px] font-bold">
+                      <span className={check.allSufficient ? 'text-emerald-700 dark:text-emerald-300' : 'text-rose-700 dark:text-rose-300'}>
+                        {check.allSufficient
+                          ? `✓ ${check.portions} portion(s) can be sold — all materials available`
+                          : `✗ ${check.portions} portion(s) CANNOT be sold — ${check.shortages.length} material(s) short`}
+                      </span>
+                      <span className="text-slate-600 dark:text-slate-300">
+                        Cost for {check.portions}: {currencySymbol} {check.totalCost.toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
                 <button
