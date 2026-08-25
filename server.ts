@@ -3,17 +3,41 @@ dotenv.config();
 
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
+import fs from 'fs';
 import crypto from 'crypto';
+import compression from 'compression';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { createServer as createViteServer } from 'vite';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
+import { APP_ROOT, DIST_DIR } from './server/paths.ts';
 import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking, StockImport, StockImportRowResult, StockImportType, KitchenIngredient, KitchenStockMovement, KitchenRecipe, KitchenRecipeItem, KitchenWastageRecord, KitchenPhysicalCount, KitchenAdjustmentRequest, KITCHEN_WASTAGE_CATEGORIES, KitchenWastageCategory, KitchenDeductionSnapshot } from './server/db.ts';
 
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+
+// Port must be a valid TCP port; a typo like PORT=abc previously fell back to
+// 3000 silently and a proxy expecting another port just saw connection refused.
+const RAW_PORT = process.env.PORT?.trim();
+const PORT = (() => {
+  if (!RAW_PORT) return 3000;
+  const parsed = Number(RAW_PORT);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    console.error(`[FATAL] Invalid PORT value: "${RAW_PORT}". Must be an integer 1-65535.`);
+    process.exit(1);
+  }
+  return parsed;
+})();
+
+/** Single source of truth for the version, read from package.json. */
+const APP_VERSION: string = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(APP_ROOT, 'package.json'), 'utf-8')).version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
 
 // === Security & Middleware ===
 app.set('trust proxy', 1); // For rate limiting behind proxy
@@ -31,6 +55,10 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID'],
 }));
+
+// Gzip responses. The main JS bundle is ~1.6 MB uncompressed vs ~457 kB gzipped
+// — a large difference on the tablets/phones a POS floor runs on.
+app.use(compression());
 
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
@@ -55,15 +83,52 @@ const authLimiter = rateLimit({
 });
 
 // === Session & Token Management ===
-const SESSION_SECRET = process.env.SESSION_SECRET || (() => {
-  const generated = crypto.randomBytes(64).toString('hex');
-  console.warn('[SECURITY] SESSION_SECRET not set in env, using generated ephemeral secret. Set SESSION_SECRET in .env for persistent sessions across restarts!');
-  return generated;
-})();
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
-if (!process.env.SESSION_SECRET) {
-  console.warn('[SECURITY] For production, set a strong SESSION_SECRET in your .env file (64+ characters)');
+/**
+ * Session secret resolution.
+ *
+ * In production an absent or placeholder secret is a hard failure rather than
+ * a warning. Previously the server booted with a random ephemeral secret,
+ * which silently signed every cashier out on each restart/redeploy (mid-shift,
+ * mid-sale) and made tokens unverifiable across a PM2 cluster. Worse, shipping
+ * the .env.example placeholder unchanged left a publicly-known signing key that
+ * lets anyone forge a super-admin token.
+ */
+const PLACEHOLDER_SECRETS = new Set([
+  'change_this_to_a_very_long_random_secret_key_at_least_64_characters!',
+  'changeme',
+  'secret',
+]);
+
+function resolveSessionSecret(): string {
+  const provided = process.env.SESSION_SECRET?.trim();
+
+  if (IS_PRODUCTION) {
+    const problems: string[] = [];
+    if (!provided) problems.push('SESSION_SECRET is not set.');
+    else {
+      if (PLACEHOLDER_SECRETS.has(provided)) problems.push('SESSION_SECRET is still the example placeholder value.');
+      if (provided.length < 32) problems.push(`SESSION_SECRET is too short (${provided.length} chars, need 32+).`);
+    }
+
+    if (problems.length > 0) {
+      console.error('[SECURITY][FATAL] Refusing to start in production:');
+      problems.forEach(p => console.error(`  - ${p}`));
+      console.error('  Generate one with:  node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'hex\'))"');
+      console.error('  Then set it in your .env file as SESSION_SECRET=<value>');
+      process.exit(1);
+    }
+    return provided!;
+  }
+
+  if (provided) return provided;
+  console.warn('[SECURITY] SESSION_SECRET not set — using an ephemeral development secret.');
+  console.warn('[SECURITY] Logins will not survive a restart. Set SESSION_SECRET in .env.');
+  return crypto.randomBytes(64).toString('hex');
 }
+
+const SESSION_SECRET = resolveSessionSecret();
 
 // Revoked tokens with TTL auto-cleanup
 const revokedTokens = new Map<string, number>(); // token -> expiresAt
@@ -308,11 +373,21 @@ function getClientIp(req: Request): string {
 // HEALTH CHECK
 // ==========================================
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  // Report the REAL state: a health check that always says "ok" is worse than
+  // none, because a load balancer keeps routing sales to a node that can no
+  // longer write them to disk.
+  const persistError = db.getLastPersistError();
+  const healthy = !persistError;
+
+  res.status(healthy ? 200 : 503).json({
+    status: healthy ? 'ok' : 'degraded',
     timestamp: new Date().toISOString(),
-    version: '1.1.2',
+    version: APP_VERSION,
     uptime: process.uptime(),
+    database: {
+      writable: healthy,
+      ...(persistError ? { lastError: persistError.message } : {}),
+    },
   });
 });
 
@@ -5253,7 +5328,10 @@ app.post('/api/database/restore', authMiddleware, requireRole('super_admin'), (r
       message: 'Database successfully restored! All items, stock counts, bills, and history are preserved.'
     });
   } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Failed to restore database.' });
+    // A rejected/invalid upload is the caller's fault (400), not a server
+    // fault (500) — the UI shows the reason so the admin can pick a good file.
+    console.error('[RESTORE] Upload restore failed:', err);
+    res.status(400).json({ error: err.message || 'Failed to restore database.' });
   }
 });
 
@@ -5279,7 +5357,8 @@ app.post('/api/database/restore-file', authMiddleware, requireRole('super_admin'
       message: `Database successfully restored from snapshot ${filename}!`
     });
   } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Failed to restore snapshot.' });
+    console.error('[RESTORE] Snapshot restore failed:', err);
+    res.status(400).json({ error: err.message || 'Failed to restore snapshot.' });
   }
 });
 
@@ -5370,32 +5449,157 @@ async function start() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
+    // Resolved from the module location, NOT process.cwd(): PM2/systemd/cPanel
+    // often start the app from a different working directory, which used to
+    // make every page return 500 (ENOENT on dist/index.html).
+    const distPath = DIST_DIR;
+    const indexHtml = path.join(distPath, 'index.html');
+
+    if (!fs.existsSync(indexHtml)) {
+      throw new Error(
+        `Frontend build not found at ${indexHtml}. Run "npm run build" before "npm start".`
+      );
+    }
+
+    // Hashed asset filenames → cache hard. index.html → never cache, so a
+    // redeploy is picked up immediately instead of serving a stale shell that
+    // references deleted JS bundles.
+    app.use(express.static(distPath, {
+      index: false,
+      etag: true,
+      maxAge: '1y',
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('index.html')) {
+          res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+        } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+      },
+    }));
+
+    app.get('*', (req, res, next) => {
       // Don't interfere with API routes
       if (req.path.startsWith('/api/')) {
         return res.status(404).json({ error: 'API endpoint not found' });
       }
-      res.sendFile(path.join(distPath, 'index.html'));
+      res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+      res.sendFile(indexHtml, err => {
+        if (err) next(err);
+      });
     });
   }
 
   // Global error handler - MUST be registered last, after every route/middleware,
   // otherwise Express never routes errors to it.
   app.use((err: any, req: Request, res: Response, next: NextFunction) => {
-    console.error('[ERROR]', err);
+    // Correlate the log line with what the user sees, so a cashier can read an
+    // ID off the screen and support can find the exact stack trace.
+    const errorId = crypto.randomBytes(6).toString('hex');
+    console.error(`[ERROR][${errorId}] ${req.method} ${req.originalUrl}`, err);
+
     if (res.headersSent) return next(err);
-    res.status(500).json({ error: 'Internal server error. Please try again.' });
+
+    // Malformed JSON bodies are a client mistake (400), not a server fault.
+    if (err?.type === 'entity.parse.failed' || err instanceof SyntaxError && 'body' in err) {
+      return res.status(400).json({ error: 'Malformed JSON in request body.', errorId });
+    }
+    if (err?.type === 'entity.too.large') {
+      return res.status(413).json({ error: 'Request payload too large.', errorId });
+    }
+
+    res.status(500).json({
+      error: 'Internal server error. Please try again.',
+      errorId,
+      // Never leak internals in production; invaluable while developing.
+      ...(IS_PRODUCTION ? {} : { message: err?.message, stack: err?.stack }),
+    });
   });
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Royal Hotel POS] Running on http://0.0.0.0:${PORT}`);
     console.log(`[ENV] NODE_ENV=${process.env.NODE_ENV || 'development'}`);
     console.log(`[SECURITY] Helmet enabled, Rate limiting active`);
     if (!process.env.SESSION_SECRET) {
       console.warn(`[SECURITY] Using ephemeral SESSION_SECRET - set in .env for production!`);
     }
+  });
+
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`[FATAL] Port ${PORT} is already in use. Stop the other process or set PORT.`);
+    } else {
+      console.error('[FATAL] HTTP server error:', err);
+    }
+    process.exit(1);
+  });
+
+  // Keep-alive slightly above typical proxy timeouts to avoid 502s from races
+  // where the proxy reuses a socket the server is simultaneously closing.
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 66_000;
+
+  // ==========================================
+  // GRACEFUL SHUTDOWN
+  // ------------------------------------------
+  // A POS gets restarted constantly (redeploys, PM2 reloads, nightly reboots).
+  // Without this, an in-flight checkout was cut off mid-request and any state
+  // not yet flushed to disk was lost. Now: stop accepting connections, let
+  // in-flight requests finish, force one final synchronous DB flush.
+  // ==========================================
+  let shuttingDown = false;
+  const shutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[SHUTDOWN] ${signal} received — closing server gracefully...`);
+
+    const forceExit = setTimeout(() => {
+      console.error('[SHUTDOWN] Timed out after 15s — forcing exit.');
+      try { db.flush(); } catch {}
+      process.exit(1);
+    }, 15_000);
+    forceExit.unref();
+
+    // Idle keep-alive sockets keep `server.close()` pending forever (browsers
+    // and the POS frontend hold connections open). Close the idle ones now, and
+    // drop the rest after a short grace period so in-flight requests — like a
+    // checkout being written to disk — still get to finish.
+    server.closeIdleConnections?.();
+    const dropLingering = setTimeout(() => {
+      console.warn('[SHUTDOWN] Forcing remaining open connections closed.');
+      server.closeAllConnections?.();
+    }, 5_000);
+    dropLingering.unref();
+
+    server.close(err => {
+      clearTimeout(dropLingering);
+      if (err) console.error('[SHUTDOWN] Error while closing server:', err);
+      try {
+        db.flush();
+        console.log('[SHUTDOWN] Database flushed to disk. Bye.');
+      } catch (flushErr) {
+        console.error('[SHUTDOWN][CRITICAL] Final database flush FAILED:', flushErr);
+        clearTimeout(forceExit);
+        process.exit(1);
+      }
+      clearTimeout(forceExit);
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+
+  // Never let an unexpected error leave the process alive but broken: persist
+  // what we have, log loudly, and exit so the process manager restarts clean.
+  process.on('uncaughtException', err => {
+    console.error('[FATAL] Uncaught exception:', err);
+    try { db.flush(); } catch {}
+    process.exit(1);
+  });
+  process.on('unhandledRejection', reason => {
+    console.error('[FATAL] Unhandled promise rejection:', reason);
+    try { db.flush(); } catch {}
+    process.exit(1);
   });
 }
 

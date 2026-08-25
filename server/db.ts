@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { resolveDataDir } from './paths.ts';
 
 export interface User {
   id: string;
@@ -573,17 +574,27 @@ export interface DatabaseSchema {
   };
 }
 
-const DATA_DIR = process.env.POS_DATA_DIR || path.join(process.cwd(), 'data');
+// Data directory is resolved independently of process.cwd() so that PM2 /
+// systemd / cPanel / Docker launches can never point the app at a different
+// (empty) database. See server/paths.ts for the full rationale.
+const DATA_DIR = resolveDataDir();
 const DB_FILE = path.join(DATA_DIR, 'pos_database.json');
 const BACKUP_DIR = path.join(DATA_DIR, 'backups');
 
-// Ensure data and backup directories exist
-if (!fs.existsSync(DATA_DIR)) {
+// Ensure data and backup directories exist. If this fails the process must NOT
+// continue silently — running with an unwritable data dir means every sale is
+// lost on restart.
+try {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-}
-if (!fs.existsSync(BACKUP_DIR)) {
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  fs.accessSync(DATA_DIR, fs.constants.W_OK);
+} catch (err) {
+  console.error(`[DB][FATAL] Data directory is not writable: ${DATA_DIR}`);
+  console.error('[DB][FATAL] Set POS_DATA_DIR to a writable absolute path, or fix permissions.');
+  throw err;
 }
+
+console.log(`[DB] Data directory: ${DATA_DIR}`);
 
 // Initial default settings - Updated branding to Royal Hotel
 const defaultSettings: SystemSettings = {
@@ -1706,7 +1717,8 @@ const initialUsers: User[] = [
 
 export class Database {
   private data: DatabaseSchema;
-  private isSaving: boolean = false;
+  private lastPersistError: Error | null = null;
+  private pendingSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     this.data = this.loadDatabase();
@@ -1823,9 +1835,47 @@ export class Database {
           this.persist(parsed);
           return parsed;
         }
+        // The file exists but failed the shape check (missing products/users
+        // arrays). Treat it exactly like a parse failure rather than silently
+        // overwriting it below.
+        throw new Error('Database file is present but has an unrecognised structure.');
       }
     } catch (err) {
-      console.error('[DB] Error loading database file, re-initializing fresh database:', err);
+      // ==================================================================
+      // DATA-LOSS GUARD
+      // ------------------------------------------------------------------
+      // Previously ANY read/parse error here fell through and seeded a fresh
+      // demo database, which then got persisted straight over the damaged
+      // file — permanently destroying every product, bill, and stock record.
+      // A truncated write (power cut mid-save) was enough to wipe the shop.
+      //
+      // Now: quarantine the unreadable file, try the newest known-good
+      // backup, and only seed fresh when there is genuinely nothing to
+      // recover.
+      // ==================================================================
+      if (fs.existsSync(DB_FILE)) {
+        console.error('[DB] Existing database file could not be read:', err);
+
+        const quarantinePath = `${DB_FILE}.corrupt.${Date.now()}`;
+        try {
+          fs.copyFileSync(DB_FILE, quarantinePath);
+          console.error(`[DB] Damaged database preserved at: ${quarantinePath}`);
+        } catch (copyErr) {
+          console.error('[DB] Could not quarantine the damaged database file:', copyErr);
+        }
+
+        const recovered = this.recoverFromBackup();
+        if (recovered) return recovered;
+
+        // Nothing recoverable. Refuse to boot rather than start an empty POS
+        // on top of a real installation — an operator must decide.
+        console.error('[DB][FATAL] Database is unreadable and no usable backup was found.');
+        console.error(`[DB][FATAL] Inspect ${quarantinePath} and restore a backup from ${BACKUP_DIR}.`);
+        console.error('[DB][FATAL] To start intentionally from an empty database, move the damaged file aside.');
+        throw new Error('Refusing to start: database unreadable and unrecoverable (see logs above).');
+      }
+      // No database file at all → genuine first run, fall through and seed.
+      console.log('[DB] No existing database found — creating a new one.');
     }
 
     // Seed default database
@@ -1914,42 +1964,111 @@ export class Database {
     return initialDb;
   }
 
-  private persist(state: DatabaseSchema) {
+  /**
+   * Restore state from the most recent structurally-valid backup file.
+   * Returns null when nothing usable exists.
+   */
+  private recoverFromBackup(): DatabaseSchema | null {
     try {
-      // Atomic write with temp file to prevent corruption
-      const tempPath = `${DB_FILE}.tmp.${Date.now()}`;
-      fs.writeFileSync(tempPath, JSON.stringify(state, null, 2), 'utf-8');
-      // Ensure data is flushed to disk
-      const fd = fs.openSync(tempPath, 'r+');
-      fs.fsyncSync(fd);
-      fs.closeSync(fd);
-      fs.renameSync(tempPath, DB_FILE);
+      if (!fs.existsSync(BACKUP_DIR)) return null;
+      const candidates = fs.readdirSync(BACKUP_DIR)
+        .filter(f => f.startsWith('royal_hotel_backup_') && f.endsWith('.json'))
+        .map(f => {
+          const full = path.join(BACKUP_DIR, f);
+          return { full, name: f, time: fs.statSync(full).mtime.getTime() };
+        })
+        .sort((a, b) => b.time - a.time);
+
+      for (const candidate of candidates) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(candidate.full, 'utf-8'));
+          if (parsed && Array.isArray(parsed.products) && Array.isArray(parsed.users)) {
+            console.warn(`[DB] RECOVERED database from backup: ${candidate.name}`);
+            console.warn('[DB] Transactions recorded after that backup are not included — verify before trading.');
+            this.persist(parsed);
+            return parsed as DatabaseSchema;
+          }
+        } catch {
+          // try the next-oldest backup
+        }
+      }
     } catch (err) {
-      console.error('[DB] Error persisting database to disk:', err);
-      // Attempt cleanup of temp file
+      console.error('[DB] Backup recovery scan failed:', err);
+    }
+    return null;
+  }
+
+  private persist(state: DatabaseSchema) {
+    // Atomic write: write to a temp file, fsync it, then rename over the real
+    // file. rename(2) is atomic on POSIX, so a crash mid-save can never leave a
+    // half-written database behind.
+    const tempPath = `${DB_FILE}.tmp.${process.pid}.${Date.now()}`;
+    try {
+      const payload = JSON.stringify(state, null, 2);
+
+      const fd = fs.openSync(tempPath, 'w');
       try {
-        const tmpFiles = fs.readdirSync(DATA_DIR).filter(f => f.startsWith('pos_database.json.tmp'));
-        tmpFiles.forEach(f => {
-          try { fs.unlinkSync(path.join(DATA_DIR, f)); } catch {}
-        });
+        fs.writeFileSync(fd, payload, 'utf-8');
+        fs.fsyncSync(fd); // flush file contents
+      } finally {
+        fs.closeSync(fd);
+      }
+
+      fs.renameSync(tempPath, DB_FILE);
+
+      // Also fsync the DIRECTORY so the rename itself survives a power cut.
+      try {
+        const dirFd = fs.openSync(DATA_DIR, 'r');
+        try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+      } catch {
+        // Not supported on every platform (e.g. some Windows setups) — the
+        // file contents are already durable, so this is best-effort.
+      }
+
+      this.lastPersistError = null;
+    } catch (err) {
+      // Surface loudly: a silent failure here means staff keep ringing up
+      // sales that will vanish on the next restart.
+      console.error('[DB][CRITICAL] FAILED TO SAVE DATABASE — recent changes are only in memory:', err);
+      this.lastPersistError = err instanceof Error ? err : new Error(String(err));
+
+      try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch {}
+
+      // Clean up any stale temp files left by earlier crashed writes.
+      try {
+        fs.readdirSync(DATA_DIR)
+          .filter(f => f.startsWith('pos_database.json.tmp'))
+          .forEach(f => {
+            const full = path.join(DATA_DIR, f);
+            try {
+              if (Date.now() - fs.statSync(full).mtime.getTime() > 60_000) fs.unlinkSync(full);
+            } catch {}
+          });
       } catch {}
     }
   }
 
+  /** Last persistence failure, surfaced by the health endpoint. */
+  public getLastPersistError(): Error | null {
+    return this.lastPersistError;
+  }
+
+  /** Force a synchronous flush — used on graceful shutdown. */
+  public flush() {
+    if (this.pendingSaveTimer) {
+      clearTimeout(this.pendingSaveTimer);
+      this.pendingSaveTimer = null;
+    }
+    this.persist(this.data);
+  }
+
   public save() {
-    // Simple debounced save to avoid excessive disk I/O during rapid operations
-    // For now, immediate save but with isSaving guard to prevent overlapping
-    if (this.isSaving) {
-      // If already saving, schedule another save shortly
-      setTimeout(() => this.persist(this.data), 100);
-      return;
-    }
-    this.isSaving = true;
-    try {
-      this.persist(this.data);
-    } finally {
-      this.isSaving = false;
-    }
+    // `persist` is fully synchronous, so on Node's single thread a save can
+    // never overlap another. The old re-entrancy guard queued an EXTRA
+    // unconditional timer write on every nested save, causing duplicate disk
+    // writes under load. Writing straight through is both simpler and safer:
+    // every mutation is durable the moment the call returns.
+    this.persist(this.data);
   }
 
   // Get raw schema access
@@ -2159,6 +2278,20 @@ export class Database {
     const jsonStr = JSON.stringify(importedData);
     if (jsonStr.length > 100 * 1024 * 1024) { // 100MB max
       throw new Error('Database file too large (max 100MB)');
+    }
+
+    // LOCKOUT GUARD: restoring a file whose users list has no usable super
+    // admin (wrong export, hand-edited JSON, backup from before the first
+    // admin existed) left NOBODY able to log in — unrecoverable without
+    // shell access to the server. Reject before touching live data.
+    const hasUsableAdmin = importedData.users.some(
+      (u: User) => u && u.role === 'super_admin' && u.isActive !== false && !!u.passwordHash
+    );
+    if (!hasUsableAdmin) {
+      throw new Error(
+        'Restore rejected: this file contains no active Super Admin with a password. ' +
+        'Restoring it would lock everyone out of the system.'
+      );
     }
     // Create pre-restore safety backup
     this.backupDatabase();
