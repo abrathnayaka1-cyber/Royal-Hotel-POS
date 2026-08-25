@@ -311,7 +311,7 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    version: '1.1.1',
+    version: '1.1.2',
     uptime: process.uptime(),
   });
 });
@@ -4508,8 +4508,93 @@ app.get('/api/kitchen/recipes', authMiddleware, requireKitchenPermission('KITCHE
     .map(r => ({
       ...r,
       recipeCostPerServing: computeRecipeCostPerServing(r),
+      stockImpact: computeRecipeStockImpact(r),
     }));
   res.json(list);
+});
+
+/**
+ * Live stock impact of a recipe: per-ingredient deduction for ONE portion
+ * (line.quantity ÷ servings) and whether the kitchen store currently has
+ * enough material to sell one portion or the whole batch.
+ */
+function computeRecipeStockImpact(recipe: KitchenRecipe): {
+  ingredientId: string;
+  ingredientName: string;
+  unit: string;
+  perPortion: number;
+  batchQuantity: number;
+  availableStock: number;
+  remainingAfterOne: number;
+  sufficientForOne: boolean;
+  sufficientForBatch: boolean;
+}[] {
+  const servings = recipe.servings > 0 ? recipe.servings : 1;
+  return recipe.items.map(line => {
+    const ing = db.raw.kitchenIngredients.find(i => i.id === line.ingredientId);
+    const perPortion = Number((line.quantity / servings).toFixed(3));
+    const availableStock = ing ? Number(ing.currentStock) : 0;
+    return {
+      ingredientId: line.ingredientId,
+      ingredientName: line.ingredientName,
+      unit: line.unit,
+      perPortion,
+      batchQuantity: Number(line.quantity.toFixed(3)),
+      availableStock,
+      remainingAfterOne: Number((availableStock - perPortion).toFixed(3)),
+      sufficientForOne: availableStock + 0.001 >= perPortion,
+      sufficientForBatch: availableStock + 0.001 >= line.quantity,
+    };
+  });
+}
+
+/**
+ * VERIFY endpoint — "1000% check": given a recipe and a number of portions,
+ * returns exactly what would be deducted from each material and whether the
+ * kitchen store has enough stock. Used by the recipe editor's Stock Check.
+ */
+app.get('/api/kitchen/recipes/:id/impact', authMiddleware, requireKitchenPermission('KITCHEN_RECIPE_VIEW'), (req: Request, res: Response) => {
+  const recipe = db.raw.kitchenRecipes.find(r => r.id === req.params.id);
+  if (!recipe) return res.status(404).json({ error: 'Recipe not found.' });
+
+  const rawPortions = Number(req.query.portions);
+  const portions = Number.isFinite(rawPortions) && rawPortions >= 1 && rawPortions <= 100000 ? Math.floor(rawPortions) : 1;
+
+  const servings = recipe.servings > 0 ? recipe.servings : 1;
+  const items = recipe.items.map(line => {
+    const ing = db.raw.kitchenIngredients.find(i => i.id === line.ingredientId);
+    const perPortion = Number((line.quantity / servings).toFixed(3));
+    const needed = Number((perPortion * portions).toFixed(3));
+    const availableStock = ing ? Number(ing.currentStock) : 0;
+    const shortBy = Number(Math.max(0, needed - availableStock).toFixed(3));
+    return {
+      ingredientId: line.ingredientId,
+      ingredientName: line.ingredientName,
+      unit: line.unit,
+      perPortion,
+      neededForPortions: needed,
+      availableStock,
+      remainingAfter: Number((availableStock - needed).toFixed(3)),
+      sufficient: availableStock + 0.001 >= needed,
+      shortBy,
+      costValue: Number((needed * (ing ? ing.costPerUnit : 0)).toFixed(2)),
+    };
+  });
+
+  const shortages = items.filter(i => !i.sufficient);
+  const totalCost = Number(items.reduce((s, i) => s + i.costValue, 0).toFixed(2));
+
+  res.json({
+    recipeId: recipe.id,
+    productName: recipe.productName,
+    variantSize: recipe.variantSize,
+    servings,
+    portions,
+    items,
+    allSufficient: shortages.length === 0,
+    shortages: shortages.map(s => ({ ingredientName: s.ingredientName, unit: s.unit, shortBy: s.shortBy })),
+    totalCostForPortions: totalCost,
+  });
 });
 
 app.post('/api/kitchen/recipes', authMiddleware, requireKitchenPermission('KITCHEN_RECIPE_CREATE'), (req: Request, res: Response) => {

@@ -2,7 +2,7 @@
 
 > Commercial-grade Point of Sale system with multi-size bottle variants, hotel room management, daily stock sheet reconciliation, inventory, KOT, billing, and reporting.
 
-![Version](https://img.shields.io/badge/version-1.1.1-blue)
+![Version](https://img.shields.io/badge/version-1.1.2-blue)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-green)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
@@ -50,6 +50,12 @@
 - Daily Stock Sheet export (Excel)
 - Bills & Invoices with void/restore
 - Audit logs with pagination & export
+
+### v1.1.2 — Recipe Stock-Impact & Verification
+- **Live stock impact in the recipe editor**: every ingredient row shows "1 portion deducts −X · Stock A → B" (green when enough, red when short)
+- **Stock Check panel**: verify ANY number of portions against current material stock before saving the recipe (need / stock / short, total cost)
+- **`GET /api/kitchen/recipes/:id/impact?portions=N`** — server-side verify endpoint
+- **Per-portion materials verified end-to-end**: two portions of one dish with different materials deduct only their own materials on sale (21/21 new E2E checks; total suite 117/117)
 
 ### v1.1.1 — Stock-Integrity & Data-Consistency Fixes
 - **Bill void now restores EXACT sale-time kitchen ingredient deductions** (snapshot stored on the bill) — editing/archiving a recipe after a sale no longer over/under-restores ingredients on void

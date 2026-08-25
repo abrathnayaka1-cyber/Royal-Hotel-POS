@@ -13,6 +13,21 @@
 | 28 | **Food & Kitchen items වලින් 52/53කට recipe නැත** — ඒවා POS එකෙන් විකුණද්දී kitchen Materials stock එකෙන් **කිසිම දෙයක් අඩු වුණේ නැහැ** (daily food cost එක understated) | Kitchen Dashboard එකට **"X items sell WITHOUT a recipe"** warning banner එකක් — ඒ item list එකත් එක්ක (Recipes tab එකට navigate button එකත්) — Kitchen Manager ට දවසින් දවස පේනවා මොන items වලටද recipes එකතු කරන්න ඕනේ කියලා |
 | 29 | Kitchen ingredients / users වලට delete කරන්න endpoint නැති නිසා test cleanup + admin management දෙකේදීම අඩුපාඩුවක් | `DELETE /api/users/:id` (self-delete + last-admin guards) සහ `DELETE /api/kitchen/ingredients/:id` (archive — ledger history preserved) එකතු කළා |
 
+## 🧪 Third Audit Round (2026-08-25) — v1.1.2 · Recipe Stock-Impact Feature
+
+**ඉල්ලීම:** එක එක Portion එකට එක එක Materials (recipe rows add/delete කරන්න පුළුවන්) + recipe එකේ Material column එකක් දාද්දී ඒ Material එකේ stock එකෙන් ඒ ප්‍රමාණය අඩු වෙන එක. **තීරණය (user confirmed):** stock අඩු වීම **POS විකුණුම් වලදී** (දැනට තියෙන විදිහම) — recipe save කරද්දී නොවේ (double-deduction වළක්වන්න).
+
+**කළ දේ:**
+| # | Feature | විස්තරය |
+|---|---------|---------|
+| 30 | **Live stock-impact preview** (Recipe cards + editor) | Recipe එකේ හැම ingredient line එකක් යටම: "1 portion deducts: −250g · Stock 25,000g → 24,750g" — ඇති නම් green, නැත්නම් red + "Not enough X for 1 portion (short Y)" warning |
+| 31 | **Stock Check panel** (editor එකේ) | Portions ගණනක් ඇතුළත් කරලා live check: material | need | stock | ✓/✗ short — "1000% check" save කරන්න කලින් |
+| 32 | **`GET /api/kitchen/recipes/:id/impact?portions=N`** | Server-side verify endpoint: per-ingredient needed, available, shortBy, total cost for N portions; `allSufficient` flag. Testable via API |
+| 33 | **`stockImpact` on GET /recipes** | Per-recipe derived data: perPortion, batchQuantity, availableStock, remainingAfterOne, sufficientForOne/Batch |
+| 34 | E2E: **per-portion materials isolation** | එකම dish එකේ Regular (rice 250g) + Full (rice 400g + chicken 150g) — Regular විකුණද්දී rice විතරයි, Full විකුණද්දී දෙකම; void වුණාම exact restore. **21/21 checks pass** |
+
+**Round-3 verification:** සම්පූර්ණ suite එක — 117/117 checks pass (96 කලින් + 21 අලුත්). `tsc --noEmit` clean, production build OK. Version → 1.1.2.
+
 **Round-2 verification:** E2E suites 5ක්, **96/96 pass** (`tests/e2e/`) — POS billing, shots/750ml pool, void restore, rooms, KOT, reports, kitchen RBAC, recipe deduction + snapshot restore, approval workflows ඇතුළුව. Production build (`node dist/server.cjs`) — SPA, health, API 404, settings persistence ✅
 
 ## 🔴 Critical (මුදල් / stock අහිමි වන bugs)

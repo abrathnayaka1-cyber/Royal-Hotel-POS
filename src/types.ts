@@ -420,6 +420,41 @@ export interface KitchenRecipeVersion {
   savedByName: string;
 }
 
+export interface KitchenRecipeStockImpactLine {
+  ingredientId: string;
+  ingredientName: string;
+  unit: string;
+  perPortion: number;
+  batchQuantity: number;
+  availableStock: number;
+  remainingAfterOne: number;
+  sufficientForOne: boolean;
+  sufficientForBatch: boolean;
+}
+
+export interface KitchenRecipeImpactResponse {
+  recipeId: string;
+  productName: string;
+  variantSize: string;
+  servings: number;
+  portions: number;
+  items: {
+    ingredientId: string;
+    ingredientName: string;
+    unit: string;
+    perPortion: number;
+    neededForPortions: number;
+    availableStock: number;
+    remainingAfter: number;
+    sufficient: boolean;
+    shortBy: number;
+    costValue: number;
+  }[];
+  allSufficient: boolean;
+  shortages: { ingredientName: string; unit: string; shortBy: number }[];
+  totalCostForPortions: number;
+}
+
 export interface KitchenRecipe {
   id: string;
   productId: string;
@@ -437,6 +472,8 @@ export interface KitchenRecipe {
   updatedAt: string;
   /** Derived on GET */
   recipeCostPerServing?: number;
+  /** Derived on GET — per-ingredient stock impact for one portion */
+  stockImpact?: KitchenRecipeStockImpactLine[];
 }
 
 export const KITCHEN_WASTAGE_CATEGORIES = [
