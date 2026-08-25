@@ -99,6 +99,7 @@ await api(`/api/products/${prod.json?.id}`, { method: 'DELETE' }, token).catch((
 await api(`/api/categories/${catId}`, { method: 'DELETE' }, token).catch(() => {});
 await api(`/api/kitchen/ingredients/${ingId}`, { method: 'DELETE' }, token).catch(() => {});
 await api(`/api/kitchen/ingredients/${ing2Id}`, { method: 'DELETE' }, token).catch(() => {});
+if (recipe.json?.id) await api(`/api/kitchen/recipes/${recipe.json.id}/archive`, { method: 'PATCH' }, token).catch(() => {});
 
 console.log(results.join('\n'));
 console.log(`\n===== ${pass} passed, ${fail} failed =====`);

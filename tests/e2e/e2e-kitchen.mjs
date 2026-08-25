@@ -84,7 +84,7 @@ if (target) {
     },
   }, kmToken);
   check('create recipe', recipe.status === 201, `got ${recipe.status} ${JSON.stringify(recipe.json)}`);
-  const recipeId = recipe.json?.id;
+  var recipeId = recipe.json?.id;
 
   // 7. Wastage (KM)
   const waste = await api('/api/kitchen/wastage', {
@@ -148,6 +148,7 @@ if (km.json?.id) await api(`/api/users/${km.json.id}`, { method: 'DELETE' }, tok
 if (ingId) await api(`/api/kitchen/ingredients/${ingId}`, { method: 'DELETE' }, token).catch(() => {});
 if (kitProd.json?.id) await api(`/api/products/${kitProd.json.id}`, { method: 'DELETE' }, token).catch(() => {});
 if (kitCatId) await api(`/api/categories/${kitCatId}`, { method: 'DELETE' }, token).catch(() => {});
+if (recipeId) await api(`/api/kitchen/recipes/${recipeId}/archive`, { method: 'PATCH' }, token).catch(() => {});
 
 console.log(results.join('\n'));
 console.log(`\n===== ${pass} passed, ${fail} failed =====`);

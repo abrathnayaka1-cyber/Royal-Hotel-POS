@@ -28,6 +28,11 @@ node tests/e2e/e2e-test.mjs
 | `e2e-kitchen.mjs` | Kitchen Manager role: login, RBAC isolation (users/settings-write 403, kitchen 200), ingredient CRUD, stock-in, recipes, wastage, physical counts (auto-apply vs approval), approval workflow (KM 403 / admin 200), food cost, kitchen reports, cashier 403 |
 | `e2e-kitchen-sale.mjs` | Recipe auto-deduction on POS checkout (ledger records), blocked checkout when ingredients are short (product stock untouched), void restores ingredients exactly |
 | `e2e-recipe-snapshot.mjs` | Void restores **exact sale-time** kitchen deductions from the bill snapshot even when the recipe was archived or edited afterwards |
+| `demo-kitchen-deduction.mjs` | Live walkthrough: sell a recipe-linked Food & Kitchen portion → shows materials deducted ingredient-by-ingredient, kitchen dashboard today stats, consumption report, and void restore |
+
+> The suites self-clean (users, products, ingredients, recipes). Recipes are
+> archived (toggle endpoint — fetch current state before toggling). A couple of
+> paid bills are intentionally left as financial records.
 
 > Note: `data/pos_database.json` is git-ignored; to start from a clean seed,
 > stop the server, delete `data/pos_database.json`, and restart.

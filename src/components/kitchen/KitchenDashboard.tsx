@@ -91,6 +91,46 @@ export const KitchenDashboard: React.FC<{ onNavigate: (tab: string) => void }> =
         </div>
       )}
 
+      {/* Menu items without a recipe -> materials NOT deducted on sale */}
+      {(data?.menuItemsWithoutRecipe || []).length > 0 && (
+        <div className="p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 rounded-2xl">
+          <div className="flex items-start gap-3">
+            <div className="w-8 h-8 rounded-xl bg-rose-100 text-rose-600 dark:bg-rose-950/60 dark:text-rose-400 flex items-center justify-center shrink-0">
+              <AlertTriangle className="w-4 h-4" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-black uppercase tracking-wider text-rose-700 dark:text-rose-300">
+                {data?.menuItemsWithoutRecipe.length} Food &amp; Kitchen item{(data?.menuItemsWithoutRecipe.length || 0) > 1 ? 's' : ''} sell WITHOUT a recipe
+              </div>
+              <p className="text-[11px] text-rose-600/90 dark:text-rose-300/80 mt-0.5">
+                Materials stock is <strong>NOT deducted</strong> when these are sold — food cost stays understated until a recipe is added.
+              </p>
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {(data?.menuItemsWithoutRecipe || []).slice(0, 12).map(item => (
+                  <span
+                    key={item.variantId}
+                    className="px-2 py-0.5 bg-white dark:bg-slate-900 border border-rose-200 dark:border-rose-800 rounded-full text-[10px] font-bold text-rose-700 dark:text-rose-300"
+                  >
+                    {item.productName} · {item.variantSize}
+                  </span>
+                ))}
+                {(data?.menuItemsWithoutRecipe.length || 0) > 12 && (
+                  <span className="px-2 py-0.5 text-[10px] font-bold text-rose-500">
+                    +{(data?.menuItemsWithoutRecipe.length || 0) - 12} more…
+                  </span>
+                )}
+              </div>
+            </div>
+            <button
+              onClick={() => onNavigate('recipes')}
+              className="shrink-0 px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[11px] font-bold transition-colors cursor-pointer"
+            >
+              Add Recipes
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Today's Food Sales */}

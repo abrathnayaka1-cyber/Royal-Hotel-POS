@@ -570,6 +570,31 @@ app.patch('/api/users/:id/toggle', authMiddleware, requireRole('super_admin'), (
   res.json(safeUser);
 });
 
+app.delete('/api/users/:id', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
+  const currentUser = (req as any).user as User;
+  const index = db.raw.users.findIndex(u => u.id === req.params.id);
+  if (index === -1) return res.status(404).json({ error: 'User not found.' });
+
+  const user = db.raw.users[index];
+
+  if (user.id === currentUser.id) {
+    return res.status(400).json({ error: 'You cannot delete your own account.' });
+  }
+  if (user.role === 'super_admin') {
+    const otherAdmins = db.raw.users.filter(u => u.role === 'super_admin' && u.isActive && u.id !== user.id);
+    if (otherAdmins.length === 0) {
+      return res.status(400).json({ error: 'Cannot delete the last active Super Admin account.' });
+    }
+  }
+
+  db.raw.users.splice(index, 1);
+  db.save();
+
+  db.logAudit(currentUser.id, currentUser.name, currentUser.role, 'DELETE_USER', 'USER', user.id, `Deleted user account: ${user.username} (${user.name}, ${user.role})`);
+
+  res.json({ success: true, message: `User ${user.username} deleted successfully.` });
+});
+
 // ==========================================
 // CATEGORIES & COMPANIES
 // ==========================================
@@ -4193,6 +4218,29 @@ app.get('/api/kitchen/dashboard', authMiddleware, requireKitchenPermission('KITC
     .filter(l => String(l.action || '').startsWith('KITCHEN_'))
     .slice(0, 10);
 
+  // Food & Kitchen menu variants WITHOUT a recipe: selling them does NOT deduct
+  // any materials from the kitchen store. Surface them so the Kitchen Manager
+  // can add recipes (otherwise daily food cost stays understated).
+  const menuItemsWithoutRecipe: { productId: string; productName: string; variantId: string; variantSize: string; sellingPrice: number }[] = [];
+  for (const p of db.raw.products) {
+    if (p.isArchived || !p.isActive) continue;
+    const cat = db.raw.categories.find(c => c.id === p.categoryId);
+    const isFood = p.isKitchenItem || (cat && cat.type === 'restaurant');
+    if (!isFood) continue;
+    for (const v of p.variants) {
+      if (!v.isActive || v.isShot) continue;
+      if (!findRecipeForVariant(v.id)) {
+        menuItemsWithoutRecipe.push({
+          productId: p.id,
+          productName: p.name,
+          variantId: v.id,
+          variantSize: v.size,
+          sellingPrice: v.sellingPrice,
+        });
+      }
+    }
+  }
+
   res.json({
     todayFoodSales,
     todayFoodCost,
@@ -4210,6 +4258,7 @@ app.get('/api/kitchen/dashboard', authMiddleware, requireKitchenPermission('KITC
     activeRecipeCount: db.raw.kitchenRecipes.filter(r => r.isActive).length,
     recentMovements,
     recentActivity,
+    menuItemsWithoutRecipe,
   });
 });
 
@@ -4281,6 +4330,24 @@ app.put('/api/kitchen/ingredients/:id', authMiddleware, requireKitchenPermission
 
   db.logAudit(user.id, user.name, user.role, 'KITCHEN_INGREDIENT_UPDATED', 'KITCHEN', ing.id, `Updated ingredient ${ing.name}. Before: ${JSON.stringify(before)} → After: ${JSON.stringify({ name: ing.name, unit: ing.unit, minStockLevel: ing.minStockLevel, costPerUnit: ing.costPerUnit })}`);
   res.json(ing);
+});
+
+app.delete('/api/kitchen/ingredients/:id', authMiddleware, requireKitchenPermission('KITCHEN_INGREDIENT_EDIT'), (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+  const ing = db.raw.kitchenIngredients.find(i => i.id === req.params.id);
+  if (!ing) return res.status(404).json({ error: 'Kitchen ingredient not found.' });
+
+  // Archive instead of hard-delete: the movement ledger, recipes and any
+  // bills that referenced this ingredient keep working (restore-on-void still
+  // finds it by id). Archived ingredients disappear from counts/reports.
+  if (ing.isActive === false) {
+    return res.status(400).json({ error: 'Ingredient is already archived.' });
+  }
+  ing.isActive = false;
+  ing.updatedAt = new Date().toISOString();
+  db.save();
+  db.logAudit(user.id, user.name, user.role, 'KITCHEN_INGREDIENT_ARCHIVED', 'KITCHEN', ing.id, `Archived kitchen ingredient ${ing.name} (${ing.unit}). Ledger history preserved.`);
+  res.json({ success: true, message: `Ingredient ${ing.name} archived. Movement history preserved.`, ingredient: ing });
 });
 
 /** ---- Kitchen Stock & Movements ---- */

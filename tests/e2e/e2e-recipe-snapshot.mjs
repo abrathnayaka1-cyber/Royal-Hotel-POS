@@ -100,6 +100,15 @@ await api(`/api/products/${prod.json?.id}`, { method: 'DELETE' }, token).catch((
 await api(`/api/products/${prod2.json?.id}`, { method: 'DELETE' }, token).catch(() => {});
 await api(`/api/categories/${catId}`, { method: 'DELETE' }, token).catch(() => {});
 await api(`/api/kitchen/ingredients/${ingId}`, { method: 'DELETE' }, token).catch(() => {});
+// archive endpoint is a TOGGLE — fetch current state first, toggle only if active
+async function archiveIfActive(recipeId) {
+  if (!recipeId) return;
+  const all = await api('/api/kitchen/recipes?archived=true', {}, token);
+  const cur = (all.json || []).find(r => r.id === recipeId);
+  if (cur?.isActive) await api(`/api/kitchen/recipes/${recipeId}/archive`, { method: 'PATCH' }, token).catch(() => {});
+}
+await archiveIfActive(recipe.json?.id);
+await archiveIfActive(recipe2.json?.id);
 
 console.log(results.join('\n'));
 console.log(`\n===== ${pass} passed, ${fail} failed =====`);

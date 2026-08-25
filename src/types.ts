@@ -533,6 +533,8 @@ export interface KitchenDashboardData {
   activeRecipeCount: number;
   recentMovements: KitchenStockMovement[];
   recentActivity: AuditLog[];
+  /** Food & Kitchen menu variants that have NO recipe — materials stock is NOT deducted when they sell. */
+  menuItemsWithoutRecipe: { productId: string; productName: string; variantId: string; variantSize: string; sellingPrice: number }[];
 }
 
 export interface KitchenMenuItem {
