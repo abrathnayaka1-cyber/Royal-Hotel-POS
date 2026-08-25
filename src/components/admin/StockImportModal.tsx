@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { fetchApi } from '../../lib/api.ts';
 import {
@@ -24,6 +24,7 @@ import {
 // ==========================================
 
 type ImportType = 'purchase' | 'physical_count';
+type ImportScope = 'bar' | 'all';
 
 interface RawImportRow {
   rowNumber?: number;
@@ -218,6 +219,9 @@ export const StockImportModal: React.FC<{
 
   // Setup
   const [importType, setImportType] = useState<ImportType>('purchase');
+  // Bar-only by default: only Bar-category items are matched/updated so a bar
+  // purchase never touches food/restaurant stock. Switch to 'all' if needed.
+  const [scope, setScope] = useState<ImportScope>('bar');
   const [supplier, setSupplier] = useState('');
   const [invoiceNumber, setInvoiceNumber] = useState('');
   const [invoiceDate, setInvoiceDate] = useState('');
@@ -285,6 +289,7 @@ export const StockImportModal: React.FC<{
 
   const resetAll = () => {
     setStep('setup');
+    setScope('bar');
     setSupplier('');
     setInvoiceNumber('');
     setInvoiceDate('');
@@ -395,6 +400,7 @@ export const StockImportModal: React.FC<{
 
   const buildRequestBody = (extra: Record<string, unknown> = {}) => ({
     importType,
+    scope,
     rows: rawRows,
     decisions: Object.fromEntries(Object.entries(decisions).map(([k, v]) => [String(k), v])),
     fileName,
@@ -478,7 +484,6 @@ export const StockImportModal: React.FC<{
   };
 
   const problemCount = summary ? summary.invalid + summary.needsReview : 0;
-  const activePreviewRows = useMemo(() => previewRows, [previewRows]);
 
   const fmt = (n?: number) => (n === undefined || n === null ? '—' : `${currencySymbol} ${Number(n).toLocaleString()}`);
 
@@ -679,6 +684,39 @@ export const StockImportModal: React.FC<{
                     </div>
                     <p className="text-[11px] text-slate-500 mt-1">
                       You physically counted the stock. The system calculates the difference (72 counted as 68 → −4) and records a controlled <strong>adjustment</strong>.
+                    </p>
+                  </button>
+                </div>
+              </div>
+
+              {/* Item scope — Bar-only by default so a bar purchase never touches food/kitchen */}
+              <div>
+                <label className="text-xs font-bold uppercase tracking-wider text-slate-500 block mb-2">
+                  Item Scope — which stock can be updated
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setScope('bar')}
+                    className={`p-3 border-2 rounded-2xl text-left transition-all cursor-pointer ${scope === 'bar' ? 'border-blue-500 bg-blue-50 dark:bg-blue-950/40' : 'border-slate-200 dark:border-slate-700 hover:border-blue-400'}`}
+                  >
+                    <div className="text-xs font-black text-slate-900 dark:text-white flex items-center gap-1.5">
+                      🍸 Bar Items Only <span className="text-[9px] text-blue-500 font-bold">(recommended)</span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-1">
+                      Matches & updates only <strong>Bar</strong> category products (Arrack, Whisky, Beer, Wine, Vodka/Gin, Brandy/Rum). Food, restaurant & service items are ignored — no duplicates.
+                    </p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setScope('all')}
+                    className={`p-3 border-2 rounded-2xl text-left transition-all cursor-pointer ${scope === 'all' ? 'border-slate-800 bg-slate-100 dark:bg-slate-800/60' : 'border-slate-200 dark:border-slate-700 hover:border-slate-400'}`}
+                  >
+                    <div className="text-xs font-black text-slate-900 dark:text-white flex items-center gap-1.5">
+                      🍽️ All Items
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-1">
+                      Matches & updates <strong>every</strong> product category (Bar + Food + Kitchen + Services). Only use this if the file really contains non-bar stock.
                     </p>
                   </button>
                 </div>
@@ -887,7 +925,7 @@ export const StockImportModal: React.FC<{
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                    {activePreviewRows.map(row => {
+                    {previewRows.map(row => {
                       const d = decisions[row.rowId] || {};
                       const isProblem = !row.excluded && (row.status === 'INVALID' || row.status === 'NEEDS_REVIEW');
                       return (
