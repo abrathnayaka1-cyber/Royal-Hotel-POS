@@ -129,7 +129,24 @@ App runs at `http://localhost:3000`
 > **Production:** if `DEFAULT_ADMIN_PASSWORD` is not set in `.env`, the server
 > generates a random one-time Super Admin password and prints it to the server
 > log on first boot (it never uses the publicly-known default in production).
-> Set `DEFAULT_ADMIN_PASSWORD` to your own strong password instead.
+> Set `DEFAULT_ADMIN_PASSWORD` to your own strong password instead. The app now
+> loads `.env` before the database starts, so this value and `POS_DATA_DIR` are
+> applied correctly. An initial Admin account that has never logged in is also
+> repaired once if an older release ignored the configured password.
+
+### Locked-out Admin recovery
+
+If the existing Super Admin password is lost, set a temporary recovery value and
+restart the server:
+
+```env
+ADMIN_PASSWORD_RESET=<a-new-strong-password>
+```
+
+Log in with username `Admin`, then **remove `ADMIN_PASSWORD_RESET` and restart
+again**. Do not leave it configured: it is an explicit emergency override and can
+re-apply on a later restart after the password is changed in the UI. The reset is
+recorded in Audit Logs; the password itself is never logged.
 
 ### Production Build
 

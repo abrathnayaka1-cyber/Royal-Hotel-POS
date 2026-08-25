@@ -61,7 +61,17 @@ DEFAULT_ADMIN_PASSWORD=<your-admin-password>
 - **Password:** ඔයා environment variables එකේ දාපු `DEFAULT_ADMIN_PASSWORD` අගය
 - Log in වුණාම → **Admin → Users** → password එක වෙනස් කරන්න!
 
-> කලින් ඔයා දැනටමත් site එක පාවිච්චි කරලා data තියෙනවා නම්, `DEFAULT_ADMIN_PASSWORD` එක **නව database එකකට විතරයි** apply වෙන්නේ. ඒ නිසා ඔයාගේ පරණ password එකම භාවිතා කරන්න (නැත්නම් Admin → System Settings → Database Backup එකෙන් restore කරන්න).
+> කලින් release එකේ `.env` load වීමට කලින් database එක start වුණු නිසා `DEFAULT_ADMIN_PASSWORD` ignore වෙන්න පුළුවන් වුණා. දැන් එය හදා තිබෙන අතර, කිසිදා login නොවුණු initial Admin account එකකට configured password එක එක වරක් apply වෙනවා.
+
+### Admin password එක නැතිවී ඇත්නම් (Emergency recovery)
+
+Environment variables වල තාවකාලිකව මෙය add කරලා redeploy/restart කරන්න:
+
+```env
+ADMIN_PASSWORD_RESET=<new-strong-password>
+```
+
+`Admin` username එකෙන් login වුණාට පස්සේ **`ADMIN_PASSWORD_RESET` variable එක අයින් කරලා නැවත restart කරන්න**. එය environment එකේ තියාගන්න එපා.
 
 ---
 
