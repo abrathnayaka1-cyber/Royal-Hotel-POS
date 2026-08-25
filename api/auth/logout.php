@@ -20,7 +20,7 @@ setcookie('pos_auth_token', '', [
     'expires'  => time() - 3600,
     'path'     => '/',
     'secure'   => isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on',
-    'httponly' => false,
+    'httponly' => true,
     'samesite' => 'Lax'
 ]);
 

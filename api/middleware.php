@@ -13,11 +13,22 @@ function initApiHeaders(): void {
     header('X-Frame-Options: SAMEORIGIN');
     header('X-XSS-Protection: 1; mode=block');
 
-    $origin = $_SERVER['HTTP_ORIGIN'] ?? '*';
-    header("Access-Control-Allow-Origin: {$origin}");
+    // Strict CORS: NEVER reflect an arbitrary Origin (the old code echoed
+    // $_SERVER['HTTP_ORIGIN'] straight into Access-Control-Allow-Origin while
+    // also sending Access-Control-Allow-Credentials, which lets any website
+    // make credentialed cross-origin requests). Only origins explicitly
+    // listed in CORS_ORIGINS (comma-separated) are allowed. With no allowlist
+    // configured the API is same-origin only, which is the safe default.
+    $allowlist = array_values(array_filter(array_map('trim', explode(',', (string)getenv('CORS_ORIGINS')))));
+    $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+    if ($origin !== '' && in_array($origin, $allowlist, true)) {
+        header("Access-Control-Allow-Origin: {$origin}");
+        header('Vary: Origin');
+        header('Access-Control-Allow-Credentials: true');
+    }
+
     header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
     header('Access-Control-Allow-Headers: Authorization, Content-Type, X-Requested-With');
-    header('Access-Control-Allow-Credentials: true');
 
     if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
         http_response_code(204);
@@ -139,6 +150,100 @@ function requireSuperAdmin(): array {
         sendError('Access Denied: Super Admin permissions required.', 403);
     }
     return $user;
+}
+
+/**
+ * Brute-force protection for login (file-backed, no DB schema required).
+ *
+ * The legacy login endpoint had NO throttling, so the documented default
+ * password and the 4-digit cashier PINs could be guessed at unlimited speed.
+ * This records failed attempts per (IP + identifier) in a JSON file under a
+ * runtime directory (configurable via POS_RUNTIME_DIR, default: system temp)
+ * and locks an identifier for 60 seconds after 5 consecutive failures.
+ */
+function loginAttemptsFile(): string {
+    $dir = getenv('POS_RUNTIME_DIR') ?: sys_get_temp_dir();
+    return rtrim($dir, '/\\') . '/royal_pos_login_attempts.json';
+}
+
+function loginAttemptsLoad(string $file): array {
+    if (!is_file($file)) {
+        return [];
+    }
+    $raw = @file_get_contents($file);
+    if ($raw === false) {
+        return [];
+    }
+    $decoded = json_decode($raw, true);
+    return is_array($decoded) ? $decoded : [];
+}
+
+function loginAttemptsSave(string $file, array $data): void {
+    $tmp = $file . '.tmp.' . getmypid();
+    @file_put_contents($tmp, json_encode($data), LOCK_EX);
+    @rename($tmp, $file);
+}
+
+function loginAttemptKey(string $ip, string $identifier): string {
+    return hash('sha256', $ip . '|' . strtolower(trim($identifier)));
+}
+
+/** Returns remaining lockout seconds when throttled, otherwise null. */
+function checkLoginThrottle(string $ip, string $identifier): ?int {
+    $file = loginAttemptsFile();
+    $data = loginAttemptsLoad($file);
+    $key = loginAttemptKey($ip, $identifier);
+    $rec = $data[$key] ?? null;
+    if (is_array($rec) && isset($rec['lockedUntil']) && $rec['lockedUntil'] > time()) {
+        return (int)($rec['lockedUntil'] - time());
+    }
+    return null;
+}
+
+/** Records a failed login and locks the identifier after 5 consecutive failures. */
+function recordLoginFailure(string $ip, string $identifier): void {
+    $file = loginAttemptsFile();
+    $data = loginAttemptsLoad($file);
+    $key = loginAttemptKey($ip, $identifier);
+    $now = time();
+
+    $rec = $data[$key] ?? ['count' => 0, 'lockedUntil' => 0, 'lastAttempt' => 0];
+    if (!is_array($rec)) {
+        $rec = ['count' => 0, 'lockedUntil' => 0, 'lastAttempt' => 0];
+    }
+
+    // Expire stale records so a lock from long ago never persists forever.
+    if ($rec['lockedUntil'] > 0 && $rec['lockedUntil'] < $now - 3600) {
+        $rec = ['count' => 0, 'lockedUntil' => 0, 'lastAttempt' => 0];
+    }
+    if (isset($rec['lastAttempt']) && $now - (int)$rec['lastAttempt'] > 900) {
+        $rec['count'] = 0;
+    }
+
+    $rec['count'] = ((int)($rec['count'] ?? 0)) + 1;
+    $rec['lastAttempt'] = $now;
+    if ($rec['count'] >= 5) {
+        $rec['lockedUntil'] = $now + 60;
+        $rec['count'] = 0; // reset so the next lockout window starts fresh
+    }
+    $data[$key] = $rec;
+
+    // Bound the file to the most recent 1000 entries.
+    if (count($data) > 1000) {
+        $data = array_slice($data, -1000, null, true);
+    }
+    loginAttemptsSave($file, $data);
+}
+
+/** Clears failed attempts after a successful login. */
+function clearLoginFailures(string $ip, string $identifier): void {
+    $file = loginAttemptsFile();
+    $data = loginAttemptsLoad($file);
+    $key = loginAttemptKey($ip, $identifier);
+    if (array_key_exists($key, $data)) {
+        unset($data[$key]);
+        loginAttemptsSave($file, $data);
+    }
 }
 
 /**

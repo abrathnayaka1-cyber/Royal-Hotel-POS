@@ -19,6 +19,14 @@ if (empty($username) && empty($pin)) {
     sendError('Username and password (or PIN) are required.');
 }
 
+// Brute-force protection: throttle by client IP + identifier (username or PIN).
+$clientIp = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+$identifier = !empty($username) ? $username : ('pin:' . $pin);
+$lockRemaining = checkLoginThrottle($clientIp, $identifier);
+if ($lockRemaining !== null) {
+    sendError("Too many failed login attempts. Please wait {$lockRemaining} seconds and try again.", 429);
+}
+
 $pdo = Database::getConnection();
 
 // Look up user
@@ -33,6 +41,7 @@ if (!empty($username)) {
 $user = $stmt->fetch();
 
 if (!$user) {
+    recordLoginFailure($clientIp, $identifier);
     sendError('Invalid username or password.', 401);
 }
 
@@ -42,15 +51,18 @@ if (!(bool)$user['is_active']) {
 
 // Verify password or PIN
 $authenticated = false;
-if (!empty($password) && password_verify($password, $user['password_hash'])) {
+if (!empty($password) && !empty($user['password_hash']) && password_verify($password, $user['password_hash'])) {
     $authenticated = true;
-} elseif (!empty($pin) && !empty($user['pin']) && $pin === $user['pin']) {
+} elseif (!empty($pin) && !empty($user['pin']) && hash_equals((string)$user['pin'], (string)$pin)) {
     $authenticated = true;
 }
 
 if (!$authenticated) {
+    recordLoginFailure($clientIp, $identifier);
     sendError('Invalid username or password.', 401);
 }
+
+clearLoginFailures($clientIp, $identifier);
 
 // Generate secure session token (24-hour validity)
 $token = 'pos_tok_' . round(microtime(true) * 1000) . '_' . bin2hex(random_bytes(16));
@@ -64,12 +76,14 @@ $sessStmt = $pdo->prepare("
 ");
 $sessStmt->execute([$token, $user['id'], $ip, $ua, $expiresAt]);
 
-// Set cookie for browser sessions
+// Set cookie for browser sessions. HttpOnly so client-side JavaScript cannot
+// read the token (an XSS would otherwise be able to exfiltrate it). The
+// frontend authenticates with the Authorization header, which is unaffected.
 setcookie('pos_auth_token', $token, [
     'expires'  => time() + 86400,
     'path'     => '/',
     'secure'   => isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on',
-    'httponly' => false,
+    'httponly' => true,
     'samesite' => 'Lax'
 ]);
 

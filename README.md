@@ -122,9 +122,14 @@ App runs at `http://localhost:3000`
 
 ### Default Login
 - Username: `Admin`
-- Password: `Araliya2000`
+- Password: `Araliya2000` (development / local only)
 
-> Change password immediately after first login via Admin → Users
+> Change password immediately after first login via Admin → Users.
+>
+> **Production:** if `DEFAULT_ADMIN_PASSWORD` is not set in `.env`, the server
+> generates a random one-time Super Admin password and prints it to the server
+> log on first boot (it never uses the publicly-known default in production).
+> Set `DEFAULT_ADMIN_PASSWORD` to your own strong password instead.
 
 ### Production Build
 
@@ -240,10 +245,18 @@ Royal-Hotel-POS/
 ## 🔒 Security Notes
 
 - Set `SESSION_SECRET` in production (64+ chars random)
+- Set `DEFAULT_ADMIN_PASSWORD` (or the server generates a random one on first boot)
+- Optionally pin `CORS_ORIGINS` in production
 - Use HTTPS in production
-- Regularly backup `data/pos_database.json`
+- Regularly backup `data/pos_database.json` (and keep off-machine copies)
 - Review audit logs in Admin → Audit Logs
 - Disable negative stock if you want strict inventory
+- Change the default `Admin` password immediately after first login
+
+> ⚠️ **Legacy PHP backend** (`api/` + `config/`): these files are a separate,
+> older MySQL-based backend. If you deploy them on a PHP host, set
+> `INIT_ADMIN_SECRET` and `CORS_ORIGINS`, and see `SECURITY-AUDIT.md`. They are
+> **not used** by the Node server (`server.ts`).
 
 ## 📝 License
 
