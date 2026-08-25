@@ -276,6 +276,10 @@ export interface InventoryItemView {
   shotVolumeMl?: number;
   isShotSourceBottle?: boolean;
   openBottleUsedMl?: number;
+  /** Shot rows: total ml left in the shared 750ml bottle pool. */
+  shotPoolMl?: number;
+  /** Source-bottle row: total liquid ml left (full bottles + open bottle remainder). */
+  remainingMl?: number;
 }
 
 export interface AuditLog {

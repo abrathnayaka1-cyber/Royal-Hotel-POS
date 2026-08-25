@@ -427,7 +427,7 @@ INSERT INTO `products` (`id`, `name`, `category_id`, `company_id`, `description`
 ('prod-black-opal', 'Black Opal Arrack', 'cat-arrack', 'comp-idb', 'Rich dark refined coconut spirit', 'https://images.unsplash.com/photo-1569529465841-dfecdab7503b?w=500&auto=format&fit=crop&q=60', 0, 0.00, 1, 0),
 ('prod-double-distilled', 'Double Distilled Arrack', 'cat-arrack', 'comp-dcscl', 'Pot-distilled double refined coconut arrack', 'https://images.unsplash.com/photo-1569529465841-dfecdab7503b?w=500&auto=format&fit=crop&q=60', 0, 0.00, 1, 0),
 ('prod-rockland-ex', 'Rockland EX Arrack', 'cat-arrack', 'comp-rockland', 'Extra special Rockland distillery signature blend', 'https://images.unsplash.com/photo-1569529465841-dfecdab7503b?w=500&auto=format&fit=crop&q=60', 0, 0.00, 1, 0),
-('prod-rockland-old-arrack', 'Rockland Old Arrack', 'cat-arrack', 'comp-rockland', 'Traditional wood vat aged Rockland old arrack', 'https://images.unsplash.com/photo-1569529465841-dfecdab7503b?w=500&auto=format&fit=crop&q=60', 0, 0.00, 1, 0),
+('prod-rockland-old-arrack', 'Rockland Old (Gal)', 'cat-arrack', 'comp-rockland', 'Traditional wood vat aged Rockland old arrack', 'https://images.unsplash.com/photo-1569529465841-dfecdab7503b?w=500&auto=format&fit=crop&q=60', 0, 0.00, 1, 0),
 ('prod-navy-special', 'Navy Special Arrack', 'cat-arrack', 'comp-dcscl', 'Classic robust navy recipe arrack', 'https://images.unsplash.com/photo-1569529465841-dfecdab7503b?w=500&auto=format&fit=crop&q=60', 0, 0.00, 1, 0)
 ON DUPLICATE KEY UPDATE `id`=`id`;
 

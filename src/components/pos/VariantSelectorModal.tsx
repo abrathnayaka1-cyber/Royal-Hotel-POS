@@ -22,6 +22,18 @@ export const VariantSelectorModal: React.FC = () => {
   const product = selectedProductForVariant;
   const currencySymbol = settings?.currencySymbol || 'Rs.';
 
+  // --- 750ml bottle pool (shot products) ---
+  // Every shot pours from this shared pool, so the cashier can watch the
+  // total liquid volume drop ml-by-ml as shots are sold.
+  const servesShots = Boolean(product.servesShots);
+  const bottleVariant = servesShots
+    ? product.variants.find(v => !v.isShot && /750\s*ml/i.test(v.size))
+    : undefined;
+  const poolRemainingMl = Math.max(0, Number(product.availableShotMl) || 0);
+  const openUsedMl = Math.max(0, Number(product.openBottleUsedMl) || 0);
+  const fmtMl = (ml: number) => ml.toLocaleString();
+  const fmtL = (ml: number) => `${(ml / 1000).toLocaleString(undefined, { maximumFractionDigits: 2 })}L`;
+
   const handleSelectVariant = (variant: ProductVariant) => {
     setSelectedVariant(variant);
   };
@@ -56,6 +68,37 @@ export const VariantSelectorModal: React.FC = () => {
 
         {/* Modal Body / Variants Grid */}
         <div className="p-6 overflow-y-auto flex-1 space-y-4">
+          {/* 750ml Bottle Pool — live ml meter for shot-serving products */}
+          {servesShots && bottleVariant && (
+            <div
+              id="bottle-pool-meter"
+              className="rounded-xl border border-cyan-200 dark:border-cyan-900 bg-cyan-50 dark:bg-cyan-950/40 px-4 py-3"
+              title="Shots pour from this shared 750ml bottle pool — every shot sold reduces the remaining ml"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+                <span className="text-[11px] font-black uppercase tracking-wider text-cyan-700 dark:text-cyan-300">
+                  🥃 750ml Bottle Pool
+                </span>
+                <span className="text-[11px] font-bold text-cyan-800 dark:text-cyan-200">
+                  {bottleVariant.stock} × 750ml = {(bottleVariant.stock * 750).toLocaleString()}ml total
+                  {openUsedMl > 0 && ` • Open bottle: ${openUsedMl}ml used / ${750 - openUsedMl}ml left`}
+                </span>
+              </div>
+              <div className="mt-2 h-2.5 w-full rounded-full bg-cyan-100 dark:bg-cyan-900 overflow-hidden" aria-hidden="true">
+                <div
+                  className="h-full rounded-full bg-cyan-500 dark:bg-cyan-400 transition-all"
+                  style={{ width: `${Math.min(100, Math.round((poolRemainingMl / Math.max(1, (bottleVariant.stock * 750) + openUsedMl)) * 100))}%` }}
+                />
+              </div>
+              <div className="mt-1.5 text-sm font-extrabold text-cyan-800 dark:text-cyan-100">
+                Remaining: {fmtMl(poolRemainingMl)}ml ({fmtL(poolRemainingMl)})
+                <span className="ml-2 text-[11px] font-semibold text-cyan-600 dark:text-cyan-300">
+                  — drops by every shot poured
+                </span>
+              </div>
+            </div>
+          )}
+
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3.5">
             {product.variants
               .filter(v => v.isActive)
@@ -91,7 +134,7 @@ export const VariantSelectorModal: React.FC = () => {
                       </span>
                       {isShot && (
                         <span className="mt-1 inline-block text-[9px] font-black uppercase tracking-wide text-amber-700 dark:text-amber-400 bg-amber-100 dark:bg-amber-950/50 px-1.5 py-0.5 rounded">
-                          Shot • from 750ml bottle
+                          Shot {variant.shotVolumeMl ? `${variant.shotVolumeMl}ml` : ''} • from 750ml bottle
                         </span>
                       )}
                     </div>
@@ -108,6 +151,11 @@ export const VariantSelectorModal: React.FC = () => {
                       ) : (
                         <span className="text-[10px] text-green-600 dark:text-emerald-400 font-bold uppercase">
                           {isShot ? `Shots Left: ${remaining}` : `Stock: ${remaining}`}
+                        </span>
+                      )}
+                      {servesShots && (isShot || bottleVariant?.id === variant.id) && (
+                        <span className="text-[9px] text-cyan-600 dark:text-cyan-400 block font-bold" title="Total liquid left in the 750ml bottle pool">
+                          {isShot ? `Pool: ${fmtMl(poolRemainingMl)}ml left` : `${fmtMl(poolRemainingMl)}ml (${fmtL(poolRemainingMl)}) left`}
                         </span>
                       )}
                     </div>

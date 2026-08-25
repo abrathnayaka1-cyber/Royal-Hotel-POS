@@ -656,10 +656,11 @@ const initialCompanies: Company[] = [
 ];
 
 const initialProducts: Product[] = [
-  // Rockland Old Arrack / Gal Arrack — serves shots poured from the 750ml bottle stock
+  // Rockland Old (Gal) — labelled like the physical stock sheet: name + size
+  // reads "Rockland Old (Gal) 750ml". Serves shots poured from the 750ml bottle stock.
   {
     id: 'prod-1',
-    name: 'Rockland Old Arrack (Gal Arrack)',
+    name: 'Rockland Old (Gal)',
     categoryId: 'cat-1',
     companyId: 'comp-1',
     description: 'Traditional blended coconut spirit aged in teak vats.',
@@ -669,7 +670,7 @@ const initialProducts: Product[] = [
     openBottleUsedMl: 0,
     createdAt: new Date().toISOString(),
     variants: [
-      { id: 'var-1-750', productId: 'prod-1', size: '750ml Bottle', sku: 'RK-ARR-750', costPrice: 3100, sellingPrice: 3850, stock: 24, minStockLevel: 5, isActive: true },
+      { id: 'var-1-750', productId: 'prod-1', size: '750ml', sku: 'RK-ARR-750', costPrice: 3100, sellingPrice: 3850, stock: 24, minStockLevel: 5, isActive: true },
       { id: 'var-1-375', productId: 'prod-1', size: '375ml Half', sku: 'RK-ARR-375', costPrice: 1600, sellingPrice: 1980, stock: 36, minStockLevel: 6, isActive: true },
       { id: 'var-1-180', productId: 'prod-1', size: '180ml Quarter', sku: 'RK-ARR-180', costPrice: 800, sellingPrice: 1050, stock: 45, minStockLevel: 10, isActive: true },
       { id: 'var-1-100', productId: 'prod-1', size: '100ml Shot Plus', sku: 'RK-ARR-100', costPrice: 460, sellingPrice: 620, stock: 0, minStockLevel: 0, isActive: true, isShot: true, shotVolumeMl: 100 },
@@ -1831,6 +1832,23 @@ export class Database {
                 if (legacyId === 'cat-beer-pub') legacyCat.type = 'restaurant';
               }
             });
+          }
+
+          // One-time label migration: the flagship Rockland Old 750ml item is
+          // labelled exactly like the physical stock sheet / price list photo —
+          // "Rockland Old (Gal) 750ml" (product name + variant size). Only the
+          // exact legacy seed label is rewritten; custom admin names are kept.
+          if (Array.isArray(parsed.products)) {
+            const legacyRockland = parsed.products.find(
+              (p: Product) => p.id === 'prod-1' && p.name === 'Rockland Old Arrack (Gal Arrack)'
+            );
+            if (legacyRockland) {
+              legacyRockland.name = 'Rockland Old (Gal)';
+              const galVariant = (legacyRockland.variants || []).find(
+                (v: ProductVariant) => v.id === 'var-1-750' && v.size === '750ml Bottle'
+              );
+              if (galVariant) galVariant.size = '750ml';
+            }
           }
 
           // Normalize shot-serving products (shots pour from the 750ml bottle stock)

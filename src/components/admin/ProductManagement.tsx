@@ -359,9 +359,13 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
                             🥃 Shots from 750ml
                           </span>
                         )}
-                        {product.servesShots && (product.openBottleUsedMl || 0) > 0 && (
-                          <span className="px-1.5 py-0.2 bg-cyan-50 text-cyan-700 dark:bg-cyan-950 dark:text-cyan-300 rounded font-semibold text-[10px]" title="The currently open 750ml bottle">
-                            Open bottle: {product.openBottleUsedMl}ml used / {750 - (product.openBottleUsedMl || 0)}ml left
+                        {product.servesShots && (
+                          <span
+                            className="px-1.5 py-0.2 bg-cyan-50 text-cyan-700 dark:bg-cyan-950 dark:text-cyan-300 rounded font-semibold text-[10px]"
+                            title="Total liquid left in the 750ml bottle pool — drops by every shot poured"
+                          >
+                            Bottle pool: {(product.availableShotMl ?? 0).toLocaleString()}ml ({((product.availableShotMl ?? 0) / 1000).toFixed(2)}L) left
+                            {(product.openBottleUsedMl || 0) > 0 && ` • Open bottle: ${product.openBottleUsedMl}ml used / ${750 - (product.openBottleUsedMl || 0)}ml left`}
                           </span>
                         )}
                       </div>
@@ -476,7 +480,7 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
                   <input
                     type="text"
                     required
-                    placeholder="e.g. Rockland Old Arrack (Gal Arrack)"
+                    placeholder="e.g. Rockland Old (Gal)"
                     value={formName}
                     onChange={e => setFormName(e.target.value)}
                     className="w-full text-sm font-semibold px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-blue-500"
