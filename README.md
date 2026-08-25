@@ -3,7 +3,7 @@
 > Commercial-grade Point of Sale system with multi-size bottle variants, hotel room management, daily stock sheet reconciliation, inventory, KOT, billing, and reporting.
 
 ![Version](https://img.shields.io/badge/version-1.1.2-blue)
-![Node](https://img.shields.io/badge/node-%3E%3D18-green)
+![Node](https://img.shields.io/badge/node-%3E%3D22-green)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
 ## 🌟 Features
@@ -95,7 +95,7 @@
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Node.js >= 18
+- Node.js >= 22
 - npm or bun
 
 ### Installation
