@@ -47,7 +47,10 @@ export const PaymentModal: React.FC = () => {
 
   const numReceived = parseFloat(amountReceived) || 0;
   const changeAmount = Math.max(0, numReceived - grandTotal);
-  const isSufficient = paymentMethod !== 'cash' || numReceived >= grandTotal;
+  // The server requires received >= grand total for EVERY payment method
+  // (split is not exposed in the UI), so disable the button consistently
+  // instead of letting card/bank/other submissions fail with a server error.
+  const isSufficient = numReceived >= grandTotal;
 
   const denominations = [
     { label: 'Exact', amount: grandTotal },
