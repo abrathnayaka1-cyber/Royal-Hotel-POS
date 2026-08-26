@@ -97,15 +97,22 @@ export const ProductGrid: React.FC = () => {
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider truncate max-w-[130px]">
                   {company?.name || category?.name || 'Beverage'}
                 </span>
-                {product.isKitchenItem ? (
-                  <span className="text-[10px] font-bold text-orange-500 bg-orange-50 dark:bg-orange-950/40 px-1.5 py-0.5 rounded">
-                    Kitchen
-                  </span>
-                ) : (
-                  <span className="text-[10px] font-bold text-blue-500 bg-blue-50 dark:bg-blue-950/40 px-1.5 py-0.5 rounded">
-                    Bar
-                  </span>
-                )}
+                <div className="flex items-center gap-1">
+                  {product.servesShots && (
+                    <span className="text-[9px] font-bold text-amber-600 bg-amber-50 dark:bg-amber-950/40 px-1 py-0.5 rounded">
+                      Shots 🥃
+                    </span>
+                  )}
+                  {product.isKitchenItem ? (
+                    <span className="text-[10px] font-bold text-orange-500 bg-orange-50 dark:bg-orange-950/40 px-1.5 py-0.5 rounded">
+                      Kitchen
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-bold text-blue-500 bg-blue-50 dark:bg-blue-950/40 px-1.5 py-0.5 rounded">
+                      Bar
+                    </span>
+                  )}
+                </div>
               </div>
 
               {/* Product Name */}

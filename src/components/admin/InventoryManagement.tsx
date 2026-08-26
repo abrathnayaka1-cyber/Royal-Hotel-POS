@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { fetchApi } from '../../lib/api.ts';
-import { SystemSettings } from '../../types.ts';
+import { SystemSettings, Product } from '../../types.ts';
 import { StockImportModal } from './StockImportModal.tsx';
+import { BarcodePrintModal } from './BarcodePrintModal.tsx';
 import {
   Package,
   PlusCircle,
@@ -16,7 +17,8 @@ import {
   Layers,
   ArrowDownCircle,
   ArrowUpCircle,
-  UploadCloud
+  UploadCloud,
+  Printer
 } from 'lucide-react';
 
 interface VariantInventoryItem {
@@ -61,6 +63,18 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
   const currencySymbol = settings?.currencySymbol || 'Rs.';
 
   const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
+  const [isBarcodePrintModalOpen, setIsBarcodePrintModalOpen] = useState<boolean>(false);
+  const [selectedVariantForPrint, setSelectedVariantForPrint] = useState<string | undefined>(undefined);
+  const [productsList, setProductsList] = useState<Product[]>([]);
+
+  const loadProducts = async () => {
+    try {
+      const prods = await fetchApi<Product[]>('/products');
+      setProductsList(Array.isArray(prods) ? prods : []);
+    } catch (err) {
+      console.warn('Failed to load products for barcode printing:', err);
+    }
+  };
 
   const loadInventory = async () => {
     try {
@@ -133,7 +147,8 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
       const matchName = (item.productName || '').toLowerCase().includes(q);
       const matchSize = (item.size || '').toLowerCase().includes(q);
       const matchSku = item.sku?.toLowerCase().includes(q);
-      if (!matchName && !matchSize && !matchSku) return false;
+      const matchBarcode = item.barcode?.toLowerCase().includes(q);
+      if (!matchName && !matchSize && !matchSku && !matchBarcode) return false;
     }
     return true;
   });
@@ -152,6 +167,18 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={async () => {
+              await loadProducts();
+              setSelectedVariantForPrint(undefined);
+              setIsBarcodePrintModalOpen(true);
+            }}
+            className="px-3.5 py-2.5 bg-blue-50 dark:bg-blue-950/60 hover:bg-blue-100 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer w-fit"
+            title="Print Barcode Labels for Bottle Variants (Shots excluded)"
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>Print Bottle Barcodes</span>
+          </button>
           <button
             id="smart-import-btn"
             onClick={() => setIsImportModalOpen(true)}
@@ -288,7 +315,13 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
                   </td>
 
                   <td className="py-3 px-4 font-mono text-[11px] text-slate-500">
-                    {item.sku || '—'}
+                    <div>{item.sku || '—'}</div>
+                    {item.barcode && (
+                      <div className="text-[10px] text-slate-400 font-semibold flex items-center gap-1 mt-0.5">
+                        <span className="text-[9px] bg-slate-100 dark:bg-slate-800 px-1 py-0.5 rounded text-slate-500">BARCODE</span>
+                        <span>{item.barcode}</span>
+                      </div>
+                    )}
                   </td>
 
                   <td className="py-3 px-4 text-slate-600 dark:text-slate-400">
@@ -345,6 +378,19 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
                       </span>
                     ) : (
                     <div className="flex items-center justify-end gap-1.5">
+                      <button
+                        onClick={async () => {
+                          await loadProducts();
+                          setSelectedVariantForPrint(item.variantId || item.id);
+                          setIsBarcodePrintModalOpen(true);
+                        }}
+                        className="px-2 py-1 bg-blue-50 text-blue-700 hover:bg-blue-100 dark:bg-blue-950/50 dark:text-blue-300 rounded-lg font-bold text-[11px] flex items-center gap-1 transition-colors cursor-pointer"
+                        title="Print Barcode Stickers for this Bottle Size"
+                      >
+                        <Printer className="w-3.5 h-3.5" />
+                        Label
+                      </button>
+
                       <button
                         onClick={() => openActionModal('IN', item)}
                         className="px-2.5 py-1 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-950/50 dark:text-emerald-300 dark:hover:bg-emerald-900/50 rounded-lg font-bold text-[11px] flex items-center gap-1 transition-colors cursor-pointer"
@@ -478,6 +524,15 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
         onClose={() => setIsImportModalOpen(false)}
         onImported={loadInventory}
         currencySymbol={currencySymbol}
+      />
+
+      {/* Bottle Barcode Sticker Printer Modal */}
+      <BarcodePrintModal
+        isOpen={isBarcodePrintModalOpen}
+        onClose={() => setIsBarcodePrintModalOpen(false)}
+        products={productsList}
+        settings={settings}
+        initialSelectedVariantId={selectedVariantForPrint}
       />
     </div>
   );
