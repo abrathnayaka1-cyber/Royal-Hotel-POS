@@ -56,7 +56,7 @@
 - **Degrades gracefully without a key**: with no `GEMINI_API_KEY` the same endpoint returns a deterministic **rule-based** report (same schema), so the Super Admin always sees a status plus a clear prompt to set the key for AI analysis.
 - **Informs the Super Admin in-app**: results persist to the database and render as a status banner (all systems healthy / attention required / critical) with issues & recommended actions — no external services required.
 - Endpoints: `GET /api/ai/health-check` (latest report) and `POST /api/ai/health-check` (run a fresh check, Super Admin only). A rule-based report is seeded on boot so the card is never empty.
-- Configure via `GEMINI_API_KEY` (get one at https://aistudio.google.com/apikey) and optional `GEMINI_MODEL` (default `gemini-2.0-flash`).
+- Configure via `GEMINI_API_KEY` (get one at https://aistudio.google.com/apikey) and optional `GEMINI_MODEL` (default `gemini-3.6-flash`). The retired `gemini-2.0-flash` value is automatically remapped to the new default.
 
 ### v1.1.2 — Recipe Stock-Impact & Verification
 - **Live stock impact in the recipe editor**: every ingredient row shows "1 portion deducts −X · Stock A → B" (green when enough, red when short)

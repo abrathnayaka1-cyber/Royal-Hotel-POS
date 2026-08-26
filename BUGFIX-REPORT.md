@@ -10,7 +10,7 @@
 - **Server-side Gemini integration** (`@google/generative-ai`): `POST /api/ai/health-check` (Super Admin only) එක live system snapshot එකක් (DB writability, low/out-of-stock, revenue, bills, bookings, held bills, KOTs, kitchen ingredients) ගෙන Gemini LLM එකට යවලා plain-English health report — status, issues, recommended actions — return කරනවා. `GET /api/ai/health-check` එක latest report එක fetch කරයි; **boot එකේදීම rule-based report එකක් seed** වෙනවා.
 - **Degrades gracefully without a key:** `GEMINI_API_KEY` නැති වුණොත් same endpoint එක deterministic **rule-based** report එකක් (same schema) return කරනවා + UI එකේ "set GEMINI_API_KEY" hint එකක්. Fake key එකක් දැම්මොත් Gemini call fail වී රූලි-බේල්ස් වලට fallback + warning issue එකක් දානවා (verified).
 - **In-app Super Admin notification:** Admin Dashboard එකේ "AI System Health Check" card එකක් — status banner (all healthy / attention / critical) + issues list + recommended actions + "Run Health Check" button. No external services needed.
-- Env: `GEMINI_API_KEY` (+ optional `GEMINI_MODEL`, default `gemini-2.0-flash`). Version → **1.3.0**.
+- Env: `GEMINI_API_KEY` (+ optional `GEMINI_MODEL`, default `gemini-3.6-flash`; the retired `gemini-2.0-flash` value is automatically remapped). Version → **1.3.0**.
 
 **වැඩ කරද්දී අහු වුණු කුඩා bug එකක් — fix කළා:**
 | # | Bug | Fix |

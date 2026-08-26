@@ -206,7 +206,13 @@ const SESSION_SECRET = resolveSessionSecret();
 // rule-based report (same schema) so the Super Admin dashboard always has a
 // health status to show, and a clear hint that the AI needs a key to activate.
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY?.trim() || '';
-const GEMINI_MODEL = process.env.GEMINI_MODEL?.trim() || 'gemini-2.0-flash';
+const DEFAULT_GEMINI_MODEL = 'gemini-3.6-flash';
+const configuredGeminiModel = process.env.GEMINI_MODEL?.trim() || '';
+// gemini-2.0-flash was retired by Google. Keep an alias so an old deployed
+// .env does not continue failing even when GEMINI_MODEL was explicitly set.
+const GEMINI_MODEL = configuredGeminiModel === 'gemini-2.0-flash'
+  ? DEFAULT_GEMINI_MODEL
+  : configuredGeminiModel || DEFAULT_GEMINI_MODEL;
 // Cache a GenerativeModel instance so repeated health checks don't re-scan tokens.
 let geminiModel: ReturnType<GoogleGenerativeAI['getGenerativeModel']> | null = null;
 function getGeminiModel() {
