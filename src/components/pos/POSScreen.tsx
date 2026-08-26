@@ -15,10 +15,10 @@ import { RoomBookingTicketModal } from './RoomBookingTicketModal.tsx';
 import { DamageReportModal } from './DamageReportModal.tsx';
 import { BarcodeScannerListener } from './BarcodeScannerListener.tsx';
 import { usePOS } from '../../context/POSContext.tsx';
-import { Loader2 } from 'lucide-react';
+import { Loader2, CheckCircle2, AlertTriangle, XCircle, X } from 'lucide-react';
 
 export const POSScreen: React.FC = () => {
-  const { isLoading, selectedCategory } = usePOS();
+  const { isLoading, selectedCategory, scanNotice, clearScanNotice } = usePOS();
 
   if (isLoading) {
     return (
@@ -50,6 +50,32 @@ export const POSScreen: React.FC = () => {
           <RoomsView />
         ) : (
           <main className="flex-1 flex flex-col overflow-hidden p-3 md:p-4 gap-3 bg-slate-100 dark:bg-slate-950 min-w-0">
+            {/* Scan Notification Banner */}
+            {scanNotice && (
+              <div
+                className={`p-3 rounded-xl border text-xs font-bold flex items-center justify-between shadow-xs transition-all duration-200 animate-in fade-in slide-in-from-top-2 ${
+                  scanNotice.type === 'success'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/80 border-emerald-300 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
+                    : scanNotice.type === 'warning'
+                    ? 'bg-amber-50 dark:bg-amber-950/80 border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200'
+                    : 'bg-rose-50 dark:bg-rose-950/80 border-rose-300 dark:border-rose-800 text-rose-900 dark:text-rose-200'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  {scanNotice.type === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />}
+                  {scanNotice.type === 'warning' && <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />}
+                  {scanNotice.type === 'error' && <XCircle className="w-4 h-4 text-rose-600 shrink-0" />}
+                  <span>{scanNotice.message}</span>
+                </div>
+                <button
+                  onClick={clearScanNotice}
+                  className="p-1 hover:bg-black/5 dark:hover:bg-white/10 rounded-lg text-slate-500 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
             {/* Top Search & Filter Bar */}
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3 rounded-xl shadow-xs">
               <CategoryTabs />

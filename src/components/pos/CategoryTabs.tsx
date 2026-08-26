@@ -1,6 +1,6 @@
 import React from 'react';
 import { usePOS } from '../../context/POSContext.tsx';
-import { Search, Wine, Utensils, Beer, Sparkles, Filter, X, GlassWater, BedDouble } from 'lucide-react';
+import { Search, Wine, Utensils, Beer, Sparkles, Filter, X, GlassWater, BedDouble, Barcode } from 'lucide-react';
 
 export const CategoryTabs: React.FC = () => {
   const {
@@ -13,6 +13,7 @@ export const CategoryTabs: React.FC = () => {
     selectedCompany,
     setSelectedCompany,
     rooms,
+    handleBarcodeScan,
   } = usePOS();
 
   const occupiedRoomsCount = rooms.filter(r => r.status === 'occupied').length;
@@ -31,25 +32,56 @@ export const CategoryTabs: React.FC = () => {
     <div className="flex flex-col gap-2.5">
       {/* Search & Brand Filter Bar */}
       <div className="flex flex-col sm:flex-row gap-2 items-center justify-between">
-        {/* Live Search Input */}
-        <div className="relative w-full sm:w-80">
-          <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-          <input
-            id="pos-search-input"
-            type="text"
-            placeholder="Search brand, liquor, dish, barcode..."
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            className="w-full pl-9.5 pr-8 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-semibold text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500 shadow-2xs"
-          />
-          {searchQuery && (
-            <button
-              onClick={() => setSearchQuery('')}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 rounded-full"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          )}
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          {/* Live Search Input */}
+          <div className="relative w-full sm:w-80">
+            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <input
+              id="pos-search-input"
+              type="text"
+              placeholder="Search brand, liquor, dish, barcode..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && searchQuery.trim().length >= 3) {
+                  const matched = handleBarcodeScan(searchQuery.trim());
+                  if (matched) {
+                    setSearchQuery('');
+                  }
+                }
+              }}
+              className="w-full pl-9.5 pr-8 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-semibold text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500 shadow-2xs"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 rounded-full cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Quick Barcode Scan Button */}
+          <button
+            type="button"
+            onClick={() => {
+              if (searchQuery.trim()) {
+                const matched = handleBarcodeScan(searchQuery.trim());
+                if (matched) setSearchQuery('');
+              } else {
+                const code = prompt('Scan or enter Bar Item Barcode / SKU:');
+                if (code && code.trim()) {
+                  handleBarcodeScan(code.trim());
+                }
+              }
+            }}
+            className="px-3 py-2 bg-blue-50 dark:bg-blue-950/60 hover:bg-blue-100 dark:hover:bg-blue-900/80 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800/80 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shrink-0 transition-colors shadow-2xs"
+            title="Barcode Purchase: Only Bar items can be scanned"
+          >
+            <Barcode className="w-4 h-4" />
+            <span className="hidden sm:inline">Scan Bar Code</span>
+          </button>
         </div>
 
         {/* Brand / Company Dropdown Filter */}

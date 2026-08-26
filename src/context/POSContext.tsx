@@ -86,6 +86,8 @@ interface POSContextType {
   refreshProducts: () => Promise<void>;
   refreshHeldBills: () => Promise<void>;
   handleBarcodeScan: (barcode: string) => boolean;
+  scanNotice: { message: string; type: 'success' | 'warning' | 'error' } | null;
+  clearScanNotice: () => void;
   openRoomBookingModal: (room?: Room | null) => void;
   closeRoomBookingModal: () => void;
   openBookingTicketModal: (booking: RoomBooking) => void;
@@ -143,6 +145,20 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [selectedRoomForBooking, setSelectedRoomForBooking] = useState<Room | null>(null);
   const [recentBookingTicket, setRecentBookingTicket] = useState<RoomBooking | null>(null);
   const [isBookingTicketModalOpen, setIsBookingTicketModalOpen] = useState<boolean>(false);
+
+  const [scanNotice, setScanNotice] = useState<{ message: string; type: 'success' | 'warning' | 'error' } | null>(null);
+
+  const clearScanNotice = useCallback(() => {
+    setScanNotice(null);
+  }, []);
+
+  useEffect(() => {
+    if (!scanNotice) return;
+    const timer = setTimeout(() => {
+      setScanNotice(null);
+    }, 4500);
+    return () => clearTimeout(timer);
+  }, [scanNotice]);
 
   const loadData = useCallback(async () => {
     try {
@@ -660,20 +676,59 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!scannedCode) return false;
     const cleanCode = scannedCode.trim().toLowerCase();
 
+    let matchedProduct: Product | null = null;
+    let matchedVariant: ProductVariant | null = null;
+
     for (const p of products) {
       if (!p.isActive || p.isArchived) continue;
       for (const v of p.variants) {
         if (!v.isActive) continue;
         if (
-          (v.barcode && v.barcode.toLowerCase() === cleanCode) ||
-          (v.sku && v.sku.toLowerCase() === cleanCode)
+          (v.barcode && v.barcode.trim().toLowerCase() === cleanCode) ||
+          (v.sku && v.sku.trim().toLowerCase() === cleanCode)
         ) {
-          addToCart(p, v, 1);
-          return true;
+          matchedProduct = p;
+          matchedVariant = v;
+          break;
         }
       }
+      if (matchedProduct) break;
     }
-    return false;
+
+    if (!matchedProduct || !matchedVariant) {
+      setScanNotice({
+        type: 'error',
+        message: `No item found matching barcode/SKU "${scannedCode}".`,
+      });
+      return false;
+    }
+
+    // CHECK BAR ITEM RESTRICTION:
+    // Barcode purchasing is strictly allowed for Bar items only.
+    // Kitchen / Food items or items in 'restaurant' category CANNOT be purchased via barcode.
+    const category = categories.find(c => c.id === matchedProduct!.categoryId);
+    const isKitchen = Boolean(matchedProduct.isKitchenItem || category?.type === 'restaurant');
+
+    if (isKitchen) {
+      setScanNotice({
+        type: 'warning',
+        message: `Barcode purchasing is allowed for BAR ITEMS only. "${matchedProduct.name}" is a Kitchen/Restaurant item.`,
+      });
+      return false;
+    }
+
+    // Check if matched variant is a Shot size vs Bottle size
+    const isShot = Boolean(matchedProduct.servesShots && matchedVariant.isShot);
+
+    // Valid Bar Item - Add to Cart
+    addToCart(matchedProduct, matchedVariant, 1);
+    setScanNotice({
+      type: 'success',
+      message: isShot
+        ? `Added to cart: ${matchedProduct.name} (${matchedVariant.size} 🥃 Shot) via Barcode`
+        : `Added to cart: ${matchedProduct.name} (${matchedVariant.size} 🍾 Bottle) via Barcode`,
+    });
+    return true;
   };
 
   return (
@@ -746,6 +801,8 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         completeCheckout,
         refreshProducts,
         refreshHeldBills,
+        scanNotice,
+        clearScanNotice,
         handleBarcodeScan,
         openRoomBookingModal,
         closeRoomBookingModal,

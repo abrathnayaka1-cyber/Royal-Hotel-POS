@@ -137,6 +137,11 @@ export const VariantSelectorModal: React.FC = () => {
                           Shot {variant.shotVolumeMl ? `${variant.shotVolumeMl}ml` : ''} • from 750ml bottle
                         </span>
                       )}
+                      {variant.barcode && (
+                        <span className="text-[10px] font-mono text-slate-400 block mt-1" title="Barcode for this size">
+                          🏷️ Barcode: {variant.barcode}
+                        </span>
+                      )}
                     </div>
 
                     <div className="mt-2.5">

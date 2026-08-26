@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { fetchApi } from '../../lib/api.ts';
 import { Product, ProductVariant, Category, Company, SystemSettings } from '../../types.ts';
+import { BarcodePrintModal } from './BarcodePrintModal.tsx';
 import {
   Plus,
   Edit2,
@@ -15,7 +16,8 @@ import {
   Archive,
   RefreshCw,
   PlusCircle,
-  Tag
+  Tag,
+  Printer
 } from 'lucide-react';
 
 export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = ({ settings }) => {
@@ -23,6 +25,7 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
   const [categories, setCategories] = useState<Category[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isBarcodePrintModalOpen, setIsBarcodePrintModalOpen] = useState<boolean>(false);
   const [search, setSearch] = useState<string>('');
   const [filterCategory, setFilterCategory] = useState<string>('all');
   const [filterCompany, setFilterCompany] = useState<string>('all');
@@ -136,7 +139,7 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
   const addVariantRow = () => {
     setFormVariants([
       ...formVariants,
-      { size: 'New Size', sku: '', costPrice: 0, sellingPrice: 0, stock: 10, minStockLevel: 5, isActive: true },
+      { size: 'New Size', sku: '', barcode: '', costPrice: 0, sellingPrice: 0, stock: 10, minStockLevel: 5, isActive: true },
     ]);
   };
 
@@ -257,6 +260,14 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
         </div>
 
         <div className="flex items-center gap-2.5">
+          <button
+            onClick={() => setIsBarcodePrintModalOpen(true)}
+            className="px-3.5 py-2.5 bg-blue-50 dark:bg-blue-950/60 hover:bg-blue-100 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
+            title="Print Barcode Labels for Full Bottles, Half Bottles & Cans (Shots excluded)"
+          >
+            <Printer className="w-4 h-4" />
+            <span>Print Bottle Barcodes</span>
+          </button>
           <button
             onClick={loadData}
             className="p-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 rounded-xl text-slate-600 dark:text-slate-300 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
@@ -572,11 +583,14 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
               <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                      Bottle Sizes / Portions & Price Setup
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2 flex-wrap">
+                      <span>Bottle Sizes / Portions & Price Setup</span>
+                      <span className="text-[10px] font-semibold bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 px-2 py-0.5 rounded-full border border-blue-200 dark:border-blue-800">
+                        🏷️ Barcode POS Purchase Enabled
+                      </span>
                     </h3>
                     <p className="text-[11px] text-slate-500">
-                      Each size holds independent stock, cost price, and selling price.
+                      Each size holds independent stock, pricing, and barcode (barcodes scan & purchase Bar items only).
                     </p>
                   </div>
                   <button
@@ -595,6 +609,7 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
                       <tr className="bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-bold">
                         <th className="py-2.5 px-3">Size / Portion Name *</th>
                         <th className="py-2.5 px-3">SKU / Code</th>
+                        <th className="py-2.5 px-3">Barcode (POS)</th>
                         <th className="py-2.5 px-3">Cost Price ({currencySymbol})</th>
                         <th className="py-2.5 px-3">Selling Price ({currencySymbol}) *</th>
                         <th className="py-2.5 px-3">Stock Qty</th>
@@ -653,6 +668,19 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
                                 setFormVariants(copy);
                               }}
                               className="w-full px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs"
+                            />
+                          </td>
+                          <td className="py-2 px-3">
+                            <input
+                              type="text"
+                              placeholder="e.g. 4791..."
+                              value={variant.barcode || ''}
+                              onChange={e => {
+                                const copy = [...formVariants];
+                                copy[idx].barcode = e.target.value;
+                                setFormVariants(copy);
+                              }}
+                              className="w-full px-2 py-1 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-mono"
                             />
                           </td>
                           <td className="py-2 px-3">
@@ -761,6 +789,14 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
           </div>
         </div>
       )}
+
+      {/* Barcode Sticker Printer Modal */}
+      <BarcodePrintModal
+        isOpen={isBarcodePrintModalOpen}
+        onClose={() => setIsBarcodePrintModalOpen(false)}
+        products={products}
+        settings={settings}
+      />
     </div>
   );
 };
