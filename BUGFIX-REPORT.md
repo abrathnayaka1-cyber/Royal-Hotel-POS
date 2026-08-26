@@ -2,6 +2,23 @@
 
 සම්පූර්ණ system එක පරීක්ෂා කර හමු වූ bugs සහ ඒවාට කළ නිවැරදි කිරීම්.
 
+## ✨ v1.3.0 — AI System Health Check (Gemini) — new feature
+
+**ඉල්ලීම:** "System eke Health eka check karanna + AI ekak thiyenne" — POS එකට **AI assistant** එකක් දාලා Super Admin va **in-app** notify කරන්න.
+
+**කළ දේ:**
+- **Server-side Gemini integration** (`@google/generative-ai`): `POST /api/ai/health-check` (Super Admin only) එක live system snapshot එකක් (DB writability, low/out-of-stock, revenue, bills, bookings, held bills, KOTs, kitchen ingredients) ගෙන Gemini LLM එකට යවලා plain-English health report — status, issues, recommended actions — return කරනවා. `GET /api/ai/health-check` එක latest report එක fetch කරයි; **boot එකේදීම rule-based report එකක් seed** වෙනවා.
+- **Degrades gracefully without a key:** `GEMINI_API_KEY` නැති වුණොත් same endpoint එක deterministic **rule-based** report එකක් (same schema) return කරනවා + UI එකේ "set GEMINI_API_KEY" hint එකක්. Fake key එකක් දැම්මොත් Gemini call fail වී රූලි-බේල්ස් වලට fallback + warning issue එකක් දානවා (verified).
+- **In-app Super Admin notification:** Admin Dashboard එකේ "AI System Health Check" card එකක් — status banner (all healthy / attention / critical) + issues list + recommended actions + "Run Health Check" button. No external services needed.
+- Env: `GEMINI_API_KEY` (+ optional `GEMINI_MODEL`, default `gemini-2.0-flash`). Version → **1.3.0**.
+
+**වැඩ කරද්දී අහු වුණු කුඩා bug එකක් — fix කළා:**
+| # | Bug | Fix |
+|---|-----|-----|
+| 51 | **Shot variants false "out-of-stock" critical** — health snapshot එකේ `isShot` variants (100ml Shot Plus, 50ml Peg, 25ml Single Shot වගේ) `stock: 0` තියාගෙන ඉන්නවා (ඒවා 750ml bottle එකෙන් pour වෙනවා, independent stock නැහැ). Health check එක ඒවා "out-of-stock" කියලා false **CRITICAL** status එකක් දුන්නා | `collectHealthSnapshot()` එකේදී `!isShotVariant(p, v)` filter එක එකතු කළා — shot variants අඩු/*ඉවර* counts වලින් exclude. Fresh DB boot check එක දැන් **healthy (0 issues)** ✅ |
+
+**Verification:** `tsc --noEmit` clean ✅ · `npm run build` OK ✅ · e2e suites **141/141** pass (clean DB baseline) ✅ · authz 401/403 නිවැරදියි ✅ · no-key → rule-based, fake-key → graceful fallback ✅ · false-positive fix verified (out-of-stock 0).
+
 ## 🔧 Seventh Audit Round (2026-08-26) — System health check, frontend crash fix & security hardening
 
 **ක්‍රමය:** අලුත් `npm install` එකකින් (fresh node_modules) පටන් ගෙන — typecheck, production build, සම්පූර්ණ e2e suites (7ක්) නැවත run, සහ ජීවත් වන server එකක් මත auth / users / rooms / bookings / settings / companies / imports / reports / backups හරහා adversarial probes. සමස්ත system එක **healthy** ✅ — හමු වූ කුඩා කරුණු පහත.

@@ -15,9 +15,10 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { createServer as createViteServer } from 'vite';
 import bcrypt from 'bcryptjs';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { z } from 'zod';
 import { APP_ROOT, DIST_DIR, resolveDataDir } from './server/paths.ts';
-import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking, StockImport, StockImportRowResult, StockImportType, KitchenIngredient, KitchenStockMovement, KitchenRecipe, KitchenRecipeItem, KitchenWastageRecord, KitchenPhysicalCount, KitchenAdjustmentRequest, KITCHEN_WASTAGE_CATEGORIES, KitchenWastageCategory, KitchenDeductionSnapshot } from './server/db.ts';
+import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking, StockImport, StockImportRowResult, StockImportType, KitchenIngredient, KitchenStockMovement, KitchenRecipe, KitchenRecipeItem, KitchenWastageRecord, KitchenPhysicalCount, KitchenAdjustmentRequest, KITCHEN_WASTAGE_CATEGORIES, KitchenWastageCategory, KitchenDeductionSnapshot, HealthReport, HealthReportIssue } from './server/db.ts';
 
 const app = express();
 
@@ -197,6 +198,25 @@ function resolveSessionSecret(): string {
 }
 
 const SESSION_SECRET = resolveSessionSecret();
+
+// === AI Health Check (Gemini) — optional, degrades gracefully without a key ===
+// When GEMINI_API_KEY is set the health-check endpoint asks Gemini to analyse a
+// live system snapshot and return a plain-English health report (issues +
+// recommendations). When it is NOT set, the same endpoint returns a structured
+// rule-based report (same schema) so the Super Admin dashboard always has a
+// health status to show, and a clear hint that the AI needs a key to activate.
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY?.trim() || '';
+const GEMINI_MODEL = process.env.GEMINI_MODEL?.trim() || 'gemini-2.0-flash';
+// Cache a GenerativeModel instance so repeated health checks don't re-scan tokens.
+let geminiModel: ReturnType<GoogleGenerativeAI['getGenerativeModel']> | null = null;
+function getGeminiModel() {
+  if (!GEMINI_API_KEY) return null;
+  if (!geminiModel) {
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+    geminiModel = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+  }
+  return geminiModel;
+}
 
 // Revoked tokens with TTL auto-cleanup
 const revokedTokens = new Map<string, number>(); // token -> expiresAt
@@ -457,6 +477,236 @@ app.get('/api/health', (req, res) => {
       ...(persistError ? { lastError: persistError.message } : {}),
     },
   });
+});
+
+// ==========================================
+// AI HEALTH CHECK (v1.3.0) — Gemini-backed system health report
+// ==========================================
+// Gathers a live snapshot of the whole system, lets Gemini (when configured)
+// turn it into a plain-English report, and stores it so the Super Admin
+// dashboard can surface it in-app. Without a GEMINI_API_KEY the same snapshot
+// is analysed by a deterministic rule-based engine, so the UI always has a
+// status to show and a clear prompt to enable the AI.
+
+/** Live, read-only snapshot of every subsystem the health check cares about. */
+function collectHealthSnapshot() {
+  const persistError = db.getLastPersistError();
+  const products = db.raw.products || [];
+  const activeProducts = products.filter(p => p.isActive && !p.isArchived);
+  // Shot variants pour from the 750ml bottle and hold no independent stock, so
+  // they must never be reported as low/out-of-stock (that would be a false alarm).
+  const activeVariants = activeProducts.flatMap(p => (p.variants || []).filter(v => v.isActive && !isShotVariant(p, v)));
+
+  const lowStockItems = activeVariants
+    .filter(v => v.stock > 0 && v.stock <= v.minStockLevel)
+    .map(v => ({ product: (activeProducts.find(p => p.id === v.productId)?.name || '?'), size: v.size, stock: v.stock, min: v.minStockLevel, sku: v.sku }));
+  const outOfStockItems = activeVariants
+    .filter(v => v.stock <= 0)
+    .map(v => ({ product: (activeProducts.find(p => p.id === v.productId)?.name || '?'), size: v.size, stock: v.stock, sku: v.sku }));
+
+  const bills = db.raw.bills || [];
+  const today = new Date().toISOString().split('T')[0];
+  const todayBills = bills.filter(b => (b.paidAt || b.createdAt).split('T')[0] === today);
+  const todayRevenue = todayBills.reduce((s, b) => s + Number(b.grandTotal || 0), 0);
+
+  const bookings = db.raw.roomBookings || [];
+  const activeBookings = bookings.filter(b => b.status === 'confirmed' || b.status === 'checked_in');
+  const rooms = db.raw.rooms || [];
+  const occupiedRooms = rooms.filter(r => r.status === 'occupied' || r.status === 'reserved');
+
+  const ingredients = db.raw.kitchenIngredients || [];
+  const lowIngredients = ingredients.filter(i => i.currentStock <= (i.minStockLevel || 0));
+
+  const activeBookingsCount = activeBookings.length;
+  const occupiedRoomsCount = occupiedRooms.length;
+
+  const metadata: Record<string, number | string | boolean> = {
+    dbWritable: !persistError,
+    version: APP_VERSION,
+    uptimeSec: Math.round(process.uptime()),
+    activeProducts: activeProducts.length,
+    activeVariants: activeVariants.length,
+    lowStockCount: lowStockItems.length,
+    outOfStockCount: outOfStockItems.length,
+    todayRevenue,
+    todayBillsCount: todayBills.length,
+    totalBillsCount: bills.length,
+    activeHeldBillsCount: (db.raw.heldBills || []).length,
+    pendingKOTCount: (db.raw.kots || []).filter(k => k.status === 'pending').length,
+    activeBookings: activeBookingsCount,
+    occupiedRooms: occupiedRoomsCount,
+    kitchenIngredients: ingredients.length,
+    lowIngredientCount: lowIngredients.length,
+    activeRecipes: (db.raw.kitchenRecipes || []).filter(r => r.isActive).length,
+    auditLogCount: (db.raw.auditLogs || []).length,
+  };
+
+  return {
+    metadata,
+    lowStockItems,
+    outOfStockItems,
+    lowIngredients: lowIngredients.map(i => ({ name: i.name, stock: i.currentStock, min: i.minStockLevel })),
+    persistError: persistError ? { message: persistError.message } : undefined,
+  };
+}
+
+/** Deterministic rule-based report used when Gemini is unavailable. */
+function buildRuleBasedReport(snapshot: ReturnType<typeof collectHealthSnapshot>): { overallStatus: HealthReport['overallStatus']; summary: string; issues: HealthReportIssue[]; recommendations: string[] } {
+  const issues: HealthReportIssue[] = [];
+  const recs: string[] = [];
+
+  if (snapshot.persistError) {
+    issues.push({ severity: 'critical', title: 'Database write error', detail: snapshot.persistError.message });
+    recs.push('Fix the database write error immediately. No sales can be saved while it persists.');
+  }
+  if (snapshot.outOfStockItems.length > 0) {
+    const names = snapshot.outOfStockItems.slice(0, 5).map(i => `${i.product} (${i.size})`).join(', ');
+    issues.push({ severity: 'critical', title: 'Out-of-stock items', detail: `${snapshot.outOfStockItems.length} variant(s) have no stock: ${names}${snapshot.outOfStockItems.length > 5 ? '…' : ''}` });
+    recs.push('Restock out-of-stock items or they cannot be sold.');
+  }
+  if (snapshot.lowStockItems.length > 0) {
+    const names = snapshot.lowStockItems.slice(0, 5).map(i => `${i.product} (${i.size}) at ${i.stock}/${i.min}`).join(', ');
+    issues.push({ severity: 'warning', title: 'Low-stock items', detail: `${snapshot.lowStockItems.length} variant(s) at or below minimum: ${names}${snapshot.lowStockItems.length > 5 ? '…' : ''}` });
+    recs.push('Place purchase orders for low-stock items.');
+  }
+  if (snapshot.lowIngredients.length > 0) {
+    issues.push({ severity: 'warning', title: 'Low kitchen ingredients', detail: `${snapshot.lowIngredients.length} ingredient(s) at or below minimum.` });
+    recs.push('Order kitchen ingredients below their minimum.');
+  }
+  const activeBookings = Number(snapshot.metadata.activeBookings) || 0;
+  if (activeBookings > 0) {
+    issues.push({ severity: 'info', title: 'Active room bookings', detail: `${activeBookings} booking(s) active on ${Number(snapshot.metadata.occupiedRooms) || 0} room(s).` });
+  }
+  if (snapshot.metadata.totalBillsCount === 0) {
+    recs.push('No bills recorded yet — check that the POS is being used.');
+  }
+
+  const hasCritical = issues.some(i => i.severity === 'critical');
+  const hasWarning = issues.some(i => i.severity === 'warning');
+  const overallStatus: HealthReport['overallStatus'] = hasCritical ? 'critical' : hasWarning ? 'attention' : 'healthy';
+
+  let summary: string;
+  if (overallStatus === 'critical') {
+    summary = `System needs attention: ${issues.filter(i => i.severity === 'critical').length} critical issue(s) detected. Sales may be blocked.`;
+  } else if (overallStatus === 'attention') {
+    summary = `System is running but has ${issues.filter(i => i.severity === 'warning').length} warning(s). Review the flagged items.`;
+  } else {
+    summary = `All systems healthy: ${snapshot.metadata.activeProducts} products, ${snapshot.metadata.activeVariants} variants in stock, ${snapshot.metadata.todayBillsCount} bill(s) today (Rs. ${snapshot.metadata.todayRevenue}).`;
+  }
+
+  return { overallStatus, summary, issues, recommendations: recs };
+}
+
+/** Ask Gemini for an AI-written report. Throws on any failure so the caller falls back. */
+async function askGeminiForReport(snapshot: ReturnType<typeof collectHealthSnapshot>) {
+  const model = getGeminiModel();
+  if (!model) throw new Error('GEMINI_API_KEY not configured');
+
+  const payload = {
+    systemHealth: snapshot.metadata,
+    lowStockItems: snapshot.lowStockItems,
+    outOfStockItems: snapshot.outOfStockItems,
+    lowIngredients: snapshot.lowIngredients,
+    databaseError: snapshot.persistError || null,
+  };
+
+  const prompt = [
+    'You are the system health assistant for "Royal Hotel POS" (a bar/restaurant/hotel POS).',
+    'Analyse the JSON health snapshot below and return a SHORT plain-English report.',
+    'Respond with STRICT JSON only — no markdown, no prose outside the JSON — in exactly this shape:',
+    '{"overallStatus":"healthy|attention|critical","summary":"<one or two sentences>","issues":[{"severity":"info|warning|critical","title":"...","detail":"..."}],"recommendations":["<actionable suggestion>"]}',
+    'Use "healthy" only if nothing needs action; "attention" for warnings; "critical" for anything that blocks sales (e.g. DB write errors, out-of-stock).',
+    'Keep issues to at most 6 and be specific with numbers from the snapshot.',
+    'JSON: ' + JSON.stringify(payload),
+  ].join('\n');
+
+  const result = await model.generateContent(prompt);
+  const text = result.response.text() || '';
+
+  // The model may wrap the JSON in ```json fences; strip them and grab the object.
+  const cleaned = text.replace(/```json/gi, '```').split('```').join('');
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error('Gemini returned an unparseable response');
+  }
+  const parsed = JSON.parse(cleaned.slice(start, end + 1));
+  const status = parsed.overallStatus;
+  if (status !== 'healthy' && status !== 'attention' && status !== 'critical') throw new Error('Invalid overallStatus from Gemini');
+  const issuesRaw: any[] = Array.isArray(parsed.issues) ? parsed.issues : [];
+  const issues: HealthReportIssue[] = issuesRaw.map(i => ({
+    severity: (i.severity === 'critical' || i.severity === 'warning' || i.severity === 'info') ? i.severity : 'info',
+    title: String(i.title || 'Issue'),
+    detail: String(i.detail || ''),
+  }));
+  const recommendations: string[] = Array.isArray(parsed.recommendations) ? parsed.recommendations.map((r: any) => String(r)) : [];
+
+  return {
+    overallStatus: status as HealthReport['overallStatus'],
+    summary: String(parsed.summary || 'Health check complete.'),
+    issues,
+    recommendations,
+  };
+}
+
+app.get('/api/ai/health-check', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
+  try {
+    const latest = db.getLatestHealthReport();
+    res.json({
+      configured: Boolean(GEMINI_API_KEY),
+      model: GEMINI_MODEL,
+      report: latest || null,
+      canAnalyze: Boolean(GEMINI_API_KEY),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to fetch health report.' });
+  }
+});
+
+app.post('/api/ai/health-check', authMiddleware, requireRole('super_admin'), async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user as User;
+    const snapshot = collectHealthSnapshot();
+
+    let generatedBy: HealthReport['generatedBy'] = 'rule-based';
+    let model: string | undefined;
+    let aiConfigured = Boolean(GEMINI_API_KEY);
+    let analysis = buildRuleBasedReport(snapshot);
+
+    if (GEMINI_API_KEY) {
+      try {
+        const ai = await askGeminiForReport(snapshot);
+        analysis = ai;
+        generatedBy = 'gemini';
+        model = GEMINI_MODEL;
+      } catch (aiErr: any) {
+        // Gemini down / parse failure → keep the rule-based report and surface it.
+        analysis.issues.push({ severity: 'warning', title: 'AI analysis unavailable', detail: `Gemini call failed (${aiErr.message || 'unknown error'}). Falling back to rule-based analysis.` });
+        analysis.recommendations.push('Check the GEMINI_API_KEY / model name and retry the AI health check.');
+      }
+    }
+
+    const report: HealthReport = {
+      id: `health-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      createdAt: new Date().toISOString(),
+      generatedBy,
+      aiConfigured,
+      model,
+      overallStatus: analysis.overallStatus,
+      summary: analysis.summary,
+      issues: analysis.issues,
+      recommendations: analysis.recommendations,
+      metrics: snapshot.metadata,
+    };
+
+    db.addHealthReport(report);
+    db.logAudit(user.id, user.name, user.role, 'AI_HEALTH_CHECK', 'SYSTEM', report.id,
+      `Ran ${generatedBy === 'gemini' ? 'Gemini' : 'rule-based'} health check → ${report.overallStatus}. Issues: ${report.issues.length}`);
+
+    res.json({ configured: aiConfigured, model, report });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to run health check.' });
+  }
 });
 
 // ==========================================
@@ -5702,6 +5952,31 @@ async function start() {
       ...(IS_PRODUCTION ? {} : { message: err?.message, stack: err?.stack }),
     });
   });
+
+  // Seed an initial (rule-based) health report on boot so the Super Admin
+  // dashboard has a status to render immediately, even if nobody has clicked
+  // "Run health check" and whatever GEMINI_API_KEY is configured.
+  try {
+    if (!db.getLatestHealthReport()) {
+      const snapshot = collectHealthSnapshot();
+      const analysis = buildRuleBasedReport(snapshot);
+      db.addHealthReport({
+        id: `health-${Date.now()}-boot`,
+        createdAt: new Date().toISOString(),
+        generatedBy: 'rule-based',
+        aiConfigured: Boolean(GEMINI_API_KEY),
+        model: GEMINI_MODEL,
+        overallStatus: analysis.overallStatus,
+        summary: analysis.summary,
+        issues: analysis.issues,
+        recommendations: analysis.recommendations,
+        metrics: snapshot.metadata,
+      });
+      console.log(`[AI-HEALTH] Boot health check → ${analysis.overallStatus}. ${analysis.issues.length} issue(s).`);
+    }
+  } catch (bootErr) {
+    console.warn('[AI-HEALTH] Could not seed boot health report:', bootErr);
+  }
 
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Royal Hotel POS] Running on http://0.0.0.0:${PORT}`);
