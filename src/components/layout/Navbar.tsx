@@ -14,6 +14,7 @@ import {
   Layers,
   ChefHat,
 } from 'lucide-react';
+import { BrandLogo } from '../BrandLogo.tsx';
 
 interface NavbarProps {
   currentView: 'pos' | 'admin' | 'kitchen';
@@ -83,9 +84,12 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onSwitchView }) => 
     >
       <div className="flex items-center gap-3 sm:gap-4">
         <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white flex items-center justify-center font-black text-xs shadow-md shadow-blue-600/20">
-            RH
-          </div>
+          <BrandLogo
+            className="w-8 h-8"
+            roundedClass="rounded-lg"
+            imgClassName="shadow-md shadow-blue-600/20 ring-1 ring-white/10"
+            alt="Royal Hotel POS"
+          />
           <span className="text-base sm:text-lg font-bold tracking-tight text-white">
             {settings?.businessName ? (
               <>

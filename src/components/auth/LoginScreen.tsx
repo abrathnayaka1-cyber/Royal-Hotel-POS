@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext.tsx';
 import { User, KeyRound, AlertCircle, ArrowRight, Eye, EyeOff, Lock } from 'lucide-react';
 import { ApiException } from '../../lib/api.ts';
+import { BrandLogo } from '../BrandLogo.tsx';
 
 export const LoginScreen: React.FC = () => {
   const { login } = useAuth();
@@ -41,9 +42,12 @@ export const LoginScreen: React.FC = () => {
 
       <div className="flex items-center justify-between max-w-5xl mx-auto w-full z-10 relative">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white flex items-center justify-center font-black text-base shadow-lg shadow-blue-600/20">
-            RH
-          </div>
+          <BrandLogo
+            className="w-10 h-10"
+            roundedClass="rounded-xl"
+            imgClassName="shadow-lg shadow-blue-600/20 ring-1 ring-white/10"
+            alt="Royal Hotel POS"
+          />
           <div>
             <h1 className="font-extrabold text-base tracking-tight text-white uppercase">
               Royal Hotel
