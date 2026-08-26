@@ -2,6 +2,23 @@
 
 සම්පූර්ණ system එක පරීක්ෂා කර හමු වූ bugs සහ ඒවාට කළ නිවැරදි කිරීම්.
 
+## 🔧 Fifth Audit Round (2026-08-26) — Smart Import: silent no-op + 6 more fixes
+
+**පසුබිම:** User ට Excel upload කළාම Live Inventory එකේ කිසිම වෙනසක් නොපෙනුණි. ජීවත් වන server එකක් මත real Excel upload → preview → confirm → inventory chain එක full E2E විදිහට පරීක්ෂා කළාම හමු වුණේ: **pipeline එක 100% නිවැරදියි** (96+48=144, 30+24=54, නව items, movements ledger, duplicate 409, history සියල්ල pass) — නමුත් (1) supplier-style headers (`Unit Price` / `Sales Price` / `Stock On Hand`) හඳුනා නොගැනීම නිසා quantity/prices **නිශ්ශබ්දව drop** වී, import එක "සාර්ථක" වී 0 units එකතු වුණා.
+
+| # | Bug | Fix |
+|---|-----|-----|
+| 37 | **Supplier-style Excel headers හඳුනා නොගැනීම** — `Unit Price`, `Sales Price`, `Stock On Hand`, `Category Name`, `Brand Name`, `Item Code`, `Min Stock Level`, `On Hand`, `Reorder Level`, `Invoice Ref`, `Bill Number` ආදිය mapping එකේ නැති නිසා ඒ columns නිශ්ශබ්දව අතහැරුණා → import "සාර්ථක" වුණත් **0 units** (Live Inventory එකේ වෙනසක් නැත) | `HEADER_ALIASES` එකට aliases 30+ක් එකතු කළා (sku/barcode/category/brand/name/size/buy/sell/qty/minstock/supplier/invoice) — දැන් සාමාන්‍ය supplier sheets වලින් qty සහ prices හරියට එනවා. E2E: `Unit Price/Sales Price/Stock On Hand` file එක → **96 → 144 ✅** |
+| 38 | **Silent no-op row** — quantity හෝ price නැති matched row එකක් "Import Completed" කියලා පෙන්නලා කිසිම දෙයක් change නොකළා | එවැනි row → **INVALID** + හඳුනාගත හැකි quantity headers ලැයිස්තුවක් සහිත note; confirm block වෙනවා. Preview එකේද "will add 0 units" amber warning එකක් |
+| 39 | **Duplicate SKU/Barcode හැදීම** — එකම file එකේ නව rows 2කට එකම SKU; හෝ bar-scope එකේදී non-bar product එකක SKU එකම reuse (matching index එක scope-filtered නිසා හසු නොවුණා) → duplicate code එක්ක නව variants | NEW_ITEM rows සඳහා preview එකේදීම duplicate-code guard: file ඇතුළත හෝ පවතින (ඕනෑම scope එකක) items සමග ගැටෙන SKU/Barcode → **INVALID** + note; confirm 400. E2E: දෙකම block ✅ |
+| 40 | **"Minimum Stock" column එක existing items වලට ignore වීම** — template එකේ column එකක්, නමුත් apply වුණේ නව items වලට පමණයි (තවත් silent no-op) | Matched items වලටත් apply: preview note (`Min stock 12 → 40.`), confirm එකේදී `minStockLevel` update, history detail එකේ `minStockBefore/After` display. Min-stock-පමණක් row එකක් දැන් importable (INVALID නොවේ) |
+| 41 | **Multi-sheet Excel files** — cover/terms sheet එකක් පළමුවෙන් තිබුණොත් "No valid product rows found" error | සියලුම sheets scan කරලා valid rows ඇති පළමු sheet එක භාවිතා කරනවා (+ parse note එකේ sheet name) |
+| 42 | **Invoice Date Excel serial number විදිහට එනවා** (e.g. `46245`) | `mapSheetRows` දී serial → `YYYY-MM-DD` conversion |
+| 43 | **"Keep Existing" කිව්වත් movement ledger එකේ අලුත් (rejected) buying price record වීම** | Ledger cost දැන් variant එකේ ඇත්තටම තබාගත් cost එකයි (Keep Existing → පරණ price) |
+| 44 | **Bar scope + නව category "Food"-වැනි නමක්** — නොතිබුණු category එකක් `type:'bar'` විදිහට create වීම (bar import එකෙන් "Food" කියන bar category එකක් හැදෙන්න පුළුවන්කම) | Bar scope එකේදී `inferCategoryType()` restaurant යයි පෙන්වන නව category නමක් → **INVALID** + "switch to All items" note |
+
+**Verification (fresh DB, real server):** නව audit suite එක **23/23 pass** — regression (matched+new+prices), duplicate-SKU-in-file, out-of-scope SKU clash, min-stock on matched, Keep-Existing ledger cost, "Food" category block, multi-sheet, serial date, physical count, min-stock-only row, empty-row block. පවතින e2e suites: `e2e-test.mjs` **24/24** ✅ · `e2e-edge.mjs` **29/29** ✅ · `tsc --noEmit` clean ✅
+
 ## 🔧 Fourth Audit Round (2026-08-25) — Smart Import crash fix
 
 | # | Bug | Fix |

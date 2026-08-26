@@ -481,6 +481,8 @@ export interface StockImportRowResult {
   newCostPrice?: number;
   oldSellingPrice?: number;
   newSellingPrice?: number;
+  minStockBefore?: number;
+  minStockAfter?: number;
   note?: string;
 }
 

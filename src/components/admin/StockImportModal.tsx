@@ -135,6 +135,8 @@ interface ImportDetailRow {
   newCostPrice?: number;
   oldSellingPrice?: number;
   newSellingPrice?: number;
+  minStockBefore?: number;
+  minStockAfter?: number;
 }
 
 interface InventoryPickerItem {
@@ -191,7 +193,16 @@ function mapSheetRows(json: Record<string, unknown>[]): RawImportRow[] {
     for (const [key, value] of Object.entries(obj)) {
       const field = HEADER_ALIASES[normalizeHeader(key)];
       if (!field || value === undefined || value === null || String(value).trim() === '') continue;
-      (row as Record<string, unknown>)[field] = typeof value === 'string' ? value.trim() : value;
+      let v: unknown = typeof value === 'string' ? value.trim() : value;
+      // Excel stores real date cells as serial numbers (e.g. 46245.7) — convert
+      // them to YYYY-MM-DD so the invoice date is readable and filterable.
+      if (field === 'invoiceDate' && typeof v === 'number' && v > 20000 && v < 80000) {
+        const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+        if (!isNaN(d.getTime()) && d.getUTCFullYear() >= 1900 && d.getUTCFullYear() <= 2200) {
+          v = d.toISOString().slice(0, 10);
+        }
+      }
+      (row as Record<string, unknown>)[field] = v;
     }
     return row;
   });
@@ -380,19 +391,35 @@ export const StockImportModal: React.FC<{
         setParseNote(result.note || 'PDF rows extracted — verify quantities and prices carefully in the preview.');
       } else {
         const wb = XLSX.read(buffer, { type: 'array' });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        if (!ws) throw new Error('No sheets found');
-        const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '' });
-        const rows = mapSheetRows(json).filter(r =>
-          r.productName || r.sku || r.barcode || r.size ||
-          (r.quantity !== undefined && String(r.quantity).trim() !== '')
-        );
+        if (wb.SheetNames.length === 0) throw new Error('No sheets found');
+        // Scan EVERY sheet and use the first one that actually contains product
+        // rows. Supplier workbooks often start with a cover / terms / summary
+        // sheet — reading only sheet #1 used to reject those files with
+        // "No valid product rows found".
+        let rows: RawImportRow[] = [];
+        let usedSheet = '';
+        for (const sheetName of wb.SheetNames) {
+          const ws = wb.Sheets[sheetName];
+          if (!ws) continue;
+          const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '' });
+          const candidate = mapSheetRows(json).filter(r =>
+            r.productName || r.sku || r.barcode || r.size ||
+            (r.quantity !== undefined && String(r.quantity).trim() !== '')
+          );
+          if (candidate.length > 0) {
+            rows = candidate;
+            usedSheet = sheetName;
+            break;
+          }
+        }
         if (rows.length === 0) {
           setErrorMsg('No valid product rows found. Check the column headers — download the template for the expected format.');
           return;
         }
         setRawRows(rows);
-        setParseNote(`${rows.length} row(s) detected in "${file.name}".`);
+        setParseNote(usedSheet && wb.SheetNames.length > 1
+          ? `${rows.length} row(s) detected in sheet "${usedSheet}" of "${file.name}".`
+          : `${rows.length} row(s) detected in "${file.name}".`);
         // Auto-fill invoice metadata from the file when present
         const first = rows.find(r => r.supplier || r.invoiceNumber || r.invoiceDate);
         if (first) {
@@ -596,7 +623,8 @@ export const StockImportModal: React.FC<{
                             <td className="py-2 px-3 text-right text-[11px]">
                               {r.newCostPrice !== undefined && r.oldCostPrice !== undefined && `Buy ${r.oldCostPrice}→${r.newCostPrice} `}
                               {r.newSellingPrice !== undefined && r.oldSellingPrice !== undefined && `Sell ${r.oldSellingPrice}→${r.newSellingPrice}`}
-                              {r.newCostPrice === undefined && r.newSellingPrice === undefined && '—'}
+                              {r.minStockBefore !== undefined && r.minStockAfter !== undefined && `Min ${r.minStockBefore}→${r.minStockAfter}`}
+                              {r.newCostPrice === undefined && r.newSellingPrice === undefined && r.minStockBefore === undefined && '—'}
                             </td>
                           </tr>
                         ))}
@@ -888,7 +916,7 @@ export const StockImportModal: React.FC<{
                     <div>
                       <div className="font-black text-amber-800 dark:text-amber-300">Heads up — this import will add 0 units</div>
                       <p className="text-amber-700 dark:text-amber-400 mt-0.5">
-                        Live Inventory will <strong>NOT change</strong> (no stock, only price rows). If your file has quantities, the
+                        Live Inventory stock will <strong>NOT change</strong> (only prices / minimum-stock updates). If your file has quantities, the
                         Quantity column header may not be recognized — use <strong>Quantity</strong>, <strong>Qty</strong>, <strong>Units</strong>,
                         {' '}<strong>Received</strong>, <strong>Stock</strong> or <strong>Count</strong>, or download the template.
                       </p>

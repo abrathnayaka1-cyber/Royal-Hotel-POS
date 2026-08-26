@@ -2038,6 +2038,9 @@ function processImportRows(
   const seenIdentity = new Map<string, ImportPreviewRow>();
   const newCategorySet = new Set<string>();
   const newCompanySet = new Set<string>();
+  // Codes used by NEW_ITEM rows in THIS run — prevents duplicate SKU/barcode creation.
+  const seenNewSkus = new Set<string>();
+  const seenNewBarcodes = new Set<string>();
 
   rawRows.slice(0, IMPORT_MAX_ROWS).forEach((raw, i) => {
     const decision = decisions[String(i)] || {};
@@ -2270,11 +2273,12 @@ function processImportRows(
           row.priceChange = true;
           row.status = 'PRICE_CHANGE';
         }
-        if (row.quantity === 0 && !row.priceChange) {
-          // A matched row that carries neither a quantity nor a price is a silent
-          // no-op: the import used to "succeed" while adding NOTHING to Live
-          // Inventory, which made users think their upload had failed. Flag it as
-          // INVALID with a diagnosis instead of quietly importing nothing.
+        if (row.quantity === 0 && !row.priceChange && (row.minStock === undefined || row.minStock === hit.variant.minStockLevel)) {
+          // A matched row that carries neither a quantity nor a price (nor a
+          // min-stock change) is a silent no-op: the import used to "succeed"
+          // while adding NOTHING to Live Inventory, which made users think their
+          // upload had failed. Flag it as INVALID with a diagnosis instead of
+          // quietly importing nothing.
           row.status = 'INVALID';
           row.note = 'No quantity and no price found for this row — nothing would be imported. Check that your Quantity column header is recognized (Quantity, Qty, Units, Received, Stock, Count, Stock On Hand) and that the row contains a value.';
         }
@@ -2282,6 +2286,12 @@ function processImportRows(
         row.adjustment = row.quantity - hit.variant.stock;
         row.finalStock = row.quantity;
         if (row.adjustment === 0) row.note = 'Count matches system stock — no adjustment needed.';
+      }
+      // Minimum-stock column applies to matched items too (it was silently
+      // ignored before, so the template's "Minimum Stock" did nothing on
+      // existing items).
+      if (row.minStock !== undefined && row.minStock !== hit.variant.minStockLevel) {
+        row.note = (row.note ? `${row.note} ` : '') + `Min stock ${hit.variant.minStockLevel} → ${row.minStock}.`;
       }
       seenIdentity.set(identityKey, row);
       rows.push(row);
@@ -2329,12 +2339,66 @@ function processImportRows(
         rows.push(row);
         return;
       }
+      if (!existingCat && inferCategoryType(catName) === 'restaurant') {
+        row.status = 'INVALID';
+        row.note = `"${catName}" looks like a food/restaurant category — only Bar items can be imported in this mode (a Bar-category named "${catName}" would otherwise be created). Switch the scope to "All items" if this file really contains non-Bar stock.`;
+        rows.push(row);
+        return;
+      }
     }
     if (row.sellingPrice === undefined || row.sellingPrice <= 0) {
       row.status = 'INVALID';
       row.note = 'New items need a Selling Price greater than 0.';
       rows.push(row);
       return;
+    }
+
+    // ---- Duplicate SKU / barcode guard for new items ----
+    // The matching engine only indexes items inside the current scope, so a new
+    // row whose SKU already exists on an out-of-scope product (or on another row
+    // of this same file) would otherwise create a duplicate variant with the
+    // same code. Two new rows sharing a code must also be flagged, not merged.
+    if (row.sku) {
+      const skuKey = row.sku.trim().toLowerCase();
+      if (seenNewSkus.has(skuKey)) {
+        row.status = 'INVALID';
+        row.note = `SKU "${row.sku}" is used by another row in this file — item codes must be unique. Remove the duplicate code or exclude this row.`;
+        rows.push(row);
+        return;
+      }
+      for (const p of db.raw.products) {
+        if (p.isArchived) continue;
+        for (const v of p.variants) {
+          if (v.sku && v.sku.trim().toLowerCase() === skuKey) {
+            row.status = 'INVALID';
+            row.note = `SKU "${row.sku}" is already used by existing item "${p.name} (${v.size})". Use a unique code — otherwise a duplicate item would be created.`;
+            rows.push(row);
+            return;
+          }
+        }
+      }
+      seenNewSkus.add(skuKey);
+    }
+    if (row.barcode) {
+      const barKey = row.barcode.trim().toLowerCase();
+      if (seenNewBarcodes.has(barKey)) {
+        row.status = 'INVALID';
+        row.note = `Barcode "${row.barcode}" is used by another row in this file — barcodes must be unique. Remove the duplicate barcode or exclude this row.`;
+        rows.push(row);
+        return;
+      }
+      for (const p of db.raw.products) {
+        if (p.isArchived) continue;
+        for (const v of p.variants) {
+          if (v.barcode && v.barcode.trim().toLowerCase() === barKey) {
+            row.status = 'INVALID';
+            row.note = `Barcode "${row.barcode}" is already used by existing item "${p.name} (${v.size})". Use a unique barcode — otherwise a duplicate item would be created.`;
+            rows.push(row);
+            return;
+          }
+        }
+      }
+      seenNewBarcodes.add(barKey);
     }
 
     const sameNameProducts = idx.productByName.get(importNormText(row.productName)) || [];
@@ -2597,6 +2661,13 @@ app.post('/api/inventory/import/confirm', authMiddleware, requireRole('super_adm
           stockBefore: variant.stock,
         };
 
+        // Minimum-stock column now updates matched items too (see preview note)
+        if (row.minStock !== undefined && row.minStock !== variant.minStockLevel) {
+          result.minStockBefore = variant.minStockLevel;
+          result.minStockAfter = row.minStock;
+          variant.minStockLevel = row.minStock;
+        }
+
         if (parsed.importType === 'purchase') {
           // Price updates (Accept New Price unless the admin chose Keep Existing)
           if (row.priceChange) {
@@ -2617,11 +2688,16 @@ app.post('/api/inventory/import/confirm', authMiddleware, requireRole('super_adm
             const before = variant.stock;
             variant.stock += row.quantity;
             totalUnitsAdded += row.quantity;
+            // Ledger cost must match what was actually kept on the variant: when
+            // the admin chose "Keep Existing", record the unchanged cost price.
+            const ledgerCost = decision.applyBuyingPrice === false
+              ? variant.costPrice
+              : (row.buyingPrice !== undefined ? row.buyingPrice : variant.costPrice);
             db.recordStockMovement(
               product.id, product.name, variant.id, variant.size,
               row.quantity, before, variant.stock, 'stock_in',
               user.id, user.name, movementReason, importId,
-              row.buyingPrice !== undefined ? row.buyingPrice : variant.costPrice
+              ledgerCost
             );
           }
           result.stockAfter = variant.stock;
