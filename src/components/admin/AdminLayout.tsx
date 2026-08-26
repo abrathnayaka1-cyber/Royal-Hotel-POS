@@ -15,6 +15,7 @@ import { AuditLogsView } from './AuditLogsView.tsx';
 import { SystemSettingsView } from './SystemSettingsView.tsx';
 import { RoomManagement } from './RoomManagement.tsx';
 import { KitchenLayout } from '../kitchen/KitchenLayout.tsx';
+import { BrandLogo } from '../BrandLogo.tsx';
 import {
   LayoutDashboard,
   Wine,
@@ -71,9 +72,12 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({ onSwitchToPOS }) => {
         <div>
           <div className="p-4 border-b border-slate-800 space-y-3">
             <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white flex items-center justify-center font-black text-sm shadow-md">
-                RH
-              </div>
+              <BrandLogo
+                className="w-9 h-9"
+                roundedClass="rounded-xl"
+                imgClassName="shadow-md ring-1 ring-white/10"
+                alt="Royal Hotel POS"
+              />
               <div>
                 <h2 className="font-bold text-xs text-white uppercase tracking-tight leading-tight truncate">
                   {settings?.businessName || 'Royal Hotel POS'}

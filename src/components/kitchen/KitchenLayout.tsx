@@ -10,6 +10,7 @@ import { KitchenPhysicalCount } from './KitchenPhysicalCount.tsx';
 import { KitchenFoodCost } from './KitchenFoodCost.tsx';
 import { KitchenReports } from './KitchenReports.tsx';
 import { KitchenApprovals } from './KitchenApprovals.tsx';
+import { BrandLogo } from '../BrandLogo.tsx';
 import {
   LayoutDashboard,
   Carrot,
@@ -79,9 +80,12 @@ export const KitchenLayout: React.FC<{ isAdmin?: boolean }> = ({ isAdmin = false
         <div>
           <div className="p-4 border-b border-slate-800 space-y-3">
             <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 text-white flex items-center justify-center font-black text-sm shadow-md">
-                <Carrot className="w-4.5 h-4.5" />
-              </div>
+              <BrandLogo
+                className="w-9 h-9"
+                roundedClass="rounded-xl"
+                imgClassName="shadow-md ring-1 ring-amber-500/30"
+                alt="Royal Hotel POS"
+              />
               <div>
                 <h2 className="font-bold text-xs text-white uppercase tracking-tight leading-tight truncate">
                   {settings?.businessName || 'Royal Hotel POS'}

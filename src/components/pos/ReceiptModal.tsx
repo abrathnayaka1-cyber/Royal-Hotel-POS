@@ -75,6 +75,12 @@ export const ReceiptModal: React.FC = () => {
           >
             {/* Store Header */}
             <div className="text-center space-y-0.5 border-b border-dashed border-slate-400 dark:border-slate-600 pb-3">
+              <img
+                src="/logo.png"
+                alt="Royal Hotel POS"
+                className="w-12 h-12 rounded-lg object-cover mx-auto mb-1.5"
+                draggable={false}
+              />
               <h3 className="font-extrabold text-base tracking-tight text-slate-900 dark:text-white">
                 {settings?.businessName || 'Royal Hotel & Restaurant'}
               </h3>

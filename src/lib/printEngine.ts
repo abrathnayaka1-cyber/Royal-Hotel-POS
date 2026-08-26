@@ -6,6 +6,15 @@ import { Bill, KOT, SystemSettings, OrderItem, RoomBooking, Room } from '../type
  * Never outputs PDF wrappers or blank pages.
  */
 
+/** Resolve the Royal Hotel POS brand logo against the running app origin (safe inside print iframes). */
+function getBrandLogoSrc(): string {
+  try {
+    return new URL('/logo.png', window.location.href).href;
+  } catch {
+    return '/logo.png';
+  }
+}
+
 function escapeHtml(str: string | undefined | null): string {
   if (!str) return '';
   return String(str)
@@ -99,6 +108,7 @@ function printHtmlContent(htmlContent: string, title: string = 'POS_Thermal_Rece
 export async function printThermalReceipt(bill: Bill, settings: SystemSettings | null): Promise<boolean> {
   const currencySymbol = settings?.currencySymbol || 'Rs.';
   const businessName = settings?.businessName || 'Royal Hotel & Restaurant';
+  const logoSrc = getBrandLogoSrc();
   const address = settings?.address || 'No. 42 Beach Road, Puttalam';
   const phone = settings?.phone || '+94 32 226 5500';
   const footerText = settings?.receiptFooter || 'Thank you! Come Again...';
@@ -201,6 +211,12 @@ export async function printThermalReceipt(bill: Bill, settings: SystemSettings |
             line-height: 1.2;
             margin-bottom: 2px;
           }
+          .receipt-logo {
+            width: ${is58mm ? '26px' : '32px'};
+            height: ${is58mm ? '26px' : '32px'};
+            display: block;
+            margin: 0 auto 3px auto;
+          }
           .header-subtitle {
             font-size: ${is58mm ? '10px' : '11px'};
             text-align: center;
@@ -269,6 +285,7 @@ export async function printThermalReceipt(bill: Bill, settings: SystemSettings |
       <body>
         <!-- Header -->
         <div class="text-center">
+          <img src="${logoSrc}" class="receipt-logo" alt="" />
           <div class="header-title">${escapeHtml(businessName)}</div>
           <div class="header-subtitle">${escapeHtml(address)}</div>
           <div class="header-subtitle">${escapeHtml(phone)}</div>
@@ -565,6 +582,7 @@ export async function printRoomBookingTicket(
 ): Promise<boolean> {
   const currencySymbol = settings?.currencySymbol || 'Rs.';
   const businessName = settings?.businessName || 'Royal Hotel & Restaurant';
+  const logoSrc = getBrandLogoSrc();
   const tagline = settings?.businessTagline || 'Fine Hospitality, Restaurant & Bar';
   const address = settings?.address || 'No. 42 Beach Road, Puttalam, Sri Lanka';
   const phone = settings?.phone || '+94 32 226 5500';
@@ -665,6 +683,12 @@ export async function printRoomBookingTicket(
             text-transform: uppercase;
             letter-spacing: 0.5px;
           }
+          .receipt-logo {
+            width: ${is58mm ? '26px' : '32px'};
+            height: ${is58mm ? '26px' : '32px'};
+            display: block;
+            margin: 0 auto 3px auto;
+          }
 
           .booking-title {
             font-size: ${is58mm ? '13px' : '15px'};
@@ -727,6 +751,7 @@ export async function printRoomBookingTicket(
       <body>
         <!-- Header -->
         <div class="text-center">
+          <img src="${logoSrc}" class="receipt-logo" alt="" />
           <div class="header-title">${escapeHtml(businessName)}</div>
           <div style="font-size: 10px; margin: 1px 0;">${escapeHtml(tagline)}</div>
           <div style="font-size: 9.5px;">${escapeHtml(address)}</div>
