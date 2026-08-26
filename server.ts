@@ -2593,6 +2593,7 @@ app.post('/api/inventory/import/confirm', authMiddleware, requireRole('super_adm
     const createdProducts: string[] = [];
     const resultRows: StockImportRowResult[] = [];
     const priceAudits: string[] = [];
+    let priceChangedRows = 0;
     let totalUnitsAdded = 0;
     let totalAdjustment = 0;
     let newVariants = 0;
@@ -2671,6 +2672,9 @@ app.post('/api/inventory/import/confirm', authMiddleware, requireRole('super_adm
         if (parsed.importType === 'purchase') {
           // Price updates (Accept New Price unless the admin chose Keep Existing)
           if (row.priceChange) {
+            // Count rows with any price change — must match the preview summary
+            // (priceAudits can record 2 entries for one row: buying + selling).
+            priceChangedRows++;
             if (row.newCost !== undefined && decision.applyBuyingPrice !== false) {
               priceAudits.push(`${product.name} (${variant.size}): buying ${variant.costPrice} → ${row.newCost}`);
               result.oldCostPrice = variant.costPrice;
@@ -2809,7 +2813,7 @@ app.post('/api/inventory/import/confirm', authMiddleware, requireRole('super_adm
         newVariants,
         newCategories: createdCategories.length,
         newCompanies: createdCompanies.length,
-        priceChanges: priceAudits.length,
+        priceChanges: priceChangedRows,
         totalUnitsAdded,
         totalAdjustment,
         rowsImported: applyRows.length,
@@ -3815,7 +3819,7 @@ app.get('/api/reports/daily-stock-sheet', authMiddleware, (req: Request, res: Re
       const cleanSize = v.size.replace(/Bottle|Flask|Quarter|Half|Large|Portion|Double|Single|Peg/gi, '').trim();
       const displayName = `${cleanProdName || p.name} ${cleanSize}`.trim();
 
-      if (search && !p.name.toLowerCase().includes(search) && !displayName.toLowerCase().includes(search) && !v.sku.toLowerCase().includes(search)) {
+      if (search && !p.name.toLowerCase().includes(search) && !displayName.toLowerCase().includes(search) && !String(v.sku || '').toLowerCase().includes(search)) {
         return;
       }
 
@@ -4177,7 +4181,11 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
       return res.status(400).json({ error: 'Check-out date must be after check-in date' });
     }
     const calculatedDays = Math.max(1, Math.ceil((checkOut.getTime() - checkIn.getTime()) / 86400000));
-    const days = Math.max(1, Number(durationDays) || calculatedDays);
+    // The number of nights is ALWAYS derived from the validated dates. The
+    // client-supplied durationDays used to be trusted verbatim, so a request
+    // could claim a 1-night stay with durationDays=500 and inflate the room
+    // charge to 500× the daily rate (any cashier could overcharge a guest).
+    const days = calculatedDays;
 
     const dailyRate = Math.max(0, Number(ratePerDay) || room.ratePerDay);
     const totalRoomCharge = days * dailyRate;

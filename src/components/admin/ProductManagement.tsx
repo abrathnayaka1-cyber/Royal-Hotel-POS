@@ -237,7 +237,7 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
     if (search.trim()) {
       const q = search.toLowerCase();
       const matchName = p.name.toLowerCase().includes(q);
-      const matchVariant = p.variants.some(v => v.size.toLowerCase().includes(q) || v.sku.toLowerCase().includes(q));
+      const matchVariant = p.variants.some(v => v.size.toLowerCase().includes(q) || String(v.sku || '').toLowerCase().includes(q));
       if (!matchName && !matchVariant) return false;
     }
     return true;

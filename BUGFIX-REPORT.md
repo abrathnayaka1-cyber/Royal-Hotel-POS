@@ -2,6 +2,19 @@
 
 සම්පූර්ණ system එක පරීක්ෂා කර හමු වූ bugs සහ ඒවාට කළ නිවැරදි කිරීම්.
 
+## 🔧 Sixth Audit Round (2026-08-26) — System-wide adversarial testing
+
+**ක්‍රමය:** ජීවත් වන server එකක් මත checkouts, rooms, daily stock sheet, import engine, authz, backup/restore හරහා adversarial tests 44ක් + පවතින e2e suites 141ක් (මුළු 185). හමු වූ bugs:
+
+| # | Bug | Fix |
+|---|-----|-----|
+| 45 | **Room booking charge inflation (money bug)** — server එක client එවන `durationDays` එක trust කළා. රෑ 1ක stay එකකට `durationDays: 500` යැව්වොත් **Rs. 4,250,000 charge** (8500×500) — cashier කෙනෙකුට guest කෙනෙකුව 500× overcharge කරන්න පුළුවන්. Verify: `totalRoomCharge=4250000` (1 රැයකට ඕනේ 8500) | **Nights ගණන සැමවිටම validate කළ dates දෙකෙන්ම derive** කරනවා (`calculatedDays`); client `durationDays` සම්පූර්ණයෙන් ignore. Verify: `durationDays=1, total=8500` ✅ |
+| 46 | **Daily Stock Sheet search එකෙන් 500 crash** — variant එකක `sku` එක නැති legacy data (අතීත import/restore) තිබුණොත් `v.sku.toLowerCase()` → `TypeError` → 500. ඇත්තටම reproduce කරා (sku එක strip කරපු DB එකක් restore කරලා) | `String(v.sku || '')` guard; Product Management UI search එකේ එකම bug එකත් fix (ProductManagement.tsx) |
+| 47 | **Import summary inconsistency** — preview එකේ `priceChanges` = rows ගණන, confirm එකේ = price fields ගණන (buy+sell දෙකම change වුණොත් preview 1, history 2) — done screen එකේ අගය preview එකට වඩා වැඩියි | confirm summary එකේත් **rows ගණන** (preview එකට සමාන); audit log එකේ detail එක තියෙනවා |
+| 48 | **PaymentModal UI/server mismatch** — card/bank/other methods වලදී received < grand total වුණත් Complete button එක active වුණා (server එක 400 error එකක් දෙනවා) | `isSufficient` දැන් හැම method එකකටම `received >= grandTotal` — button එක consistent විදිහට disable |
+
+**මේ round එකේම verify කරපු අනිත් සියල්ල හරි ✅** (checks 44/44): room charge derivation, daily sheet arithmetic (`received==qty, inHand+received==stock, balance==stock`), checkout validation (fractional/10001/negative qty, empty cart, unknown variant, card underpayment — හැම එකම 400), duplicate cart lines aggregated (oversell bypass නැහැ), import 2000-row limit, excluded rows, price-only imports, all-excluded 400, physical-count NEW item NEEDS_REVIEW, multi-size grouping, 401/403 authz, malformed JSON 400, unknown import 404, stock-out <0 block, shot stock-in block, backup→restore round trip, missing-sku crash fix. පවතින e2e suites 7ක්: **141/141 pass**. `tsc --noEmit` clean ✅
+
 ## 🔧 Fifth Audit Round (2026-08-26) — Smart Import: silent no-op + 6 more fixes
 
 **පසුබිම:** User ට Excel upload කළාම Live Inventory එකේ කිසිම වෙනසක් නොපෙනුණි. ජීවත් වන server එකක් මත real Excel upload → preview → confirm → inventory chain එක full E2E විදිහට පරීක්ෂා කළාම හමු වුණේ: **pipeline එක 100% නිවැරදියි** (96+48=144, 30+24=54, නව items, movements ledger, duplicate 409, history සියල්ල pass) — නමුත් (1) supplier-style headers (`Unit Price` / `Sales Price` / `Stock On Hand`) හඳුනා නොගැනීම නිසා quantity/prices **නිශ්ශබ්දව drop** වී, import එක "සාර්ථක" වී 0 units එකතු වුණා.
