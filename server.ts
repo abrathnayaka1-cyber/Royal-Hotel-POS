@@ -425,7 +425,7 @@ const userCreateSchema = z.object({
   username: z.string().trim().min(3).max(64).regex(/^[a-zA-Z0-9_.-]+$/, 'Username can only contain letters, numbers, underscore, dot and hyphen'),
   email: z.string().trim().email().max(128).optional().or(z.literal('')),
   role: z.enum(['super_admin', 'cashier', 'kitchen_manager']),
-  password: z.string().min(4).max(128),
+  password: z.string().min(8).max(128),
   pin: z.string().trim().min(2).max(16).optional().or(z.literal('')),
 });
 
@@ -587,8 +587,8 @@ app.post('/api/auth/change-password', authMiddleware, async (req: Request, res: 
   const user = (req as any).user as User;
   const { currentPassword, newPassword } = req.body;
 
-  if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 4 || newPassword.length > 128) {
-    return res.status(400).json({ error: 'New password must be between 4 and 128 characters long.' });
+  if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 8 || newPassword.length > 128) {
+    return res.status(400).json({ error: 'New password must be between 8 and 128 characters long.' });
   }
 
   // Current password is ALWAYS required - previously it could be omitted entirely,
@@ -690,7 +690,7 @@ app.put('/api/users/:id', authMiddleware, requireRole('super_admin'), async (req
   if (isActive !== undefined) user.isActive = Boolean(isActive);
 
   if (password && typeof password === 'string' && password.trim()) {
-    if (password.trim().length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters' });
+    if (password.trim().length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
     user.passwordHash = await bcrypt.hash(password.trim(), 10);
   }
 

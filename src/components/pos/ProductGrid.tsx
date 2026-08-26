@@ -43,8 +43,8 @@ export const ProductGrid: React.FC = () => {
       const matchDesc = product.description?.toLowerCase().includes(q);
       const matchVariant = product.variants.some(
         v =>
-          v.size.toLowerCase().includes(q) ||
-          v.sku.toLowerCase().includes(q) ||
+          String(v.size || '').toLowerCase().includes(q) ||
+          String(v.sku || '').toLowerCase().includes(q) ||
           (v.barcode && v.barcode.toLowerCase().includes(q))
       );
       if (!matchName && !matchDesc && !matchVariant) return false;

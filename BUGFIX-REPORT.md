@@ -2,6 +2,29 @@
 
 සම්පූර්ණ system එක පරීක්ෂා කර හමු වූ bugs සහ ඒවාට කළ නිවැරදි කිරීම්.
 
+## 🔧 Seventh Audit Round (2026-08-26) — System health check, frontend crash fix & security hardening
+
+**ක්‍රමය:** අලුත් `npm install` එකකින් (fresh node_modules) පටන් ගෙන — typecheck, production build, සම්පූර්ණ e2e suites (7ක්) නැවත run, සහ ජීවත් වන server එකක් මත auth / users / rooms / bookings / settings / companies / imports / reports / backups හරහා adversarial probes. සමස්ත system එක **healthy** ✅ — හමු වූ කුඩා කරුණු පහත.
+
+**System health — verify කළ දේ (සියල්ල හරි ✅):**
+- `npx tsc --noEmit` — clean
+- `npm run build` (vite + esbuild) — OK (chunk-size warning පමණයි, bug නොවේ)
+- `GET /api/health` — `{status:ok, database:{writable:true}}`
+- Login (Admin/Araliya2000), bad-token 401, wrong-password 401
+- e2e suites **141/141** pass: `e2e-test` 24 · `e2e-edge` 29 · `e2e-kitchen` 21 · `e2e-kitchen-sale` 12 · `e2e-recipe-snapshot` 10 · `e2e-recipe-impact` 21 · `e2e-shots` 24
+- Adversarial probes: user create (duplicate username 400, invalid role 400, self-delete 400, weak pw 400), rooms (negative rate 400, booking checkout<checkin 400, invalid date 400, zero-night 400), settings (taxRate>100 400, negative serviceCharge 400), import malformed 400, companies GET/POST, reports, audit-logs, backups — හැම endpoint එකක්ම නිවැරදි status code, **500 එකක් නැත**
+
+හමු වූ bugs සහ කළ නිවැරදි කිරීම්:
+
+| # | Bug | Fix |
+|---|-----|-----|
+| 49 | **POS product search crash (bug #46 එකේම class එක, ඉතිරි වුණු තැනක්)** — `src/components/pos/ProductGrid.tsx` එකේ තාම `v.sku.toLowerCase()` **unguarded**. Bug #46 වලින් prove වුණා runtime data එකේ (legacy import/restore) variant එකක `sku` අතුරුදහන් වෙන්න පුළුවන් කියලා (type එකේ `sku: string` කියලා තිබුණත්). `GET /api/products` එක ඒ variants නොවෙනස්ව පසුකර යවනවා (`productForClient` normalize නොකරයි). ඒ නිසා POS එකේ product search කළාම `TypeError: Cannot read properties of undefined (reading 'toLowerCase')` → React error boundary → **blank screen**. Bug #46 fix වුණේ `DailyStockSheet` + `ProductManagement` වලට පමණයි; **`ProductGrid` අතපසු වී තිබුණා** | `String(v.sku || '').toLowerCase()` guard (consistency සඳහා `String(v.size || '')` ද එකතු කළා). දැන් legacy/imported variant එකක sku නැති වුණත් search crash නොවේ ✅ |
+| 50 | **Weak minimum password length — 4 characters** — user create (`userCreateSchema`: `z.string().min(4)`), `POST /api/auth/change-password` (`< 4`), `PUT /api/users/:id` (`< 4`), සහ frontend `UserManagement.tsx` (3 තැනක `< 4`) — සියල්ල 4-char passwords පිළිගත්තා. OWASP/NIST recommend **8+** | සියලුම minimum **8** දක්වා ඉහළ නැංවූවා (server `min(8)`, change-password `< 8`, PUT user `< 8`, UserManagement `< 8`). Verified: 4-char → 400 "at least 8", 8-char → created ✅. පවතින users වල login වලට බලපාන්නේ නැහැ (login length check නොකරයි); e2e suite එකේ passwords සියල්ල ≥8 නිසා tests බිඳුනේ නැහැ ✅ |
+| — | **High-severity dependency vulnerability (`xlsx@0.18.5`)** — `npm audit` එකේ **1 high severity**: prototype pollution (GHSA-4r6h-8v6p-xvw6) + ReDoS (GHSA-5pgg-2g8v-p4x9). **No fix available** (npm එකේ patched version නැත). එය පාවිච්චි වන්නේ **client-side පමණයි** (`StockImportModal.tsx` Excel parse + `exportUtils.ts` export) නිසා impact එක cashier/browser session එකට සීමා වේ — නමුත් malicious Excel file එකකින් browser එකේ ReDoS/prototype pollution අවුල් කරන්න පුළුවන් | **Fix නැත** — known limitation ලෙස document කළා. ඊළඟ release එකකදී maintained Excel parser එකකට (e.g. `exceljs`) මාරු කිරීම recommend ✅ |
+| — | **Room booking silent date default (minor)** — `checkInDate`/`checkOutDate` එක්ක එවන්නේ නැත්නම් server එක නිශ්ශබ්දව `now` / `now+1day` ලෙස default කරනවා. Frontend එක හැම විටම දෙකම එවන නිසා live bug එකක් නොවේ; API client එකක් dates අතහැරියොත් unexpected booking එකක් නිර්මාණය වේ | Breaking change එකක් වළක්වන්න හිතාමතාම වෙනස් නොකළා. Note කර ඇත ✅ |
+
+**Verification (fresh DB, live server):** e2e suites 141/141 pass (Seven Audit Round එකට පෙර තිබූ සියල්ල regression නැත). `tsc --noEmit` clean ✅ · production build OK ✅ · password min hardening verified (4→reject, 8→accept) ✅ · ProductGrid sku fix typecheck/build OK ✅.
+
 ## 🔧 Sixth Audit Round (2026-08-26) — System-wide adversarial testing
 
 **ක්‍රමය:** ජීවත් වන server එකක් මත checkouts, rooms, daily stock sheet, import engine, authz, backup/restore හරහා adversarial tests 44ක් + පවතින e2e suites 141ක් (මුළු 185). හමු වූ bugs:
