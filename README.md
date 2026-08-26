@@ -51,6 +51,13 @@
 - Bills & Invoices with void/restore
 - Audit logs with pagination & export
 
+### v1.3.0 — AI System Health Check (Gemini)
+- **Gemini-powered health assistant** (optional, server-side): the Super Admin dashboard's **AI System Health Check** card runs a live snapshot of the `whole` system — DB writability, low/out-of-stock variants, today's revenue & bills, active room bookings, held bills, pending KOTs, kitchen ingredients — and asks the Gemini LLM to return a plain-English health report (status, issues, recommended actions).
+- **Degrades gracefully without a key**: with no `GEMINI_API_KEY` the same endpoint returns a deterministic **rule-based** report (same schema), so the Super Admin always sees a status plus a clear prompt to set the key for AI analysis.
+- **Informs the Super Admin in-app**: results persist to the database and render as a status banner (all systems healthy / attention required / critical) with issues & recommended actions — no external services required.
+- Endpoints: `GET /api/ai/health-check` (latest report) and `POST /api/ai/health-check` (run a fresh check, Super Admin only). A rule-based report is seeded on boot so the card is never empty.
+- Configure via `GEMINI_API_KEY` (get one at https://aistudio.google.com/apikey) and optional `GEMINI_MODEL` (default `gemini-2.0-flash`).
+
 ### v1.1.2 — Recipe Stock-Impact & Verification
 - **Live stock impact in the recipe editor**: every ingredient row shows "1 portion deducts −X · Stock A → B" (green when enough, red when short)
 - **Stock Check panel**: verify ANY number of portions against current material stock before saving the recipe (need / stock / short, total cost)
@@ -216,6 +223,13 @@ can no longer persist them.
 { "status": "ok", "version": "1.1.3", "uptime": 1234.5,
   "database": { "writable": true } }
 ```
+
+**AI System Health Check (v1.3.0, in-app):** the Super Admin dashboard's
+"AI System Health Check" card (`Admin → Dashboard`) runs a deeper, persistent
+health report — low/out-of-stock, revenue, bookings, kitchen ingredients,
+DB writability — and surfaces it in-app. With a `GEMINI_API_KEY` the report is
+written by the Gemini LLM (issues + recommended actions); without one it falls
+back to a rule-based summary. A rule-based report is seeded on every boot.
 
 ### Data Safety Behaviour
 

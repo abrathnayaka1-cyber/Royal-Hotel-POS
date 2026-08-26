@@ -271,6 +271,35 @@ export interface AuditLog {
 }
 
 // ==========================================
+// AI HEALTH CHECK MODULE (v1.3.0 — Gemini-backed system health)
+// ==========================================
+// Additive collection, ensured on DB load like the kitchen module. Stores the
+// most recent AI / rule-based health-check reports so the Super Admin dashboard
+// can surface system status ("inform the Super Admin" in-app) without needing
+// to poll a separate file. generatedBy tells the UI whether the summary came
+// from the Gemini LLM or the rule-based fallback (when no GEMINI_API_KEY).
+
+export interface HealthReportIssue {
+  severity: 'info' | 'warning' | 'critical';
+  title: string;
+  detail: string;
+}
+
+export interface HealthReport {
+  id: string;
+  createdAt: string;
+  generatedBy: 'gemini' | 'rule-based';
+  aiConfigured: boolean;
+  model?: string;
+  overallStatus: 'healthy' | 'attention' | 'critical';
+  summary: string;
+  issues: HealthReportIssue[];
+  recommendations: string[];
+  /** Compact key/value snapshot of the numbers the report summarises. */
+  metrics: Record<string, number | string | boolean>;
+}
+
+// ==========================================
 // FOOD & KITCHEN MODULE (v1.2.0 — Kitchen Manager role)
 // ==========================================
 // Additive collections that follow the SAME architecture as the existing
@@ -564,6 +593,8 @@ export interface DatabaseSchema {
   kitchenWastage: KitchenWastageRecord[];
   kitchenCounts: KitchenPhysicalCount[];
   kitchenAdjustmentRequests: KitchenAdjustmentRequest[];
+  // AI health-check reports (v1.3.0) — additive, ensured on load
+  healthReports: HealthReport[];
   settings: SystemSettings;
   counters: {
     billSeq: number;
@@ -1919,6 +1950,8 @@ export class Database {
           if (!Array.isArray(parsed.kitchenWastage)) parsed.kitchenWastage = [];
           if (!Array.isArray(parsed.kitchenCounts)) parsed.kitchenCounts = [];
           if (!Array.isArray(parsed.kitchenAdjustmentRequests)) parsed.kitchenAdjustmentRequests = [];
+          // AI health-check reports (v1.3.0) — additive, never destructive
+          if (!Array.isArray(parsed.healthReports)) parsed.healthReports = [];
           if (parsed.counters) {
             if (!parsed.counters.kitchenCountSeq) parsed.counters.kitchenCountSeq = 1;
             if (!parsed.counters.kitchenRequestSeq) parsed.counters.kitchenRequestSeq = 1;
@@ -2061,6 +2094,7 @@ export class Database {
       kitchenWastage: [],
       kitchenCounts: [],
       kitchenAdjustmentRequests: [],
+      healthReports: [],
       settings: defaultSettings,
       counters: {
         billSeq: 1001,
@@ -2366,6 +2400,21 @@ export class Database {
     return log;
   }
 
+  /** Store a health-check report; keeps only the most recent 20. */
+  public addHealthReport(report: HealthReport): HealthReport {
+    if (!Array.isArray(this.data.healthReports)) this.data.healthReports = [];
+    this.data.healthReports.unshift(report);
+    if (this.data.healthReports.length > 20) this.data.healthReports.pop();
+    this.save();
+    return report;
+  }
+
+  /** Most recent health-check report (or undefined if none has run yet). */
+  public getLatestHealthReport(): HealthReport | undefined {
+    if (!Array.isArray(this.data.healthReports) || this.data.healthReports.length === 0) return undefined;
+    return this.data.healthReports[0];
+  }
+
   public backupDatabase(): { filename: string; timestamp: string; size: number } {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `royal_hotel_backup_${timestamp}.json`;
@@ -2468,6 +2517,7 @@ export class Database {
     this.data.kitchenWastage = this.data.kitchenWastage || [];
     this.data.kitchenCounts = this.data.kitchenCounts || [];
     this.data.kitchenAdjustmentRequests = this.data.kitchenAdjustmentRequests || [];
+    this.data.healthReports = this.data.healthReports || [];
     this.data.settings = { ...defaultSettings, ...this.data.settings };
     this.save();
     return true;

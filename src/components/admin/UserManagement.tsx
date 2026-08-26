@@ -122,8 +122,8 @@ export const UserManagement: React.FC = () => {
         setErrorMsg('Password is required for new accounts.');
         return;
       }
-      if (formPassword.length < 4) {
-        setErrorMsg('Password must be at least 4 characters long.');
+      if (formPassword.length < 8) {
+        setErrorMsg('Password must be at least 8 characters long.');
         return;
       }
       if (formPassword !== formConfirmPassword) {
@@ -133,8 +133,8 @@ export const UserManagement: React.FC = () => {
     } else {
       // Editing existing account
       if (formPassword) {
-        if (formPassword.length < 4) {
-          setErrorMsg('New password must be at least 4 characters long.');
+        if (formPassword.length < 8) {
+          setErrorMsg('New password must be at least 8 characters long.');
           return;
         }
         if (formPassword !== formConfirmPassword) {
@@ -181,8 +181,8 @@ export const UserManagement: React.FC = () => {
     if (!targetUser) return;
     setErrorMsg(null);
 
-    if (!resetNewPassword || resetNewPassword.length < 4) {
-      setErrorMsg('New password must be at least 4 characters long.');
+    if (!resetNewPassword || resetNewPassword.length < 8) {
+      setErrorMsg('New password must be at least 8 characters long.');
       return;
     }
     if (resetNewPassword !== resetConfirmPassword) {
