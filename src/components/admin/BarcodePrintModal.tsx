@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Product, ProductVariant, SystemSettings } from '../../types.ts';
-import { encodeCode128B } from '../../lib/barcodeGenerator.ts';
+import { encodeCode128B, generateBarcodeSVG } from '../../lib/barcodeGenerator.ts';
 import { Printer, Download, X, Check, Search, Filter, Wine, AlertCircle, Info, RefreshCw } from 'lucide-react';
 import jsPDF from 'jspdf';
 
@@ -24,6 +24,16 @@ interface BarcodePrintModalProps {
   products: Product[];
   settings?: SystemSettings | null;
   initialSelectedVariantId?: string;
+}
+
+/** Escape catalogue/settings text before inserting it into the print window HTML. */
+function escapeHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 export const BarcodePrintModal: React.FC<BarcodePrintModalProps> = ({
@@ -137,24 +147,8 @@ export const BarcodePrintModal: React.FC<BarcodePrintModalProps> = ({
   /**
    * Helper to render Code128 SVG for a given barcode string
    */
-  const renderSVGString = (code: string, height: number = 32, barWidth: number = 1.5) => {
-    const cleanCode = code.trim() || '000000';
-    const bars = encodeCode128B(cleanCode);
-    const totalModules = bars.reduce((sum, b) => sum + b.width, 0);
-    const width = totalModules * barWidth;
-
-    let x = 0;
-    let rects = '';
-    for (const b of bars) {
-      const w = b.width * barWidth;
-      if (b.isBar) {
-        rects += `<rect x="${x}" y="0" width="${w}" height="${height}" fill="#000000" />`;
-      }
-      x += w;
-    }
-
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height + 12}" width="${width}" height="${height + 12}">${rects}<text x="${width / 2}" y="${height + 10}" font-family="monospace, sans-serif" font-size="9" font-weight="bold" text-anchor="middle" fill="#000000">${cleanCode}</text></svg>`;
-  };
+  const renderSVGString = (code: string, height: number = 32, barWidth: number = 1.5) =>
+    generateBarcodeSVG(code, { height, barWidth });
 
   /**
    * Triggers Browser Thermal / A4 Print window for barcode stickers
@@ -180,11 +174,11 @@ export const BarcodePrintModal: React.FC<BarcodePrintModalProps> = ({
       for (let q = 0; q < Math.max(1, item.quantity); q++) {
         labelCardsHTML += `
           <div class="sticker-card">
-            ${showBusinessName ? `<div class="biz-title">${businessName}</div>` : ''}
-            ${showProductName ? `<div class="prod-title">${item.productName}</div>` : ''}
-            ${showSize ? `<div class="prod-size">${item.size}</div>` : ''}
+            ${showBusinessName ? `<div class="biz-title">${escapeHtml(businessName)}</div>` : ''}
+            ${showProductName ? `<div class="prod-title">${escapeHtml(item.productName)}</div>` : ''}
+            ${showSize ? `<div class="prod-size">${escapeHtml(item.size)}</div>` : ''}
             <div class="barcode-svg">${svgCode}</div>
-            ${showPrice ? `<div class="prod-price">${currencySymbol} ${item.sellingPrice.toLocaleString()}</div>` : ''}
+            ${showPrice ? `<div class="prod-price">${escapeHtml(currencySymbol)} ${item.sellingPrice.toLocaleString()}</div>` : ''}
           </div>
         `;
       }
@@ -314,12 +308,33 @@ export const BarcodePrintModal: React.FC<BarcodePrintModalProps> = ({
           currentY += 3.5;
         }
 
-        // Code 128 Text fallback / representation
+        // Draw the actual Code 128 bars. The previous PDF export used pipe
+        // characters as a visual placeholder, which looked like a barcode but
+        // could not be read by a scanner.
+        const barcodeCode = item.barcode.trim() || '000000';
+        const barcodeBars = encodeCode128B(barcodeCode);
+        const barcodeModules = barcodeBars.reduce((sum, bar) => sum + bar.width, 0);
+        const barcodeHeight = 8;
+        const barcodeMaxWidth = cardW - 8;
+        const barcodeModuleWidth = Math.min(0.32, barcodeMaxWidth / barcodeModules);
+        const barcodeWidth = barcodeModules * barcodeModuleWidth;
+        let barcodeX = x + (cardW - barcodeWidth) / 2;
+
+        doc.setFillColor(0, 0, 0);
+        for (const bar of barcodeBars) {
+          const barWidth = bar.width * barcodeModuleWidth;
+          if (bar.isBar) {
+            doc.rect(barcodeX, currentY, barWidth, barcodeHeight, 'F');
+          }
+          barcodeX += barWidth;
+        }
+
+        // Keep the value below the bars for manual verification.
         doc.setFont('courier', 'bold');
-        doc.setFontSize(10);
+        doc.setFontSize(6);
         doc.setTextColor(0, 0, 0);
-        doc.text(`||||| ${item.barcode} |||||`, x + cardW / 2, currentY + 3, { align: 'center' });
-        currentY += 8;
+        doc.text(barcodeCode, x + cardW / 2, currentY + barcodeHeight + 2, { align: 'center' });
+        currentY += barcodeHeight + 4;
 
         if (showPrice) {
           doc.setFont('helvetica', 'bold');

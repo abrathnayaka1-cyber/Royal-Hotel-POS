@@ -71,6 +71,16 @@ export interface BarcodeRenderOptions {
   className?: string;
 }
 
+/** Escape user-provided barcode text before embedding it in SVG markup. */
+function escapeXmlText(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
 /**
  * Generates an SVG string representation of a Code 128 barcode.
  */
@@ -98,7 +108,7 @@ export function generateBarcodeSVG(code: string, options: BarcodeRenderOptions =
 
   let textSvg = '';
   if (showText) {
-    textSvg = `<text x="${svgWidth / 2}" y="${height + 13}" font-family="monospace, sans-serif" font-size="11" font-weight="bold" text-anchor="middle" fill="#000000">${cleanCode}</text>`;
+    textSvg = `<text x="${svgWidth / 2}" y="${height + 13}" font-family="monospace, sans-serif" font-size="11" font-weight="bold" text-anchor="middle" fill="#000000">${escapeXmlText(cleanCode)}</text>`;
   }
 
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${svgWidth} ${svgHeight}" width="${svgWidth}" height="${svgHeight}">${rects}${textSvg}</svg>`;
