@@ -150,24 +150,35 @@ interface InventoryPickerItem {
 // ==========================================
 
 const HEADER_ALIASES: Record<string, keyof RawImportRow> = {
-  sku: 'sku', itemcode: 'sku', code: 'sku', productcode: 'sku',
-  barcode: 'barcode', barcodeno: 'barcode', ean: 'barcode', upc: 'barcode',
-  category: 'category', productcategory: 'category',
-  brand: 'brand', company: 'brand', distillery: 'brand', manufacturer: 'brand',
+  sku: 'sku', itemcode: 'sku', code: 'sku', productcode: 'sku', itemno: 'sku', itemnumber: 'sku',
+  barcode: 'barcode', barcodeno: 'barcode', ean: 'barcode', upc: 'barcode', barcodeid: 'barcode',
+  category: 'category', productcategory: 'category', categoryname: 'category',
+  brand: 'brand', company: 'brand', brandname: 'brand', companyname: 'brand',
+  distillery: 'brand', manufacturer: 'brand',
   product: 'productName', productname: 'productName', item: 'productName',
   itemname: 'productName', name: 'productName', description: 'productName',
+  productdescription: 'productName', itemdescription: 'productName',
   size: 'size', variant: 'size', bottlesize: 'size', packsize: 'size', volume: 'size',
+  unitsize: 'size', container: 'size',
   buyingprice: 'buyingPrice', buying: 'buyingPrice', cost: 'buyingPrice',
-  costprice: 'buyingPrice', unitcost: 'buyingPrice', purchaseprice: 'buyingPrice',
+  costprice: 'buyingPrice', unitcost: 'buyingPrice', unitprice: 'buyingPrice',
+  purchaseprice: 'buyingPrice', costperunit: 'buyingPrice', landedcost: 'buyingPrice',
   sellingprice: 'sellingPrice', selling: 'sellingPrice', price: 'sellingPrice',
   retail: 'sellingPrice', retailprice: 'sellingPrice', mrp: 'sellingPrice',
+  salesprice: 'sellingPrice', saleprice: 'sellingPrice', unitsellingprice: 'sellingPrice',
+  salepriceperunit: 'sellingPrice', retailperunit: 'sellingPrice',
   quantity: 'quantity', qty: 'quantity', units: 'quantity', received: 'quantity',
   receivedqty: 'quantity', count: 'quantity', counted: 'quantity',
   physicalcount: 'quantity', countedquantity: 'quantity', stock: 'quantity',
+  stockonhand: 'quantity', onhand: 'quantity', availablestock: 'quantity',
+  availableqty: 'quantity', quantityonhand: 'quantity', currentstock: 'quantity',
+  unitsreceived: 'quantity', qtyreceived: 'quantity',
   minimumstock: 'minStock', minstock: 'minStock', minalert: 'minStock', minimum: 'minStock',
-  supplier: 'supplier', suppliername: 'supplier', vendor: 'supplier',
+  minstocklevel: 'minStock', reorderlevel: 'minStock', reorderpoint: 'minStock',
+  supplier: 'supplier', suppliername: 'supplier', vendor: 'supplier', vendorname: 'supplier',
   invoicenumber: 'invoiceNumber', invoiceno: 'invoiceNumber', invoice: 'invoiceNumber',
-  invoicedate: 'invoiceDate', date: 'invoiceDate',
+  invoiceref: 'invoiceNumber', billnumber: 'invoiceNumber',
+  invoicedate: 'invoiceDate', date: 'invoiceDate', invoicedateonly: 'invoiceDate',
 };
 
 function normalizeHeader(h: string): string {
@@ -866,6 +877,23 @@ export const StockImportModal: React.FC<{
                   {summary.newCompanies.map(c => (
                     <span key={c} className="px-2 py-0.5 bg-purple-50 dark:bg-purple-950/50 text-purple-700 dark:text-purple-300 rounded font-bold">+ Brand: {c}</span>
                   ))}
+                </div>
+              )}
+
+              {/* Zero-stock-change warning: a "successful" import that changes nothing is a trap */}
+              {importType === 'purchase' && summary.unitsToAdd === 0 && problemCount === 0 && (
+                <div className="p-3.5 bg-amber-50 dark:bg-amber-950/40 border-2 border-amber-300 dark:border-amber-800 rounded-2xl text-xs">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+                    <div>
+                      <div className="font-black text-amber-800 dark:text-amber-300">Heads up — this import will add 0 units</div>
+                      <p className="text-amber-700 dark:text-amber-400 mt-0.5">
+                        Live Inventory will <strong>NOT change</strong> (no stock, only price rows). If your file has quantities, the
+                        Quantity column header may not be recognized — use <strong>Quantity</strong>, <strong>Qty</strong>, <strong>Units</strong>,
+                        {' '}<strong>Received</strong>, <strong>Stock</strong> or <strong>Count</strong>, or download the template.
+                      </p>
+                    </div>
+                  </div>
                 </div>
               )}
 

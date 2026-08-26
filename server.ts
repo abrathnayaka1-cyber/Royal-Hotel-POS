@@ -2271,7 +2271,12 @@ function processImportRows(
           row.status = 'PRICE_CHANGE';
         }
         if (row.quantity === 0 && !row.priceChange) {
-          row.note = 'No quantity and no price change — nothing to do.';
+          // A matched row that carries neither a quantity nor a price is a silent
+          // no-op: the import used to "succeed" while adding NOTHING to Live
+          // Inventory, which made users think their upload had failed. Flag it as
+          // INVALID with a diagnosis instead of quietly importing nothing.
+          row.status = 'INVALID';
+          row.note = 'No quantity and no price found for this row — nothing would be imported. Check that your Quantity column header is recognized (Quantity, Qty, Units, Received, Stock, Count, Stock On Hand) and that the row contains a value.';
         }
       } else {
         row.adjustment = row.quantity - hit.variant.stock;
