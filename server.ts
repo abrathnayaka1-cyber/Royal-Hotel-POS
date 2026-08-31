@@ -4486,6 +4486,170 @@ app.post('/api/reports/daily-stock-sheet/reconcile', authMiddleware, requireRole
 });
 
 // ==========================================
+// DAILY SALES SUMMARY (Bar / Food / Rooms / Functions shown SEPARATELY)
+// ==========================================
+// A daily register-level summary that keeps the four revenue streams apart
+// instead of mixing them into one figure:
+//   - Bar & Liquor      (non-food product sales from paid POS bills)
+//   - Restaurant / Food (kitchen / restaurant product sales from paid POS bills)
+//   - Rooms             (room bookings that checked in on the day)
+//   - Functions/Events  (function-hall bookings held on the day)
+// Bar + Food are allocated from each paid bill's grand total proportionally to
+// the item value of each stream, so barSales + foodSales == registerTotal and
+// everything reconciles to the actual money collected.
+app.get('/api/reports/daily-sales-summary', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
+  const targetDate = req.query.date ? String(req.query.date) : new Date().toISOString().split('T')[0];
+  const formattedDate = targetDate.replace(/-/g, '.');
+
+  // Product / category lookup used to classify a sold item as Food vs Bar.
+  // Matches the Daily Stock Sheet convention: isKitchenItem OR a restaurant-type
+  // category => FOOD; everything else (bar / service / other) => BAR.
+  const categoryTypeById = new Map(db.raw.categories.map(c => [c.id, c.type]));
+  const isFoodItem = (productId: string, fallbackIsKitchen: boolean): boolean => {
+    if (fallbackIsKitchen) return true;
+    const product = db.raw.products.find(p => p.id === productId);
+    if (product?.isKitchenItem) return true;
+    const catType = product ? categoryTypeById.get(product.categoryId) : undefined;
+    return catType === 'restaurant';
+  };
+
+  const paidBillsOnDate = db.raw.bills.filter(b => {
+    if (b.status !== 'paid') return false;
+    const billDate = (b.paidAt || b.createdAt).split('T')[0];
+    return billDate === targetDate;
+  });
+
+  interface StreamBucket {
+    sales: number;
+    itemsSold: number;
+    productMap: Map<string, { name: string; size: string; quantity: number; revenue: number; isKitchenItem: boolean }>;
+    paymentBreakdown: Record<string, { count: number; total: number }>;
+  }
+
+  const bar: StreamBucket = { sales: 0, itemsSold: 0, productMap: new Map(), paymentBreakdown: {} };
+  const food: StreamBucket = { sales: 0, itemsSold: 0, productMap: new Map(), paymentBreakdown: {} };
+
+  let registerTotal = 0;
+  let barBillsCount = 0;
+  let foodBillsCount = 0;
+
+  const addPayment = (bucket: StreamBucket, method: string, amount: number) => {
+    const m = method || 'cash';
+    if (!bucket.paymentBreakdown[m]) bucket.paymentBreakdown[m] = { count: 0, total: 0 };
+    bucket.paymentBreakdown[m].count++;
+    bucket.paymentBreakdown[m].total += amount;
+  };
+
+  for (const bill of paidBillsOnDate) {
+    registerTotal += bill.grandTotal;
+
+    // First pass: total item value per stream for proportional allocation.
+    let barItemValue = 0;
+    let foodItemValue = 0;
+    for (const item of bill.items) {
+      const isFood = isFoodItem(item.productId, Boolean(item.isKitchenItem));
+      if (isFood) foodItemValue += item.total;
+      else barItemValue += item.total;
+    }
+    const splitTotal = barItemValue + foodItemValue;
+
+    // Second pass: allocate the bill's grand total proportionally to each item.
+    for (const item of bill.items) {
+      const isFood = isFoodItem(item.productId, Boolean(item.isKitchenItem));
+      const bucket = isFood ? food : bar;
+      const share = splitTotal > 0 ? bill.grandTotal * (item.total / splitTotal) : 0;
+      bucket.sales += share;
+      bucket.itemsSold += item.quantity;
+
+      const key = `${item.productId}_${item.variantId}`;
+      if (!bucket.productMap.has(key)) {
+        bucket.productMap.set(key, {
+          name: item.productName,
+          size: item.size,
+          quantity: 0,
+          revenue: 0,
+          isKitchenItem: Boolean(item.isKitchenItem),
+        });
+      }
+      const row = bucket.productMap.get(key)!;
+      row.quantity += item.quantity;
+      row.revenue += share;
+    }
+
+    if (barItemValue > 0) {
+      barBillsCount++;
+      addPayment(bar, bill.paymentMethod, splitTotal > 0 ? bill.grandTotal * (barItemValue / splitTotal) : bill.grandTotal);
+    }
+    if (foodItemValue > 0) {
+      foodBillsCount++;
+      addPayment(food, bill.paymentMethod, splitTotal > 0 ? bill.grandTotal * (foodItemValue / splitTotal) : bill.grandTotal);
+    }
+  }
+
+  const toTopItems = (bucket: StreamBucket) =>
+    Array.from(bucket.productMap.values())
+      .map(r => ({ ...r, revenue: Number(r.revenue.toFixed(2)) }))
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 10);
+
+  const roundPayments = (map: Record<string, { count: number; total: number }>) =>
+    Object.fromEntries(Object.entries(map).map(([k, v]) => [k, { count: v.count, total: Number(v.total.toFixed(2)) }]));
+
+  // ---- Rooms: bookings whose stay starts (check-in) on the selected day ----
+  const roomBookingsOnDate = (db.raw.roomBookings || []).filter(b => {
+    if (b.status === 'cancelled') return false;
+    return (b.checkInDate || '').split('T')[0] === targetDate;
+  });
+  const roomSales = roomBookingsOnDate.reduce((s, b) => s + Number(b.grandTotal || 0), 0);
+  const roomGuests = roomBookingsOnDate.reduce((s, b) => s + Number(b.numberOfGuests || 0), 0);
+  const roomNights = roomBookingsOnDate.reduce((s, b) => s + Number(b.durationDays || 0), 0);
+
+  // ---- Functions / Events: bookings whose event falls on the selected day ----
+  const functionBookingsOnDate = (db.raw.functionBookings || []).filter(b => {
+    if (b.status === 'cancelled') return false;
+    return (b.eventDate || '').split('T')[0] === targetDate;
+  });
+  const functionSales = functionBookingsOnDate.reduce((s, b) => s + Number(b.grandTotal || 0), 0);
+  const functionGuests = functionBookingsOnDate.reduce((s, b) => s + Number(b.expectedGuests || 0), 0);
+
+  const grandTotal = Number((registerTotal + roomSales + functionSales).toFixed(2));
+
+  res.json({
+    date: targetDate,
+    formattedDate,
+    registerTotal: Number(registerTotal.toFixed(2)),
+    grandTotal,
+    bar: {
+      sales: Number(bar.sales.toFixed(2)),
+      billsCount: barBillsCount,
+      itemsSold: bar.itemsSold,
+      topItems: toTopItems(bar),
+      paymentBreakdown: roundPayments(bar.paymentBreakdown),
+    },
+    food: {
+      sales: Number(food.sales.toFixed(2)),
+      billsCount: foodBillsCount,
+      itemsSold: food.itemsSold,
+      topItems: toTopItems(food),
+      paymentBreakdown: roundPayments(food.paymentBreakdown),
+    },
+    rooms: {
+      sales: Number(roomSales.toFixed(2)),
+      bookingsCount: roomBookingsOnDate.length,
+      guests: roomGuests,
+      nights: roomNights,
+      bookings: roomBookingsOnDate,
+    },
+    functions: {
+      sales: Number(functionSales.toFixed(2)),
+      bookingsCount: functionBookingsOnDate.length,
+      guests: functionGuests,
+      bookings: functionBookingsOnDate,
+    },
+  });
+});
+
+// ==========================================
 // ROOMS & ROOM BOOKINGS API
 // ==========================================
 
