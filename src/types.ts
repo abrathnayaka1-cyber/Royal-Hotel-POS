@@ -146,6 +146,71 @@ export interface RoomBooking {
   checkedOutAt?: string;
 }
 
+// ==========================================
+// HOTEL FUNCTIONS & EVENTS MODULE (v1.4.0)
+// Function-hall / event bookings (weddings, parties, meetings, …) created
+// straight from the POS register — mirrors the room-booking architecture.
+// ==========================================
+
+export type FunctionEventType =
+  | 'wedding'
+  | 'birthday'
+  | 'meeting'
+  | 'party'
+  | 'corporate'
+  | 'other';
+
+export type FunctionBookingStatus = 'confirmed' | 'completed' | 'cancelled';
+export type FunctionHallStatus = 'available' | 'maintenance';
+export type FunctionSession = 'day' | 'evening' | 'full_day';
+
+export interface FunctionHall {
+  id: string;
+  hallName: string; // e.g. 'Grand Ballroom'
+  hallType: string; // e.g. 'Main Hall', 'Garden Lawns', 'Conference Room'
+  floor?: string;
+  capacity: number; // maximum guests
+  ratePerDay: number; // base hall charge per booking
+  amenities: string[];
+  status: FunctionHallStatus;
+  notes?: string;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export interface FunctionBooking {
+  id: string;
+  bookingNumber: string; // e.g. EVT-2001
+  hallId: string;
+  hallName: string;
+  hallType: string;
+  eventType: FunctionEventType;
+  customerName: string;
+  customerPhone: string;
+  customerAddress?: string;
+  eventDate: string; // ISO date of the event
+  session: FunctionSession;
+  expectedGuests: number;
+  hallCharge: number;
+  perPlateRate: number;
+  numberOfPlates: number;
+  plateCharge: number;
+  extraServices: number;
+  discount: number;
+  tax: number;
+  grandTotal: number;
+  advancePaid: number;
+  balanceDue: number;
+  paymentMethod: PaymentMethod;
+  paymentDetails?: any;
+  status: FunctionBookingStatus;
+  cashierId: string;
+  cashierName: string;
+  notes?: string;
+  createdAt: string;
+  completedAt?: string;
+}
+
 export interface HeldBill {
   id: string;
   billNumber: string;

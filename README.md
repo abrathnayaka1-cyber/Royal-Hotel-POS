@@ -1,8 +1,8 @@
 # Royal Hotel POS - Bar, Restaurant & Hotel Management System
 
-> Commercial-grade Point of Sale system with multi-size bottle variants, hotel room management, daily stock sheet reconciliation, inventory, KOT, billing, and reporting.
+> Commercial-grade Point of Sale system with multi-size bottle variants, hotel room management, function & event bookings, daily stock sheet reconciliation, inventory, KOT, billing, and reporting.
 
-![Version](https://img.shields.io/badge/version-1.1.3-blue)
+![Version](https://img.shields.io/badge/version-1.4.0-blue)
 ![Node](https://img.shields.io/badge/node-%3E%3D22-green)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
@@ -24,6 +24,14 @@
 - Advance payment & balance due tracking
 - Room service integration
 - Booking ticket printing
+
+### Functions & Events (v1.4.0 — Function Hall Bookings from the POS)
+- **Function halls entered straight from the POS register** — a dedicated FUNCTIONS button in the sidebar opens hall cards + event bookings for everyone (cashiers & admins, no admin panel needed)
+- Event types: wedding, birthday, party, meeting, corporate, other — with day / evening / full-day sessions
+- Per-plate food pricing (rate × plates), hall charge, extra services/decor, discount & advance payments
+- Same-hall/same-date double-booking guard, server-derived totals, advance ≤ grand total validation
+- Event ticket printing (thermal 58mm/80mm) + payment recording, event completion (final settlement) and cancellation — all from the POS
+- Super Admin manages hall master data (add / edit / delete / maintenance) under **Admin → Functions & Events**
 
 ### Food & Kitchen Module (v1.2.0 — Kitchen Manager Role)
 - New **KITCHEN_MANAGER** role using the EXISTING login & RBAC system (no second auth)
@@ -50,6 +58,14 @@
 - Daily Stock Sheet export (Excel)
 - Bills & Invoices with void/restore
 - Audit logs with pagination & export
+
+### v1.4.0 — Hotel Functions & Events (Function Hall Bookings)
+- **New Functions & Events module enterable from the POS register** — the sidebar FUNCTIONS button opens function hall cards and event bookings for cashiers & admins alike
+- Function halls (Grand Ballroom, Garden Lawns, Conference Hall seeded) with capacity, per-booking rates, amenities and maintenance status — hall master data managed by Super Admin (Admin → Functions & Events)
+- Full booking lifecycle in the POS: create (wedding / birthday / meeting / party / corporate / other + day/evening/full-day session), same-date double-booking guard, per-plate food charge, extra services, advance payments, event completion with final settlement, and cancellation
+- Thermal **Function Booking Ticket** printing (58mm/80mm) with event details, charges and advance/balance — auto-print after payment when enabled
+- Audit-logged (`FUNCTION_*` actions) and RBAC-guarded: any role can book & settle events; only Super Admin can create/edit/delete halls
+- Endpoints: `/api/function-halls`, `/api/function-bookings` (+ `/:id/payment`, `/:id/checkout`, `/:id/cancel`) — 21/21 new E2E checks under `tests/e2e/e2e-functions.mjs` (full suite still green)
 
 ### v1.3.0 — AI System Health Check (Gemini)
 - **Gemini-powered health assistant** (optional, server-side): the Super Admin dashboard's **AI System Health Check** card runs a live snapshot of the `whole` system — DB writability, low/out-of-stock variants, today's revenue & bills, active room bookings, held bills, pending KOTs, kitchen ingredients — and asks the Gemini LLM to return a plain-English health report (status, issues, recommended actions).

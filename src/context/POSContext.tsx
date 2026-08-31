@@ -11,10 +11,12 @@ import {
   Category,
   Company,
   Room,
-  RoomBooking
+  RoomBooking,
+  FunctionHall,
+  FunctionBooking
 } from '../types.ts';
 import { fetchApi } from '../lib/api.ts';
-import { printThermalReceipt, printRoomBookingTicket } from '../lib/printEngine.ts';
+import { printThermalReceipt, printRoomBookingTicket, printFunctionBookingTicket } from '../lib/printEngine.ts';
 import { useAuth } from './AuthContext.tsx';
 
 interface POSContextType {
@@ -23,6 +25,8 @@ interface POSContextType {
   companies: Company[];
   rooms: Room[];
   roomBookings: RoomBooking[];
+  functionHalls: FunctionHall[];
+  functionBookings: FunctionBooking[];
   settings: SystemSettings | null;
   isLoading: boolean;
   selectedCategory: string;
@@ -102,6 +106,25 @@ interface POSContextType {
   updateRoom: (roomId: string, roomData: Partial<Room>) => Promise<Room>;
   deleteRoom: (roomId: string) => Promise<void>;
   printRoomTicket: (booking: RoomBooking) => Promise<boolean>;
+  // Hotel Functions & Events (v1.4.0)
+  isFunctionBookingModalOpen: boolean;
+  selectedHallForBooking: FunctionHall | null;
+  recentFunctionTicket: FunctionBooking | null;
+  isFunctionTicketModalOpen: boolean;
+  openFunctionBookingModal: (hall?: FunctionHall | null) => void;
+  closeFunctionBookingModal: () => void;
+  openFunctionTicketModal: (booking: FunctionBooking) => void;
+  closeFunctionTicketModal: () => void;
+  refreshFunctionHalls: () => Promise<void>;
+  refreshFunctionBookings: () => Promise<void>;
+  createFunctionHall: (hallData: Partial<FunctionHall>) => Promise<FunctionHall>;
+  updateFunctionHall: (hallId: string, hallData: Partial<FunctionHall>) => Promise<FunctionHall>;
+  deleteFunctionHall: (hallId: string) => Promise<void>;
+  createFunctionBooking: (payload: Record<string, unknown>) => Promise<FunctionBooking>;
+  completeFunctionBooking: (bookingId: string, checkoutData: Record<string, unknown>) => Promise<FunctionBooking>;
+  cancelFunctionBooking: (bookingId: string, reason?: string) => Promise<void>;
+  addFunctionPayment: (bookingId: string, paymentData: Record<string, unknown>) => Promise<FunctionBooking>;
+  printFunctionTicket: (booking: FunctionBooking) => Promise<boolean>;
 }
 
 const POSContext = createContext<POSContextType | undefined>(undefined);
@@ -113,6 +136,8 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [companies, setCompanies] = useState<Company[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [roomBookings, setRoomBookings] = useState<RoomBooking[]>([]);
+  const [functionHalls, setFunctionHalls] = useState<FunctionHall[]>([]);
+  const [functionBookings, setFunctionBookings] = useState<FunctionBooking[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
@@ -146,6 +171,11 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [recentBookingTicket, setRecentBookingTicket] = useState<RoomBooking | null>(null);
   const [isBookingTicketModalOpen, setIsBookingTicketModalOpen] = useState<boolean>(false);
 
+  const [isFunctionBookingModalOpen, setIsFunctionBookingModalOpen] = useState<boolean>(false);
+  const [selectedHallForBooking, setSelectedHallForBooking] = useState<FunctionHall | null>(null);
+  const [recentFunctionTicket, setRecentFunctionTicket] = useState<FunctionBooking | null>(null);
+  const [isFunctionTicketModalOpen, setIsFunctionTicketModalOpen] = useState<boolean>(false);
+
   const [scanNotice, setScanNotice] = useState<{ message: string; type: 'success' | 'warning' | 'error' } | null>(null);
 
   const clearScanNotice = useCallback(() => {
@@ -166,7 +196,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Data isolation: Kitchen Managers only need the catalogue + settings for
       // the Food & Kitchen suite — skip held bills, rooms & bookings entirely.
       const isKitchenOnly = user?.role === 'kitchen_manager';
-      const [prodsData, catsData, compsData, settsData, heldData, roomsData, bookingsData] = await Promise.all([
+      const [prodsData, catsData, compsData, settsData, heldData, roomsData, bookingsData, hallsData, functionBookingsData] = await Promise.all([
         fetchApi<Product[]>('/products'),
         fetchApi<Category[]>('/categories'),
         fetchApi<Company[]>('/companies'),
@@ -174,6 +204,8 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isKitchenOnly ? Promise.resolve([] as HeldBill[]) : fetchApi<HeldBill[]>('/orders/held'),
         isKitchenOnly ? Promise.resolve([] as Room[]) : fetchApi<Room[]>('/rooms'),
         isKitchenOnly ? Promise.resolve([] as RoomBooking[]) : fetchApi<RoomBooking[]>('/room-bookings'),
+        isKitchenOnly ? Promise.resolve([] as FunctionHall[]) : fetchApi<FunctionHall[]>('/function-halls'),
+        isKitchenOnly ? Promise.resolve([] as FunctionBooking[]) : fetchApi<FunctionBooking[]>('/function-bookings'),
       ]);
 
       setProducts(prodsData || []);
@@ -183,6 +215,8 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setHeldBills(heldData || []);
       setRooms(roomsData || []);
       setRoomBookings(bookingsData || []);
+      setFunctionHalls(hallsData || []);
+      setFunctionBookings(functionBookingsData || []);
     } catch (err) {
       console.error('Failed to load POS data:', err);
     } finally {
@@ -317,6 +351,120 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const printRoomTicket = async (booking: RoomBooking): Promise<boolean> => {
     const matchedRoom = rooms.find(r => r.id === booking.roomId) || null;
     return printRoomBookingTicket(booking, matchedRoom, settings);
+  };
+
+  // ==========================================
+  // HOTEL FUNCTIONS & EVENTS (v1.4.0)
+  // ==========================================
+
+  const refreshFunctionHalls = async () => {
+    const hData = await fetchApi<FunctionHall[]>('/function-halls');
+    setFunctionHalls(hData || []);
+  };
+
+  const refreshFunctionBookings = async () => {
+    const bData = await fetchApi<FunctionBooking[]>('/function-bookings');
+    setFunctionBookings(bData || []);
+  };
+
+  const openFunctionBookingModal = (hall?: FunctionHall | null) => {
+    setSelectedHallForBooking(hall || null);
+    setIsFunctionBookingModalOpen(true);
+  };
+
+  const closeFunctionBookingModal = () => {
+    setIsFunctionBookingModalOpen(false);
+    setSelectedHallForBooking(null);
+  };
+
+  const openFunctionTicketModal = (booking: FunctionBooking) => {
+    setRecentFunctionTicket(booking);
+    setIsFunctionTicketModalOpen(true);
+  };
+
+  const closeFunctionTicketModal = () => {
+    setIsFunctionTicketModalOpen(false);
+    setRecentFunctionTicket(null);
+  };
+
+  const createFunctionHall = async (hallData: Partial<FunctionHall>): Promise<FunctionHall> => {
+    const newHall = await fetchApi<FunctionHall>('/function-halls', {
+      method: 'POST',
+      body: JSON.stringify(hallData),
+    });
+    await refreshFunctionHalls();
+    return newHall;
+  };
+
+  const updateFunctionHall = async (hallId: string, hallData: Partial<FunctionHall>): Promise<FunctionHall> => {
+    const updated = await fetchApi<FunctionHall>(`/function-halls/${hallId}`, {
+      method: 'PUT',
+      body: JSON.stringify(hallData),
+    });
+    await refreshFunctionHalls();
+    return updated;
+  };
+
+  const deleteFunctionHall = async (hallId: string): Promise<void> => {
+    await fetchApi(`/function-halls/${hallId}`, {
+      method: 'DELETE',
+    });
+    await refreshFunctionHalls();
+  };
+
+  const createFunctionBooking = async (payload: Record<string, unknown>): Promise<FunctionBooking> => {
+    const res = await fetchApi<{ success: boolean; booking: FunctionBooking; hall: FunctionHall }>('/function-bookings', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+
+    await refreshFunctionBookings();
+
+    setRecentFunctionTicket(res.booking);
+    setIsFunctionBookingModalOpen(false);
+    setIsFunctionTicketModalOpen(true);
+
+    if (settings?.autoPrintAfterPayment) {
+      setTimeout(() => {
+        printFunctionBookingTicket(res.booking, res.hall, settings).catch(() => {});
+      }, 300);
+    }
+
+    return res.booking;
+  };
+
+  const completeFunctionBooking = async (bookingId: string, checkoutData: Record<string, unknown>): Promise<FunctionBooking> => {
+    const res = await fetchApi<{ success: boolean; booking: FunctionBooking }>(`/function-bookings/${bookingId}/checkout`, {
+      method: 'PUT',
+      body: JSON.stringify(checkoutData),
+    });
+
+    await refreshFunctionBookings();
+    return res.booking;
+  };
+
+  const cancelFunctionBooking = async (bookingId: string, reason?: string): Promise<void> => {
+    await fetchApi(`/function-bookings/${bookingId}/cancel`, {
+      method: 'PUT',
+      body: JSON.stringify({ reason }),
+    });
+
+    await refreshFunctionBookings();
+  };
+
+  const addFunctionPayment = async (bookingId: string, paymentData: Record<string, unknown>): Promise<FunctionBooking> => {
+    const res = await fetchApi<{ success: boolean; booking: FunctionBooking }>(`/function-bookings/${bookingId}/payment`, {
+      method: 'POST',
+      body: JSON.stringify(paymentData),
+    });
+
+    await refreshFunctionBookings();
+    return res.booking;
+  };
+
+  const printFunctionTicket = async (booking: FunctionBooking): Promise<boolean> => {
+    const matchedHall = functionHalls.find(h => h.id === booking.hallId) || null;
+    return printFunctionBookingTicket(booking, matchedHall, settings);
   };
 
   const { subtotal, computedDiscount, serviceCharge, tax, grandTotal, totalItemsCount } = useMemo(() => {
@@ -739,6 +887,8 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         companies,
         rooms,
         roomBookings,
+        functionHalls,
+        functionBookings,
         settings,
         isLoading,
         selectedCategory,
@@ -818,6 +968,24 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateRoom,
         deleteRoom,
         printRoomTicket,
+        isFunctionBookingModalOpen,
+        selectedHallForBooking,
+        recentFunctionTicket,
+        isFunctionTicketModalOpen,
+        openFunctionBookingModal,
+        closeFunctionBookingModal,
+        openFunctionTicketModal,
+        closeFunctionTicketModal,
+        refreshFunctionHalls,
+        refreshFunctionBookings,
+        createFunctionHall,
+        updateFunctionHall,
+        deleteFunctionHall,
+        createFunctionBooking,
+        completeFunctionBooking,
+        cancelFunctionBooking,
+        addFunctionPayment,
+        printFunctionTicket,
       }}
     >
       {children}

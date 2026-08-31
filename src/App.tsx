@@ -4,6 +4,8 @@ import { POSProvider } from './context/POSContext.tsx';
 import { LoginScreen } from './components/auth/LoginScreen.tsx';
 import { Navbar } from './components/layout/Navbar.tsx';
 import { POSScreen } from './components/pos/POSScreen.tsx';
+import { RoomBookingTicketModal } from './components/pos/RoomBookingTicketModal.tsx';
+import { FunctionBookingTicketModal } from './components/pos/FunctionBookingTicketModal.tsx';
 import { AdminLayout } from './components/admin/AdminLayout.tsx';
 import { KitchenLayout } from './components/kitchen/KitchenLayout.tsx';
 import { Loader2, AlertTriangle, RefreshCw } from 'lucide-react';
@@ -99,6 +101,11 @@ const AppContent: React.FC = () => {
             <AdminLayout onSwitchToPOS={() => setCurrentView('pos')} />
           )}
         </div>
+
+        {/* Booking ticket modals mount here (not inside POSScreen) so ticket
+            viewing & printing also works from the Super Admin panel. */}
+        <RoomBookingTicketModal />
+        <FunctionBookingTicketModal />
       </div>
     </POSProvider>
   );

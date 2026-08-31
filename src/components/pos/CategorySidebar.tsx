@@ -1,6 +1,6 @@
 import React from 'react';
 import { usePOS } from '../../context/POSContext.tsx';
-import { Wine, Utensils, Beer, Sparkles, GlassWater, Flame, Coffee, Layers, BedDouble } from 'lucide-react';
+import { Wine, Utensils, Beer, Sparkles, GlassWater, Flame, Coffee, Layers, BedDouble, PartyPopper } from 'lucide-react';
 
 export const CategorySidebar: React.FC = () => {
   const {
@@ -8,6 +8,7 @@ export const CategorySidebar: React.FC = () => {
     selectedCategory,
     setSelectedCategory,
     rooms,
+    functionBookings,
   } = usePOS();
 
   // Helper icons for categories
@@ -35,6 +36,7 @@ export const CategorySidebar: React.FC = () => {
   // ALL ITEMS, while the category itself is managed in the Super Admin panel only.
   const activeCategories = categories.filter(c => c.isActive && !c.hiddenInPOS);
   const occupiedRoomsCount = rooms.filter(r => r.status === 'occupied').length;
+  const upcomingFunctionCount = functionBookings.filter(b => b.status === 'confirmed').length;
 
   return (
     <aside
@@ -76,6 +78,28 @@ export const CategorySidebar: React.FC = () => {
         {occupiedRoomsCount > 0 && (
           <span className="absolute -top-1 -right-1 px-1.5 py-0.2 bg-rose-500 text-white text-[9px] font-bold rounded-full border border-slate-900">
             {occupiedRoomsCount}
+          </span>
+        )}
+      </button>
+
+      {/* Dedicated FUNCTIONS / EVENTS button */}
+      <button
+        type="button"
+        id="cat-sidebar-functions"
+        onClick={() => setSelectedCategory('functions')}
+        className={`w-16 h-15 md:w-18 md:h-16 flex flex-col items-center justify-center rounded-xl transition-all cursor-pointer relative ${
+          selectedCategory === 'functions'
+            ? 'bg-violet-600 text-white shadow-md ring-2 ring-violet-500/30'
+            : 'bg-violet-950/20 text-violet-500 dark:text-violet-400 border border-violet-800/40 hover:bg-violet-950/40'
+        }`}
+      >
+        <PartyPopper className="w-4 h-4 mb-0.5 shrink-0" />
+        <span className="text-[10px] font-black uppercase tracking-tight text-center leading-none">
+          FUNCTIONS
+        </span>
+        {upcomingFunctionCount > 0 && (
+          <span className="absolute -top-1 -right-1 px-1.5 py-0.2 bg-violet-500 text-white text-[9px] font-bold rounded-full border border-slate-900">
+            {upcomingFunctionCount}
           </span>
         )}
       </button>

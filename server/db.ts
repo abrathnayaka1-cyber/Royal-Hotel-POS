@@ -257,6 +257,57 @@ export interface RoomBooking {
   checkedOutAt?: string;
 }
 
+// ==========================================
+// HOTEL FUNCTIONS & EVENTS MODULE (v1.4.0)
+// ==========================================
+
+export interface FunctionHall {
+  id: string;
+  hallName: string;
+  hallType: string;
+  floor?: string;
+  capacity: number;
+  ratePerDay: number;
+  amenities: string[];
+  status: 'available' | 'maintenance';
+  notes?: string;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export interface FunctionBooking {
+  id: string;
+  bookingNumber: string;
+  hallId: string;
+  hallName: string;
+  hallType: string;
+  eventType: 'wedding' | 'birthday' | 'meeting' | 'party' | 'corporate' | 'other';
+  customerName: string;
+  customerPhone: string;
+  customerAddress?: string;
+  eventDate: string;
+  session: 'day' | 'evening' | 'full_day';
+  expectedGuests: number;
+  hallCharge: number;
+  perPlateRate: number;
+  numberOfPlates: number;
+  plateCharge: number;
+  extraServices: number;
+  discount: number;
+  tax: number;
+  grandTotal: number;
+  advancePaid: number;
+  balanceDue: number;
+  paymentMethod: 'cash' | 'card' | 'bank_transfer' | 'other';
+  paymentDetails?: any;
+  status: 'confirmed' | 'completed' | 'cancelled';
+  cashierId: string;
+  cashierName: string;
+  notes?: string;
+  createdAt: string;
+  completedAt?: string;
+}
+
 export interface AuditLog {
   id: string;
   userId: string;
@@ -566,6 +617,7 @@ export interface SystemSettings {
   receiptFooter: string;
   lowStockDefaultThreshold: number;
   roomBookingPrefix?: string;
+  functionBookingPrefix?: string;
   // Thermal Printer Settings
   printerType?: 'thermal' | 'a4' | 'other';
   thermalWidth?: '58mm' | '80mm';
@@ -580,6 +632,9 @@ export interface DatabaseSchema {
   products: Product[];
   rooms: Room[];
   roomBookings: RoomBooking[];
+  // Hotel Functions & Events module (v1.4.0) — additive, ensured on load
+  functionHalls: FunctionHall[];
+  functionBookings: FunctionBooking[];
   heldBills: HeldBill[];
   kots: KOT[];
   bills: Bill[];
@@ -601,6 +656,7 @@ export interface DatabaseSchema {
     invoiceSeq: number;
     kotSeq: number;
     bookingSeq: number;
+    functionBookingSeq?: number;
     holdSeq?: number;
     importSeq?: number;
     kitchenCountSeq?: number;
@@ -649,6 +705,7 @@ const defaultSettings: SystemSettings = {
   billPrefix: "BILL-",
   kotPrefix: "KOT-",
   roomBookingPrefix: "RBK-",
+  functionBookingPrefix: "EVT-",
   receiptHeader: "Welcome to Royal Hotel",
   receiptFooter: "Thank you for visiting Royal Hotel! Please visit again.",
   lowStockDefaultThreshold: 5,
@@ -1676,6 +1733,48 @@ const initialRooms: Room[] = [
   }
 ];
 
+// ==========================================
+// HOTEL FUNCTIONS & EVENTS (v1.4.0) — seed function halls
+// ==========================================
+const initialFunctionHalls: FunctionHall[] = [
+  {
+    id: 'hall-ballroom',
+    hallName: 'Grand Ballroom',
+    hallType: 'Main Hall (AC)',
+    floor: 'Ground Floor',
+    capacity: 350,
+    ratePerDay: 60000,
+    amenities: ['Fully Air-Conditioned', 'Stage & Lighting', 'Sound System', '350 Chairs', 'Dance Floor', 'Backup Generator'],
+    status: 'available',
+    isActive: true,
+    createdAt: new Date().toISOString()
+  },
+  {
+    id: 'hall-garden',
+    hallName: 'Garden Lawns',
+    hallType: 'Open-Air Garden',
+    floor: 'Outdoor',
+    capacity: 500,
+    ratePerDay: 45000,
+    amenities: ['Open-Air Lawns', 'Stage & Lighting', 'Sound System', '500 Chairs', 'Outdoor Toilets', 'Backup Generator'],
+    status: 'available',
+    isActive: true,
+    createdAt: new Date().toISOString()
+  },
+  {
+    id: 'hall-conference',
+    hallName: 'Conference Hall',
+    hallType: 'Meeting Room (AC)',
+    floor: '1st Floor',
+    capacity: 60,
+    ratePerDay: 20000,
+    amenities: ['Fully Air-Conditioned', 'Projector & Screen', 'White Board', '60 Chairs', 'Conference Table', 'Free Wi-Fi'],
+    status: 'available',
+    isActive: true,
+    createdAt: new Date().toISOString()
+  }
+];
+
 // Initial Users - Only Super Admin seeded. Zero default cashiers.
 import bcrypt from 'bcryptjs';
 
@@ -1934,6 +2033,21 @@ export class Database {
             parsed.roomBookings = [];
           }
 
+          // ==========================================
+          // HOTEL FUNCTIONS & EVENTS (v1.4.0) — SAFE ADDITIVE MIGRATION
+          // Only ensures the new collections exist. Never drops, truncates,
+          // deletes or rewrites any existing data.
+          // ==========================================
+          if (!Array.isArray(parsed.functionHalls) || parsed.functionHalls.length === 0) {
+            parsed.functionHalls = initialFunctionHalls;
+          }
+          if (!Array.isArray(parsed.functionBookings)) {
+            parsed.functionBookings = [];
+          }
+          if (parsed.counters) {
+            if (!parsed.counters.functionBookingSeq) parsed.counters.functionBookingSeq = 2001;
+          }
+
           // Ensure stockImports array exists (Smart Stock Import history)
           if (!Array.isArray(parsed.stockImports)) {
             parsed.stockImports = [];
@@ -2071,6 +2185,9 @@ export class Database {
       products: initialProducts,
       rooms: initialRooms,
       roomBookings: [],
+      // Hotel Functions & Events module (v1.4.0)
+      functionHalls: initialFunctionHalls,
+      functionBookings: [],
       heldBills: [],
       kots: [],
       bills: [],
@@ -2101,6 +2218,7 @@ export class Database {
         invoiceSeq: 5001,
         kotSeq: 101,
         bookingSeq: 2001,
+        functionBookingSeq: 2001,
         holdSeq: 1,
         kitchenCountSeq: 1,
         kitchenRequestSeq: 1
@@ -2312,6 +2430,17 @@ export class Database {
     return `${prefix}${seq}`;
   }
 
+  /** Unique Hotel Function / Event Booking reference, e.g. EVT-2001 */
+  public getNextFunctionBookingNumber(): string {
+    if (!this.data.counters.functionBookingSeq) {
+      this.data.counters.functionBookingSeq = 2001;
+    }
+    const prefix = this.data.settings.functionBookingPrefix || 'EVT-';
+    const seq = this.data.counters.functionBookingSeq++;
+    this.save();
+    return `${prefix}${seq}`;
+  }
+
   /** Unique Kitchen Physical Count reference, e.g. KCOUNT-0001 */
   public getNextKitchenCountNumber(): string {
     if (!this.data.counters.kitchenCountSeq) {
@@ -2504,6 +2633,9 @@ export class Database {
     // Ensure required arrays exist
     this.data.rooms = this.data.rooms || [];
     this.data.roomBookings = this.data.roomBookings || [];
+    this.data.functionHalls = this.data.functionHalls?.length ? this.data.functionHalls : initialFunctionHalls;
+    this.data.functionBookings = this.data.functionBookings || [];
+    if (!this.data.counters.functionBookingSeq) this.data.counters.functionBookingSeq = 2001;
     this.data.heldBills = this.data.heldBills || [];
     this.data.kots = this.data.kots || [];
     this.data.bills = this.data.bills || [];
