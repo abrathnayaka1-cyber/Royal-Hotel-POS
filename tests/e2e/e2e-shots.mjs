@@ -37,8 +37,30 @@ const shot50 = rockland?.variants?.find((v) => v.id === 'var-1-50');
 const shot100 = rockland?.variants?.find((v) => v.id === 'var-1-100');
 check('750ml variant size label', bottle?.size === '750ml', `got ${JSON.stringify(bottle?.size)}`);
 check('combined label reads "Rockland Old (Gal) 750ml"', `${rockland?.name} ${bottle?.size}` === 'Rockland Old (Gal) 750ml');
-check('starting bottle stock = 24', bottle?.stock === 24, `got ${bottle?.stock}`);
-check('starting pool = 24 × 750 = 18,000ml', rockland?.availableShotMl === 18000, `got ${rockland?.availableShotMl}`);
+
+/* Reset the shot pool to a KNOWN baseline before measuring anything.
+ *
+ * The assertions below are absolute (24 bottles = 18,000ml), so a previous run
+ * of this suite (or any real sale of this product) used to break every check.
+ * Two admin calls put it back: set the bottle count to 24, and clear the
+ * partially-poured bottle (toggling `servesShots` off and back on zeroes
+ * `openBottleUsedMl` without touching the variants).
+ */
+const reset = await api('/api/inventory/adjust', {
+  method: 'POST',
+  body: { variantId: bottle?.id, newStock: 24, reason: 'E2E baseline reset' },
+}, token);
+check('baseline reset: 750ml stock set to 24', reset.status === 200, `got ${reset.status} ${JSON.stringify(reset.json)?.slice(0, 120)}`);
+const off = await api('/api/products/prod-1', { method: 'PUT', body: { servesShots: false } }, token);
+const on = await api('/api/products/prod-1', { method: 'PUT', body: { servesShots: true } }, token);
+check('baseline reset: open bottle cleared', off.status === 200 && on.status === 200 && (on.json?.openBottleUsedMl ?? 0) === 0,
+  `got ${off.status}/${on.status} used=${on.json?.openBottleUsedMl}`);
+
+const baseline = await api('/api/products', {}, token);
+const baseProduct = baseline.json?.find((p) => p.id === 'prod-1');
+check('starting bottle stock = 24', baseProduct?.variants?.find((v) => v.id === 'var-1-750')?.stock === 24,
+  `got ${baseProduct?.variants?.find((v) => v.id === 'var-1-750')?.stock}`);
+check('starting pool = 24 × 750 = 18,000ml', baseProduct?.availableShotMl === 18000, `got ${baseProduct?.availableShotMl}`);
 
 // 3. Sell ONE 25ml shot — the pool must drop by exactly 25ml
 const state = async () => {
