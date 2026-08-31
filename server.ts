@@ -136,22 +136,45 @@ app.use(compression());
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
-// Global rate limiter for API
+// Global rate limiter for API.
+//
+// Both values are configurable (they are documented in .env.example) — a busy
+// POS floor shares one public IP across every terminal, so the ceiling has to
+// be tunable per site. Invalid values fall back to the defaults with a warning
+// instead of silently disabling protection.
+function resolveRateLimitInt(raw: string | undefined, fallback: number, min: number, max: number, label: string): number {
+  if (raw === undefined || String(raw).trim() === '') return fallback;
+  const parsed = Number(String(raw).trim());
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < min || parsed > max) {
+    console.warn(`[RATE-LIMIT] Invalid ${label}="${raw}" — using ${fallback}.`);
+    return fallback;
+  }
+  return parsed;
+}
+
 const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 500, // Limit each IP to 500 requests per window
+  windowMs: resolveRateLimitInt(process.env.RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000, 1000, 24 * 60 * 60 * 1000, 'RATE_LIMIT_WINDOW_MS'),
+  max: resolveRateLimitInt(process.env.RATE_LIMIT_MAX_REQUESTS, 500, 10, 1_000_000, 'RATE_LIMIT_MAX_REQUESTS'),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests, please try again later.' },
 });
 app.use('/api/', apiLimiter);
 
-// Stricter limiter for auth endpoints
+// Stricter limiter for auth endpoints.
+//
+// `skipSuccessfulRequests` matters on a real POS floor: every terminal usually
+// shares ONE public IP, so counting successful logins against the budget meant
+// a busy shift (cashiers + kitchen + admins signing in, or re-opening the app
+// after the screen locks) could hit "Too many login attempts" and lock the whole
+// hotel out. Failed attempts are still counted — and are additionally limited to
+// 5 per minute per IP with a 60-second lockout — so brute force stays throttled.
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
+  skipSuccessfulRequests: true,
   message: { error: 'Too many login attempts, please try again later.' },
 });
 
@@ -266,6 +289,54 @@ function getGeminiModel() {
 const revokedTokens = new Map<string, number>(); // token -> expiresAt
 const activeSessions = new Map<string, { user: User; hotelId: string; expiresAt: number }>();
 
+// Tokens explicitly allowed to survive a session invalidation (the token that
+// performed its own password change). token -> the invalidation timestamp it
+// is allowed to bypass.
+const graceTokens = new Map<string, number>();
+
+/**
+ * Drops every in-memory session belonging to a user and blacklists the token,
+ * so a password change / deactivation / deletion takes effect immediately
+ * instead of leaving a 30-day-old token live.
+ */
+function revokeUserSessions(userId: string, exceptToken?: string): number {
+  let revoked = 0;
+  for (const [token, sess] of activeSessions.entries()) {
+    if (sess.user.id !== userId) continue;
+    if (exceptToken && token === exceptToken) continue;
+    activeSessions.delete(token);
+    revokedTokens.set(token, Date.now() + 30 * 24 * 60 * 60 * 1000);
+    revoked++;
+  }
+  return revoked;
+}
+
+/**
+ * Marks every existing login token of a user as stale. Tokens are stateless
+ * (survive a restart), so the in-memory sweep alone is not enough — the user
+ * record carries the timestamp and every request is checked against it.
+ */
+function invalidateUserSessions(user: User, keepToken?: string): void {
+  user.sessionsInvalidatedAt = Date.now();
+  revokeUserSessions(user.id, keepToken);
+  if (keepToken) graceTokens.set(keepToken, user.sessionsInvalidatedAt);
+}
+
+/**
+ * True when the token was issued BEFORE the user's password / account was last
+ * changed. Without this, a stolen (or simply forgotten) token kept working for
+ * 30 days after the owner changed their password.
+ */
+function isStaleUserToken(token: string, user: User): boolean {
+  const invalidatedAt = Number(user.sessionsInvalidatedAt || 0);
+  if (!invalidatedAt) return false;
+  if ((graceTokens.get(token) || 0) >= invalidatedAt) return false;
+  const payload = verifyTokenPayload(token);
+  const issuedAt = Number(payload?.issuedAt || 0);
+  // A token with no issuedAt is older than any invalidation.
+  return !issuedAt || issuedAt < invalidatedAt;
+}
+
 // Cleanup expired revoked tokens and sessions every 10 minutes
 setInterval(() => {
   const now = Date.now();
@@ -274,6 +345,9 @@ setInterval(() => {
   }
   for (const [token, sess] of activeSessions.entries()) {
     if (sess.expiresAt < now) activeSessions.delete(token);
+  }
+  for (const [token, at] of graceTokens.entries()) {
+    if (now - at > 30 * 24 * 60 * 60 * 1000) graceTokens.delete(token);
   }
   // Also cleanup failed login attempts
   for (const [ip, rec] of failedAttemptsMap.entries()) {
@@ -399,6 +473,15 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
 
   if (!user || !user.isActive) {
     return res.status(401).json({ error: 'Session expired or account deactivated. Please log in again.' });
+  }
+
+  // A password change (or a Super Admin resetting / deactivating the account)
+  // must kill every token that was issued before it — otherwise a leaked or
+  // shared login keeps working for the remaining 30 days of its lifetime.
+  if (isStaleUserToken(token, user)) {
+    activeSessions.delete(token);
+    revokedTokens.set(token, Date.now() + 30 * 24 * 60 * 60 * 1000);
+    return res.status(401).json({ error: 'Your password or account was changed. Please log in again.' });
   }
 
   (req as any).user = user;
@@ -969,8 +1052,15 @@ app.post('/api/auth/change-password', authMiddleware, async (req: Request, res: 
   }
 
   user.passwordHash = await bcrypt.hash(newPassword, 10);
+
+  // Kick every OTHER device that is still holding this account's token — the
+  // most common reason to change a password is that the old one leaked.
+  // The token that made this change stays logged in.
+  const sessionsKilled = revokeUserSessions(user.id, (req as any).token);
+  user.sessionsInvalidatedAt = Date.now();
+  if ((req as any).token) graceTokens.set((req as any).token, user.sessionsInvalidatedAt);
   db.save();
-  db.logAudit(user.id, user.name, user.role, 'PASSWORD_CHANGE', 'USER', user.id, 'User changed password.');
+  db.logAudit(user.id, user.name, user.role, 'PASSWORD_CHANGE', 'USER', user.id, `User changed password. ${sessionsKilled} other session(s) signed out.`);
 
   res.json({ message: 'Password updated successfully.' });
 });
@@ -1047,17 +1137,48 @@ app.put('/api/users/:id', authMiddleware, requireRole('super_admin'), async (req
     }
     user.email = emailTrim;
   }
-  if (role && ['super_admin', 'cashier', 'kitchen_manager'].includes(role)) user.role = role;
-  if (pin !== undefined) user.pin = pin ? String(pin).trim() : undefined;
+  // A Super Admin must not be able to lock the whole system out of itself:
+  // deactivating your own account (or demoting/disabling the LAST active Super
+  // Admin) would leave nobody able to manage users, settings or bills.
+  // `isActive: 0` / `"false"` must be caught too — only a strict `=== false`
+  // check would let those through and disable the account anyway.
+  const wantsDeactivate = isActive !== undefined && isActive !== null && Boolean(isActive) === false;
+  if (user.id === currentUser.id && wantsDeactivate) {
+    return res.status(400).json({ error: 'You cannot disable your own account.' });
+  }
+  if (role && ['super_admin', 'cashier', 'kitchen_manager'].includes(role) && role !== user.role) {
+    if (user.role === 'super_admin') {
+      const otherAdmins = db.raw.users.filter(u => u.role === 'super_admin' && u.isActive && u.id !== user.id);
+      if (otherAdmins.length === 0) {
+        return res.status(400).json({ error: 'Cannot change the role of the last active Super Admin account.' });
+      }
+    }
+    user.role = role;
+  }
+  if (wantsDeactivate && user.role === 'super_admin') {
+    const otherAdmins = db.raw.users.filter(u => u.role === 'super_admin' && u.isActive && u.id !== user.id);
+    if (otherAdmins.length === 0) {
+      return res.status(400).json({ error: 'Cannot disable the last active Super Admin account.' });
+    }
+  }
   if (isActive !== undefined) user.isActive = Boolean(isActive);
+  if (pin !== undefined) user.pin = pin ? String(pin).trim() : undefined;
 
+  let passwordChanged = false;
   if (password && typeof password === 'string' && password.trim()) {
     if (password.trim().length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
     user.passwordHash = await bcrypt.hash(password.trim(), 10);
+    passwordChanged = true;
+  }
+
+  // A reset password or a deactivated account must not keep working on devices
+  // that are already logged in.
+  if (passwordChanged || wantsDeactivate) {
+    invalidateUserSessions(user);
   }
 
   db.save();
-  db.logAudit(currentUser.id, currentUser.name, currentUser.role, 'UPDATE_USER', 'USER', user.id, `Updated user profile: ${user.name}`);
+  db.logAudit(currentUser.id, currentUser.name, currentUser.role, 'UPDATE_USER', 'USER', user.id, `Updated user profile: ${user.name}${passwordChanged ? ' (password reset — sessions signed out)' : ''}`);
 
   const { passwordHash, ...safeUser } = user;
   res.json(safeUser);
@@ -1073,6 +1194,8 @@ app.patch('/api/users/:id/toggle', authMiddleware, requireRole('super_admin'), (
   }
 
   user.isActive = !user.isActive;
+  // Disabling an account must log it out everywhere straight away.
+  if (!user.isActive) invalidateUserSessions(user);
   db.save();
 
   db.logAudit(currentUser.id, currentUser.name, currentUser.role, 'TOGGLE_USER_STATUS', 'USER', user.id, `Set status of ${user.username} to ${user.isActive ? 'ACTIVE' : 'DISABLED'}`);
@@ -1099,6 +1222,9 @@ app.delete('/api/users/:id', authMiddleware, requireRole('super_admin'), (req: R
   }
 
   db.raw.users.splice(index, 1);
+  // Revoke before saving so a deleted user's token cannot keep working until it
+  // expires.
+  invalidateUserSessions(user);
   db.save();
 
   db.logAudit(currentUser.id, currentUser.name, currentUser.role, 'DELETE_USER', 'USER', user.id, `Deleted user account: ${user.username} (${user.name}, ${user.role})`);
@@ -1912,6 +2038,31 @@ function computeOrderTotals(
   const grandTotal = Number((taxableAmount + serviceCharge + tax).toFixed(2));
 
   return { subtotal, discount, discountPercentage, serviceCharge, serviceChargeRate, tax, taxRate, grandTotal };
+}
+
+/**
+ * Applies the SAME discount policy to room / function bookings that POS sales
+ * already use: the "Enable Discounts" switch must switch discounts off, and the
+ * "Max Discount %" setting must cap them.
+ *
+ * Without this, any cashier could hand out a 100% discount on a Rs. 400,000
+ * wedding booking (or a week-long stay) even when the Super Admin had
+ * explicitly disabled discounts — the POS cart clamps it, bookings did not.
+ */
+function clampBookingDiscount(rawDiscount: unknown, baseAmount: number): number {
+  const settings = db.raw.settings;
+
+  // Same switch the POS cart obeys (System Settings → Enable Discounts).
+  if (settings.enableDiscounts === false) return 0;
+
+  const maxPctRaw = Number(settings.maxDiscountPercentage);
+  const maxPct = Number.isFinite(maxPctRaw) ? Math.max(0, Math.min(100, maxPctRaw)) : 100;
+
+  const requested = Number(rawDiscount);
+  if (!Number.isFinite(requested) || requested <= 0) return 0;
+
+  const maxAmount = (Math.max(0, baseAmount) * maxPct) / 100;
+  return Number(Math.min(requested, Math.max(0, baseAmount), maxAmount).toFixed(2));
 }
 
 app.post('/api/inventory/stock-in', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
@@ -4476,6 +4627,42 @@ app.delete('/api/rooms/:id', authMiddleware, requireRole('super_admin'), (req: R
   }
 });
 
+/**
+ * Re-derives a room's status from its remaining bookings, so cancelling one
+ * reservation can never free a room that still has an in-house guest (or mark
+ * it reserved after the last booking is gone).
+ */
+function syncRoomStatus(roomId: string): void {
+  const room = db.raw.rooms.find(r => r.id === roomId);
+  if (!room) return;
+
+  const active = (db.raw.roomBookings || []).filter(
+    b => b.roomId === roomId && (b.status === 'confirmed' || b.status === 'checked_in')
+  );
+  const inHouse = active.find(b => b.status === 'checked_in');
+
+  if (inHouse) {
+    room.status = 'occupied';
+    room.currentBookingId = inHouse.id;
+    room.currentGuestName = inHouse.guestName;
+    room.currentGuestPhone = inHouse.guestPhone;
+    return;
+  }
+  if (active.length > 0) {
+    room.status = 'reserved';
+    room.currentBookingId = active[0].id;
+    room.currentGuestName = undefined;
+    room.currentGuestPhone = undefined;
+    return;
+  }
+  if (room.status === 'occupied' || room.status === 'reserved' || room.currentBookingId) {
+    room.status = 'available';
+    room.currentBookingId = undefined;
+    room.currentGuestName = undefined;
+    room.currentGuestPhone = undefined;
+  }
+}
+
 app.get('/api/room-bookings', authMiddleware, (req: Request, res: Response) => {
   try {
     const { status, roomId, search } = req.query;
@@ -4525,23 +4712,8 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
       return res.status(404).json({ error: 'Selected room not found.' });
     }
 
-    if (room.status === 'occupied') {
-      return res.status(400).json({ error: `Room ${room.roomNumber} is currently occupied.` });
-    }
-
     if (room.status === 'maintenance') {
       return res.status(400).json({ error: `Room ${room.roomNumber} is under maintenance and cannot be booked.` });
-    }
-
-    // Guard against double-booking a room that already has an active (confirmed / checked-in)
-    // booking - previously the second booking silently orphaned the first one.
-    const activeBooking = (db.raw.roomBookings || []).find(
-      b => b.roomId === room.id && (b.status === 'confirmed' || b.status === 'checked_in')
-    );
-    if (activeBooking) {
-      return res.status(400).json({
-        error: `Room ${room.roomNumber} already has an active booking (${activeBooking.bookingNumber}). Check out or cancel it first.`
-      });
     }
 
     // Validate dates
@@ -4553,18 +4725,77 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
     if (checkOut <= checkIn) {
       return res.status(400).json({ error: 'Check-out date must be after check-in date' });
     }
-    const calculatedDays = Math.max(1, Math.ceil((checkOut.getTime() - checkIn.getTime()) / 86400000));
+
+    // Guard against double-booking: compare the actual DATE RANGES instead of
+    // blocking any room that has an active booking somewhere in the future.
+    // Previously a reservation made for next month made the room un-bookable
+    // today ("already has an active booking"), while two overlapping future
+    // reservations for the same nights were not detected at all.
+    const overlapping = (db.raw.roomBookings || []).find(b => {
+      if (b.roomId !== room.id) return false;
+      if (b.status !== 'confirmed' && b.status !== 'checked_in') return false;
+      const bIn = new Date(b.checkInDate).getTime();
+      const bOut = new Date(b.checkOutDate).getTime();
+      if (!Number.isFinite(bIn) || !Number.isFinite(bOut)) return false;
+      // [checkIn, checkOut) overlaps when each stay starts before the other ends.
+      return bIn < checkOut.getTime() && checkIn.getTime() < bOut;
+    });
+    if (overlapping) {
+      const from = new Date(overlapping.checkInDate).toISOString().slice(0, 10);
+      const to = new Date(overlapping.checkOutDate).toISOString().slice(0, 10);
+      return res.status(400).json({
+        error: `Room ${room.roomNumber} is already booked for ${from} → ${to} (${overlapping.bookingNumber} — ${overlapping.guestName}). Pick another room or change the dates.`
+      });
+    }
+
+    // A room flagged "occupied" WITHOUT a booking that overlaps these dates is
+    // occupied manually (or by legacy data) and must not be handed out. When it
+    // IS occupied by a booking, the overlap check above already decided — so a
+    // guest arriving after the current stay can still reserve the room in
+    // advance (previously the room was simply "occupied" and un-bookable).
+    if (room.status === 'occupied') {
+      const currentStay = (db.raw.roomBookings || []).find(
+        b => b.roomId === room.id && b.status === 'checked_in'
+      );
+      if (!currentStay) {
+        return res.status(400).json({ error: `Room ${room.roomNumber} is currently occupied.` });
+      }
+    }
+    // Round away sub-second noise first: two timestamps taken a millisecond
+    // apart are still a 2-night stay, but a plain Math.ceil() turned 2 days +
+    // 1 ms into 3 nights (i.e. one extra night on the bill).
+    const nightFloat = (checkOut.getTime() - checkIn.getTime()) / 86400000;
+    const calculatedDays = Math.max(1, Math.ceil(Number(nightFloat.toFixed(6))));
     // The number of nights is ALWAYS derived from the validated dates. The
     // client-supplied durationDays used to be trusted verbatim, so a request
     // could claim a 1-night stay with durationDays=500 and inflate the room
     // charge to 500× the daily rate (any cashier could overcharge a guest).
     const days = calculatedDays;
 
-    const dailyRate = Math.max(0, Number(ratePerDay) || room.ratePerDay);
+    // The nightly rate is master data. A cashier used to be able to post
+    // `ratePerDay: 100` for a Rs. 8,500 room and check a guest in for 1% of the
+    // real tariff. Only a Super Admin may agree to a different rate (and it is
+    // still validated); everyone else always pays the room's own rate.
+    let dailyRate = room.ratePerDay;
+    if (ratePerDay !== undefined && ratePerDay !== null && ratePerDay !== '') {
+      if (user.role !== 'super_admin') {
+        dailyRate = room.ratePerDay; // silently ignore a tampered rate
+      } else {
+        const override = Number(ratePerDay);
+        if (!Number.isFinite(override) || override < 0 || override > 1000000) {
+          return res.status(400).json({ error: 'Invalid daily rate (must be between 0 and 1,000,000).' });
+        }
+        dailyRate = override;
+      }
+    }
+    if (!Number.isFinite(dailyRate) || dailyRate < 0) dailyRate = room.ratePerDay;
+
     const totalRoomCharge = days * dailyRate;
     const extra = Math.max(0, Number(extraCharges) || 0);
-    const disc = Math.max(0, Number(discount) || 0);
     const taxAmt = Math.max(0, Number(tax) || 0);
+    // Booking discounts obey the same policy as the POS cart
+    // (Enable Discounts switch + Max Discount %).
+    const disc = clampBookingDiscount(discount, totalRoomCharge + extra);
     const grandTotal = Math.max(0, totalRoomCharge + extra + taxAmt - disc);
     const advance = Math.max(0, Number(advancePaid) || 0);
     if (advance > grandTotal) {
@@ -4572,7 +4803,14 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
     }
     const balanceDue = Math.max(0, grandTotal - advance);
 
-    const bookingStatus = status && ['confirmed', 'checked_in', 'checked_out', 'cancelled'].includes(status) ? status : 'checked_in';
+    // A stay that starts on a FUTURE date is a reservation, never a check-in:
+    // marking it "checked_in" used to flip the room to OCCUPIED the moment the
+    // booking was taken (weeks before the guest arrives) and list the guest as
+    // an in-house guest on the dashboard.
+    const startsToday = checkIn.getTime() <= Date.now()
+      || checkIn.toISOString().split('T')[0] <= new Date().toISOString().split('T')[0];
+    const requestedStatus = status && ['confirmed', 'checked_in', 'checked_out', 'cancelled'].includes(status) ? status : 'checked_in';
+    const bookingStatus = (requestedStatus === 'checked_in' && !startsToday) ? 'confirmed' : requestedStatus;
     const bookingNumber = db.getNextBookingNumber();
 
     const booking: RoomBooking = {
@@ -4612,10 +4850,23 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
     }
     db.raw.roomBookings.unshift(booking);
 
-    room.status = bookingStatus === 'checked_in' ? 'occupied' : 'reserved';
-    room.currentBookingId = booking.id;
-    room.currentGuestName = booking.guestName;
-    room.currentGuestPhone = booking.guestPhone;
+    if (bookingStatus === 'checked_in') {
+      room.status = 'occupied';
+      room.currentBookingId = booking.id;
+      room.currentGuestName = booking.guestName;
+      room.currentGuestPhone = booking.guestPhone;
+    } else {
+      // A future reservation must NOT downgrade a room that already has an
+      // in-house guest to "reserved" — the guest would vanish from the room
+      // plan even though they are still in the room.
+      const inHouse = (db.raw.roomBookings || []).find(
+        b => b.roomId === room.id && b.id !== booking.id && b.status === 'checked_in'
+      );
+      room.currentBookingId = inHouse ? inHouse.id : booking.id;
+      room.status = inHouse ? 'occupied' : 'reserved';
+      room.currentGuestName = inHouse ? inHouse.guestName : undefined;
+      room.currentGuestPhone = inHouse ? inHouse.guestPhone : undefined;
+    }
 
     db.save();
 
@@ -4714,13 +4965,11 @@ app.put('/api/room-bookings/:id/cancel', authMiddleware, (req: Request, res: Res
       booking.notes = (booking.notes ? booking.notes + ' | Cancel Reason: ' : 'Cancel Reason: ') + reason.slice(0, 500);
     }
 
+    // Re-derive the room's status from the bookings that are still active.
+    // Setting it straight to "available" used to free a room that still had an
+    // in-house guest as soon as a separate (future) reservation was cancelled.
+    syncRoomStatus(booking.roomId);
     const room = db.raw.rooms.find(r => r.id === booking.roomId);
-    if (room && (room.currentBookingId === booking.id || room.status === 'occupied' || room.status === 'reserved')) {
-      room.status = 'available';
-      room.currentBookingId = undefined;
-      room.currentGuestName = undefined;
-      room.currentGuestPhone = undefined;
-    }
 
     db.save();
 
@@ -4966,6 +5215,14 @@ app.post('/api/function-bookings', authMiddleware, (req: Request, res: Response)
       return res.status(400).json({ error: 'A valid event date is required.' });
     }
     const eventDayKey = parsedDate.toISOString().split('T')[0];
+    const todayKey = new Date().toISOString().split('T')[0];
+    // A back-dated event never shows up in the "upcoming" lists and leaves the
+    // hall looking free, so it is almost always a typo (2024 instead of 2026).
+    if (eventDayKey < todayKey) {
+      return res.status(400).json({
+        error: `The event date (${eventDayKey}) is in the past. Choose today or a future date.`
+      });
+    }
 
     // Guard against double-booking a hall for the same day — a second booking
     // on the same date previously could silently overlap the first one.
@@ -4984,13 +5241,30 @@ app.post('/api/function-bookings', authMiddleware, (req: Request, res: Response)
     const eventTypeFinal = validEventTypes.includes(eventType) ? eventType : 'other';
     const sessionFinal = validSessions.includes(session) ? session : 'full_day';
 
-    const hallRate = Math.max(0, Number(hallCharge) || hall.ratePerDay);
+    // The hall charge is master data, exactly like a room rate: only a Super
+    // Admin may agree to a different amount. A cashier used to be able to book
+    // a Rs. 150,000 hall for Rs. 100.
+    let hallRate = hall.ratePerDay;
+    if (hallCharge !== undefined && hallCharge !== null && hallCharge !== '') {
+      if (user.role !== 'super_admin') {
+        hallRate = hall.ratePerDay; // silently ignore a tampered charge
+      } else {
+        const override = Number(hallCharge);
+        if (!Number.isFinite(override) || override < 0 || override > 10000000) {
+          return res.status(400).json({ error: 'Invalid hall charge (must be between 0 and 10,000,000).' });
+        }
+        hallRate = override;
+      }
+    }
+    if (!Number.isFinite(hallRate) || hallRate < 0) hallRate = hall.ratePerDay;
+
     const plateRate = Math.max(0, Number(perPlateRate) || 0);
     const plates = Math.max(0, Math.min(100000, Number(numberOfPlates) || 0));
     const plateCharge = Number((plateRate * plates).toFixed(2));
     const extra = Math.max(0, Number(extraServices) || 0);
-    const disc = Math.max(0, Number(discount) || 0);
     const taxAmt = Math.max(0, Number(tax) || 0);
+    // Same discount policy as the POS cart and room bookings.
+    const disc = clampBookingDiscount(discount, hallRate + plateCharge + extra);
     const grandTotal = Number(Math.max(0, hallRate + plateCharge + extra + taxAmt - disc).toFixed(2));
     const advance = Math.max(0, Number(advancePaid) || 0);
     if (advance > grandTotal) {
@@ -6385,6 +6659,19 @@ app.put('/api/settings', authMiddleware, requireRole('super_admin'), (req: Reque
     if (updates[key] !== undefined) {
       const v = updates[key];
       updates[key] = v === true || v === 'true' || v === 1 || v === '1';
+    }
+  }
+
+  // Numbers arriving from HTML inputs are strings ("15"). Storing them raw
+  // meant `"10" + 5 === "105"` style surprises for anything that did not
+  // remember to wrap the value in Number(), so normalise them on the way in.
+  for (const key of ['taxRate', 'serviceChargeRate', 'maxDiscountPercentage', 'lowStockDefaultThreshold']) {
+    if (updates[key] !== undefined && updates[key] !== '') {
+      const num = Number(updates[key]);
+      if (!Number.isFinite(num)) {
+        return res.status(400).json({ error: `${key} must be a number.` });
+      }
+      updates[key] = num;
     }
   }
 

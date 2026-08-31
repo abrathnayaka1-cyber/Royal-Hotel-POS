@@ -29,6 +29,7 @@ node tests/e2e/e2e-test.mjs
 | `e2e-kitchen-sale.mjs` | Recipe auto-deduction on POS checkout (ledger records), blocked checkout when ingredients are short (product stock untouched), void restores ingredients exactly |
 | `e2e-recipe-snapshot.mjs` | Void restores **exact sale-time** kitchen deductions from the bill snapshot even when the recipe was archived or edited afterwards |
 | `e2e-recipe-impact.mjs` | **Per-portion recipes**: two portions of one dish with DIFFERENT materials — each sale deducts only its own materials; stock-impact endpoint (`GET /api/kitchen/recipes/:id/impact?portions=N`) sufficiency/shortage math; void restores exactly |
+| `e2e-round2.mjs` | **Ninth audit round:** room-rate & hall-charge tampering blocked (master data only), booking discounts obey *Enable Discounts* / *Max Discount %*, back-dated events rejected, date-range room-overlap guard (+ future stay stays a reservation, room status re-derived on create/cancel), password change / admin reset / disable sign other sessions out, no self-lockout via `PUT /api/users/:id`, numeric settings stored as numbers |
 | `demo-kitchen-deduction.mjs` | Live walkthrough: sell a recipe-linked Food & Kitchen portion → shows materials deducted ingredient-by-ingredient, kitchen dashboard today stats, consumption report, and void restore |
 
 > The suites self-clean (users, products, ingredients, recipes). Recipes are

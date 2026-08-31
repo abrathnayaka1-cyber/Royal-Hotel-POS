@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { usePOS } from '../../context/POSContext.tsx';
+import { useAuth } from '../../context/AuthContext.tsx';
 import { Room } from '../../types.ts';
 import {
   BedDouble,
@@ -29,7 +30,15 @@ export const RoomBookingModal: React.FC = () => {
     createRoomBooking
   } = usePOS();
 
+  // Only a Super Admin may agree to a rate other than the room's own tariff.
+  const { isSuperAdmin } = useAuth();
+  const canChangeRate = isSuperAdmin;
+
   const currencySymbol = settings?.currencySymbol || 'Rs.';
+
+  // Booking discounts follow the same policy as the POS cart.
+  const discountsEnabled = settings?.enableDiscounts !== false;
+  const maxDiscountPct = Number(settings?.maxDiscountPercentage ?? 100) || 100;
 
   // Form State
   const [selectedRoomId, setSelectedRoomId] = useState<string>('');
@@ -126,7 +135,10 @@ export const RoomBookingModal: React.FC = () => {
   // Computed Totals
   const totalRoomCharge = durationDays * ratePerDay;
   const taxAmount = (totalRoomCharge * taxRate) / 100;
-  const grandTotal = Math.max(0, totalRoomCharge + extraCharges + taxAmount - discount);
+  // The server enforces the same ceiling — this only keeps the UI honest.
+  const maxDiscountAllowed = Math.max(0, Number((((totalRoomCharge + extraCharges) * Math.min(maxDiscountPct, 100)) / 100).toFixed(2)));
+  const effectiveDiscount = discountsEnabled ? Math.min(discount, maxDiscountAllowed) : 0;
+  const grandTotal = Math.max(0, totalRoomCharge + extraCharges + taxAmount - effectiveDiscount);
   const balanceDue = Math.max(0, grandTotal - advancePaid);
 
   const selectedRoomObj = rooms.find(r => r.id === selectedRoomId);
@@ -162,7 +174,7 @@ export const RoomBookingModal: React.FC = () => {
         durationDays,
         ratePerDay,
         extraCharges,
-        discount,
+        discount: effectiveDiscount,
         tax: taxAmount,
         advancePaid,
         paymentMethod,
@@ -395,6 +407,9 @@ export const RoomBookingModal: React.FC = () => {
               <div>
                 <label className="block text-xs text-slate-400 mb-1">
                   Daily Rate ({currencySymbol})
+                  {!canChangeRate && (
+                    <span className="ml-1 text-[10px] text-slate-500">(Super Admin only)</span>
+                  )}
                 </label>
                 <div className="relative">
                   <DollarSign className="w-4 h-4 text-slate-500 absolute left-3 top-3" />
@@ -403,10 +418,17 @@ export const RoomBookingModal: React.FC = () => {
                     min="0"
                     id="room-rate-input"
                     value={ratePerDay}
+                    disabled={!canChangeRate}
+                    title={canChangeRate ? undefined : 'Only a Super Admin can change the room rate'}
                     onChange={(e) => setRatePerDay(Math.max(0, Number(e.target.value)))}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-9 pr-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 font-mono font-bold"
+                    className={`w-full bg-slate-900 border border-slate-700 rounded-xl pl-9 pr-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 font-mono font-bold ${!canChangeRate ? 'opacity-60 cursor-not-allowed' : ''}`}
                   />
                 </div>
+                {!canChangeRate && (
+                  <p className="mt-1 text-[10px] text-slate-500">
+                    Locked to the room's tariff — ask a Super Admin for a special rate.
+                  </p>
+                )}
               </div>
             </div>
           </div>
@@ -492,16 +514,29 @@ export const RoomBookingModal: React.FC = () => {
               <div>
                 <label className="block text-xs text-slate-400 mb-1">
                   Discount ({currencySymbol})
+                  {discountsEnabled && (
+                    <span className="ml-1 text-[10px] text-slate-500">max {maxDiscountPct}%</span>
+                  )}
                 </label>
                 <input
                   type="number"
                   min="0"
+                  max={discountsEnabled ? maxDiscountAllowed : 0}
                   id="room-discount-input"
                   value={discount}
+                  disabled={!discountsEnabled}
+                  title={discountsEnabled ? `Maximum discount: ${currencySymbol} ${maxDiscountAllowed.toLocaleString()} (${maxDiscountPct}%)` : 'Discounts are disabled in System Settings'}
                   onChange={(e) => setDiscount(Math.max(0, Number(e.target.value)))}
-                  placeholder="0"
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 font-mono text-emerald-400"
+                  placeholder={discountsEnabled ? '0' : 'Discounts disabled'}
+                  className={`w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 font-mono text-emerald-400 ${!discountsEnabled ? 'opacity-60 cursor-not-allowed' : ''}`}
                 />
+                {discountsEnabled && discount > maxDiscountAllowed ? (
+                  <p className="mt-1 text-[10px] text-amber-400">
+                    Capped at {currencySymbol} {maxDiscountAllowed.toLocaleString()} ({maxDiscountPct}%).
+                  </p>
+                ) : !discountsEnabled ? (
+                  <p className="mt-1 text-[10px] text-slate-500">Discounts are turned off in System Settings.</p>
+                ) : null}
               </div>
 
               <div>

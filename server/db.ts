@@ -23,6 +23,13 @@ export interface User {
   createdAt: string;
   lastLogin?: string;
   lastLoginAt?: string;
+  /**
+   * Set when the password is changed (or the account is reset / deactivated by
+   * a Super Admin). Every login token issued BEFORE this timestamp is rejected,
+   * so a leaked or shared session stops working straight away instead of living
+   * out the rest of its 30-day lifetime.
+   */
+  sessionsInvalidatedAt?: number;
 }
 
 export interface Category {
