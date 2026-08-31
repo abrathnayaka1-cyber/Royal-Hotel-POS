@@ -122,7 +122,7 @@ export const FunctionBookingModal: React.FC = () => {
 
   // Computed Totals
   const plateCharge = perPlateRate * numberOfPlates;
-  const taxAmount = ((hallCharge + plateCharge + extraServices) * taxRate) / 100;
+  const taxAmount = Number((((hallCharge + plateCharge + extraServices) * taxRate) / 100).toFixed(2));
   // The server enforces the same ceiling — this only keeps the UI honest.
   const maxDiscountAllowed = Math.max(0, Number((((hallCharge + plateCharge + extraServices) * Math.min(maxDiscountPct, 100)) / 100).toFixed(2)));
   const effectiveDiscount = discountsEnabled ? Math.min(discount, maxDiscountAllowed) : 0;
