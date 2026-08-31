@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { resolveDataDir } from './paths.ts';
 
 export interface User {
@@ -685,6 +686,131 @@ try {
 }
 
 console.log(`[DB] Data directory: ${DATA_DIR}`);
+
+// ==========================================
+// MULTI-HOTEL / TENANT CONFIGURATION (v1.5.0)
+// ==========================================
+// The same POS application serves multiple independent hotel businesses. Each
+// hotel has its own Super Admin, users, products, stock, bills, room bookings,
+// function bookings and kitchen data. Data is stored in a SEPARATE database for
+// every hotel so one hotel can never read or overwrite another hotel's records.
+//
+// The first hotel ("Royal Green Garden Hotel") keeps the legacy single-database
+// location (`<dataDir>/pos_database.json`) so upgrading an existing install
+// preserves all current data. Additional hotels live under
+// `<dataDir>/hotels/<hotel-id>/`.
+
+export const DEFAULT_HOTEL_ID = 'royal-green-garden';
+
+export interface HotelInfo {
+  id: string;
+  name: string;
+  tagline: string;
+  address: string;
+  phone: string;
+  email: string;
+  website: string;
+  /** Optional per-hotel default Super Admin password override (env). */
+  adminPasswordEnv?: string;
+}
+
+export interface PublicHotelInfo {
+  id: string;
+  name: string;
+  tagline: string;
+  address: string;
+  phone: string;
+  email: string;
+  website: string;
+}
+
+/** Public, display-only hotel registry used by the login screen. */
+export const HOTEL_INFO: HotelInfo[] = [
+  {
+    id: 'royal-green-garden',
+    name: 'Royal Green Garden Hotel',
+    tagline: 'Fine Dining, Liquor & Garden Hospitality',
+    address: 'No. 42 Garden Road, Puttalam, Sri Lanka',
+    phone: '+94 32 226 5500',
+    email: 'info@royalgreengarden.lk',
+    website: 'www.royalgreengarden.lk',
+  },
+  {
+    id: 'home-field',
+    name: 'Home Field Hotel',
+    tagline: 'Comfort, Cuisine & Country Hospitality',
+    address: 'No. 18 Field Road, Kurunegala, Sri Lanka',
+    phone: '+94 37 222 8100',
+    email: 'info@homefield.lk',
+    website: 'www.homefield.lk',
+  },
+  {
+    id: 'nuwara-eliya',
+    name: 'Nuwara Eliya Hotel',
+    tagline: 'Cool Hills, Warm Hospitality',
+    address: 'No. 7 Grand View Road, Nuwara Eliya, Sri Lanka',
+    phone: '+94 52 222 3400',
+    email: 'info@nuwaraeliyahotel.lk',
+    website: 'www.nuwaraeliyahotel.lk',
+  },
+];
+
+function sanitizeHotelId(id: string): string {
+  return String(id || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+}
+
+export function getHotelInfo(id?: string | null): HotelInfo | undefined {
+  if (!id) return undefined;
+  return HOTEL_INFO.find(h => h.id === sanitizeHotelId(id));
+}
+
+export function listPublicHotels(): PublicHotelInfo[] {
+  return HOTEL_INFO.map(({ id, name, tagline, address, phone, email, website }) => ({
+    id,
+    name,
+    tagline,
+    address,
+    phone,
+    email,
+    website,
+  }));
+}
+
+function hotelDataDirFor(hotelId: string): string {
+  if (hotelId === DEFAULT_HOTEL_ID) return DATA_DIR;
+  return path.join(DATA_DIR, 'hotels', sanitizeHotelId(hotelId));
+}
+
+function hotelDbFileFor(hotelId: string): string {
+  return path.join(hotelDataDirFor(hotelId), 'pos_database.json');
+}
+
+function hotelBackupDirFor(hotelId: string): string {
+  return path.join(hotelDataDirFor(hotelId), 'backups');
+}
+
+function makeHotelSettingsDefaults(info?: HotelInfo): SystemSettings {
+  const base: SystemSettings = { ...defaultSettings };
+  if (info) {
+    base.businessName = info.name;
+    base.businessTagline = info.tagline;
+    base.address = info.address;
+    base.phone = info.phone;
+    base.email = info.email;
+    base.website = info.website;
+    base.receiptHeader = `Welcome to ${info.name}`;
+    base.receiptFooter = `Thank you for visiting ${info.name}! Please visit again.`;
+  }
+  return base;
+}
+
+// Each tenant gets its own independent copy of the seed catalogue. Reusing the
+// module-level seed arrays directly would make every hotel's in-memory
+// `products/categories/rooms/...` point at the SAME array, so a product added
+// on Hotel A would also appear on Hotel B.
+function cloneSeed<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
 
 // Initial default settings - Updated branding to Royal Hotel
 const defaultSettings: SystemSettings = {
@@ -1914,15 +2040,55 @@ export class Database {
   private data: DatabaseSchema;
   private lastPersistError: Error | null = null;
   private pendingSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly hotelId: string;
+  private readonly dataDir: string;
+  private readonly dbFile: string;
+  private readonly backupDir: string;
+  private readonly settingsDefaults: SystemSettings;
 
-  constructor() {
+  constructor(options: {
+    hotelId?: string;
+    dataDir?: string;
+    dbFile?: string;
+    backupDir?: string;
+    settingsDefaults?: SystemSettings;
+  } = {}) {
+    const id = options.hotelId || DEFAULT_HOTEL_ID;
+    this.hotelId = id;
+    this.dataDir = options.dataDir || hotelDataDirFor(id);
+    this.dbFile = options.dbFile || path.join(this.dataDir, 'pos_database.json');
+    this.backupDir = options.backupDir || path.join(this.dataDir, 'backups');
+    this.settingsDefaults = options.settingsDefaults || makeHotelSettingsDefaults(getHotelInfo(id));
+
+    // Ensure this tenant's data and backup directories exist. If this fails the
+    // process must NOT continue silently — a missing writable dir means every
+    // sale for this hotel would be lost on restart.
+    try {
+      fs.mkdirSync(this.dataDir, { recursive: true });
+      fs.mkdirSync(this.backupDir, { recursive: true });
+      fs.accessSync(this.dataDir, fs.constants.W_OK);
+    } catch (err) {
+      console.error(`[DB][FATAL] Data directory is not writable: ${this.dataDir}`);
+      console.error('[DB][FATAL] Set POS_DATA_DIR to a writable absolute path, or fix permissions.');
+      throw err;
+    }
+
+    console.log(`[DB] Hotel "${id}" data directory: ${this.dataDir}`);
     this.data = this.loadDatabase();
+  }
+
+  public get id(): string {
+    return this.hotelId;
+  }
+
+  public get info(): HotelInfo | undefined {
+    return getHotelInfo(this.hotelId);
   }
 
   private loadDatabase(): DatabaseSchema {
     try {
-      if (fs.existsSync(DB_FILE)) {
-        const raw = fs.readFileSync(DB_FILE, 'utf-8');
+      if (fs.existsSync(this.dbFile)) {
+        const raw = fs.readFileSync(this.dbFile, 'utf-8');
         const parsed = JSON.parse(raw);
         if (parsed && Array.isArray(parsed.products) && Array.isArray(parsed.users)) {
           // Older databases did not contain every collection in today's schema.
@@ -2025,7 +2191,7 @@ export class Database {
 
           // Ensure rooms array exists
           if (!Array.isArray(parsed.rooms) || parsed.rooms.length === 0) {
-            parsed.rooms = initialRooms;
+            parsed.rooms = cloneSeed(initialRooms);
           }
 
           // Ensure roomBookings array exists
@@ -2039,7 +2205,7 @@ export class Database {
           // deletes or rewrites any existing data.
           // ==========================================
           if (!Array.isArray(parsed.functionHalls) || parsed.functionHalls.length === 0) {
-            parsed.functionHalls = initialFunctionHalls;
+            parsed.functionHalls = cloneSeed(initialFunctionHalls);
           }
           if (!Array.isArray(parsed.functionBookings)) {
             parsed.functionBookings = [];
@@ -2127,7 +2293,7 @@ export class Database {
 
           // Ensure settings has all defaults including roomBookingPrefix
           parsed.settings = {
-            ...defaultSettings,
+            ...this.settingsDefaults,
             ...parsed.settings,
           };
 
@@ -2152,12 +2318,12 @@ export class Database {
       // backup, and only seed fresh when there is genuinely nothing to
       // recover.
       // ==================================================================
-      if (fs.existsSync(DB_FILE)) {
+      if (fs.existsSync(this.dbFile)) {
         console.error('[DB] Existing database file could not be read:', err);
 
-        const quarantinePath = `${DB_FILE}.corrupt.${Date.now()}`;
+        const quarantinePath = `${this.dbFile}.corrupt.${Date.now()}`;
         try {
-          fs.copyFileSync(DB_FILE, quarantinePath);
+          fs.copyFileSync(this.dbFile, quarantinePath);
           console.error(`[DB] Damaged database preserved at: ${quarantinePath}`);
         } catch (copyErr) {
           console.error('[DB] Could not quarantine the damaged database file:', copyErr);
@@ -2169,7 +2335,7 @@ export class Database {
         // Nothing recoverable. Refuse to boot rather than start an empty POS
         // on top of a real installation — an operator must decide.
         console.error('[DB][FATAL] Database is unreadable and no usable backup was found.');
-        console.error(`[DB][FATAL] Inspect ${quarantinePath} and restore a backup from ${BACKUP_DIR}.`);
+        console.error(`[DB][FATAL] Inspect ${quarantinePath} and restore a backup from ${this.backupDir}.`);
         console.error('[DB][FATAL] To start intentionally from an empty database, move the damaged file aside.');
         throw new Error('Refusing to start: database unreadable and unrecoverable (see logs above).');
       }
@@ -2180,13 +2346,13 @@ export class Database {
     // Seed default database
     const initialDb: DatabaseSchema = {
       users: makeInitialUsers(),
-      categories: initialCategories,
-      companies: initialCompanies,
-      products: initialProducts,
-      rooms: initialRooms,
+      categories: cloneSeed(initialCategories),
+      companies: cloneSeed(initialCompanies),
+      products: cloneSeed(initialProducts),
+      rooms: cloneSeed(initialRooms),
       roomBookings: [],
       // Hotel Functions & Events module (v1.4.0)
-      functionHalls: initialFunctionHalls,
+      functionHalls: cloneSeed(initialFunctionHalls),
       functionBookings: [],
       heldBills: [],
       kots: [],
@@ -2205,14 +2371,14 @@ export class Database {
           createdAt: new Date().toISOString()
         }
       ],
-      kitchenIngredients: initialKitchenIngredients,
+      kitchenIngredients: cloneSeed(initialKitchenIngredients),
       kitchenMovements: [],
-      kitchenRecipes: initialKitchenRecipes,
+      kitchenRecipes: cloneSeed(initialKitchenRecipes),
       kitchenWastage: [],
       kitchenCounts: [],
       kitchenAdjustmentRequests: [],
       healthReports: [],
-      settings: defaultSettings,
+      settings: this.settingsDefaults,
       counters: {
         billSeq: 1001,
         invoiceSeq: 5001,
@@ -2247,7 +2413,7 @@ export class Database {
     });
 
     // Populate opening kitchen ingredient movements (Food & Kitchen module)
-    initialKitchenIngredients.forEach(ing => {
+    cloneSeed(initialKitchenIngredients).forEach(ing => {
       initialDb.kitchenMovements.push({
         id: `kmov-init-${ing.id}`,
         ingredientId: ing.id,
@@ -2274,11 +2440,11 @@ export class Database {
    */
   private recoverFromBackup(): DatabaseSchema | null {
     try {
-      if (!fs.existsSync(BACKUP_DIR)) return null;
-      const candidates = fs.readdirSync(BACKUP_DIR)
+      if (!fs.existsSync(this.backupDir)) return null;
+      const candidates = fs.readdirSync(this.backupDir)
         .filter(f => f.startsWith('royal_hotel_backup_') && f.endsWith('.json'))
         .map(f => {
-          const full = path.join(BACKUP_DIR, f);
+          const full = path.join(this.backupDir, f);
           return { full, name: f, time: fs.statSync(full).mtime.getTime() };
         })
         .sort((a, b) => b.time - a.time);
@@ -2306,7 +2472,7 @@ export class Database {
     // Atomic write: write to a temp file, fsync it, then rename over the real
     // file. rename(2) is atomic on POSIX, so a crash mid-save can never leave a
     // half-written database behind.
-    const tempPath = `${DB_FILE}.tmp.${process.pid}.${Date.now()}`;
+    const tempPath = `${this.dbFile}.tmp.${process.pid}.${Date.now()}`;
     try {
       const payload = JSON.stringify(state, null, 2);
 
@@ -2318,11 +2484,11 @@ export class Database {
         fs.closeSync(fd);
       }
 
-      fs.renameSync(tempPath, DB_FILE);
+      fs.renameSync(tempPath, this.dbFile);
 
       // Also fsync the DIRECTORY so the rename itself survives a power cut.
       try {
-        const dirFd = fs.openSync(DATA_DIR, 'r');
+        const dirFd = fs.openSync(this.dataDir, 'r');
         try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
       } catch {
         // Not supported on every platform (e.g. some Windows setups) — the
@@ -2340,10 +2506,10 @@ export class Database {
 
       // Clean up any stale temp files left by earlier crashed writes.
       try {
-        fs.readdirSync(DATA_DIR)
+        fs.readdirSync(this.dataDir)
           .filter(f => f.startsWith('pos_database.json.tmp'))
           .forEach(f => {
-            const full = path.join(DATA_DIR, f);
+            const full = path.join(this.dataDir, f);
             try {
               if (Date.now() - fs.statSync(full).mtime.getTime() > 60_000) fs.unlinkSync(full);
             } catch {}
@@ -2549,9 +2715,9 @@ export class Database {
     const filename = `royal_hotel_backup_${timestamp}.json`;
     // Security: Ensure filename is safe
     const safeFilename = path.basename(filename);
-    const backupPath = path.join(BACKUP_DIR, safeFilename);
+    const backupPath = path.join(this.backupDir, safeFilename);
     // Prevent path traversal
-    if (!backupPath.startsWith(BACKUP_DIR)) {
+    if (!backupPath.startsWith(this.backupDir)) {
       throw new Error('Invalid backup path');
     }
     const content = JSON.stringify(this.data, null, 2);
@@ -2559,15 +2725,15 @@ export class Database {
     
     // Prune old backups keeping last 30
     try {
-      const files = fs.readdirSync(BACKUP_DIR)
+      const files = fs.readdirSync(this.backupDir)
         .filter(f => f.startsWith('royal_hotel_backup_') && f.endsWith('.json'))
-        .map(f => ({ name: f, time: fs.statSync(path.join(BACKUP_DIR, f)).mtime.getTime() }))
+        .map(f => ({ name: f, time: fs.statSync(path.join(this.backupDir, f)).mtime.getTime() }))
         .sort((a, b) => b.time - a.time);
 
       if (files.length > 30) {
         files.slice(30).forEach(f => {
           try {
-            fs.unlinkSync(path.join(BACKUP_DIR, f.name));
+            fs.unlinkSync(path.join(this.backupDir, f.name));
           } catch (_) {}
         });
       }
@@ -2582,11 +2748,11 @@ export class Database {
 
   public listBackups() {
     try {
-      if (!fs.existsSync(BACKUP_DIR)) return [];
-      const files = fs.readdirSync(BACKUP_DIR)
+      if (!fs.existsSync(this.backupDir)) return [];
+      const files = fs.readdirSync(this.backupDir)
         .filter(f => f.endsWith('.json'))
         .map(f => {
-          const stats = fs.statSync(path.join(BACKUP_DIR, f));
+          const stats = fs.statSync(path.join(this.backupDir, f));
           return {
             filename: f,
             size: stats.size,
@@ -2633,7 +2799,7 @@ export class Database {
     // Ensure required arrays exist
     this.data.rooms = this.data.rooms || [];
     this.data.roomBookings = this.data.roomBookings || [];
-    this.data.functionHalls = this.data.functionHalls?.length ? this.data.functionHalls : initialFunctionHalls;
+    this.data.functionHalls = this.data.functionHalls?.length ? this.data.functionHalls : cloneSeed(initialFunctionHalls);
     this.data.functionBookings = this.data.functionBookings || [];
     if (!this.data.counters.functionBookingSeq) this.data.counters.functionBookingSeq = 2001;
     this.data.heldBills = this.data.heldBills || [];
@@ -2650,13 +2816,13 @@ export class Database {
     this.data.kitchenCounts = this.data.kitchenCounts || [];
     this.data.kitchenAdjustmentRequests = this.data.kitchenAdjustmentRequests || [];
     this.data.healthReports = this.data.healthReports || [];
-    this.data.settings = { ...defaultSettings, ...this.data.settings };
+    this.data.settings = { ...this.settingsDefaults, ...this.data.settings };
     this.save();
     return true;
   }
 
   public restoreBackupFile(filename: string): boolean {
-    const backupPath = path.join(BACKUP_DIR, path.basename(filename));
+    const backupPath = path.join(this.backupDir, path.basename(filename));
     if (!fs.existsSync(backupPath)) {
       throw new Error('Backup file not found on server.');
     }
@@ -2713,4 +2879,83 @@ export class Database {
   }
 }
 
-export const db = new Database();
+// ==========================================
+// TENANT REGISTRY & ASYNC CONTEXT (v1.5.0)
+// ==========================================
+// Every real request runs with a hotel context. `db` resolves to that hotel's
+// Database instance so the thousands of existing `db.raw.*` / `db.method()`
+// calls in server.ts continue to work unchanged while always operating on the
+// correct tenant's data.
+const tenantDatabases = new Map<string, Database>();
+
+for (const hotel of HOTEL_INFO) {
+  const tenant = new Database({
+    hotelId: hotel.id,
+    settingsDefaults: makeHotelSettingsDefaults(hotel),
+  });
+  tenantDatabases.set(hotel.id, tenant);
+  if (hotel.id === DEFAULT_HOTEL_ID) {
+    console.log(`[DB] Default hotel initialized: ${hotel.name}`);
+  } else {
+    console.log(`[DB] Hotel tenant initialized: ${hotel.name}`);
+  }
+}
+
+// Legacy export kept for backwards compatibility — resolves the DEFAULT hotel
+// when no per-request context exists (boot seeding, health checks, shutdown).
+export const defaultDb = tenantDatabases.get(DEFAULT_HOTEL_ID)!;
+
+const tenantStorage = new AsyncLocalStorage<Database>();
+
+export function getActiveDatabase(): Database {
+  return tenantStorage.getStore() ?? defaultDb;
+}
+
+export function runWithDatabase<T>(database: Database, fn: () => T): T {
+  return tenantStorage.run(database, fn);
+}
+
+export function getTenantDatabase(hotelId?: string | null): Database | undefined {
+  const id = sanitizeHotelId(hotelId || DEFAULT_HOTEL_ID);
+  // Only known hotels are allowed; never arbitrary filesystem paths.
+  if (!getHotelInfo(id)) return undefined;
+  return tenantDatabases.get(id);
+}
+
+export function getAllDatabases(): Database[] {
+  return Array.from(tenantDatabases.values());
+}
+
+export function flushAllDatabases(): void {
+  for (const tenant of tenantDatabases.values()) {
+    try {
+      tenant.flush();
+    } catch (err) {
+      console.error(`[DB][SHUTDOWN] Failed to flush tenant "${tenant.id}":`, err);
+    }
+  }
+}
+
+/**
+ * Tenant-aware `db` accessor.
+ *
+ * Inside a request handled by `tenantMiddleware` (server.ts) it returns that
+ * hotel's Database. Outside a request it returns the default hotel database.
+ * Method access is bound to the resolved instance so `this` is never lost.
+ */
+const dbProxy = new Proxy({} as Database, {
+  get(_target, prop, _receiver) {
+    const active = getActiveDatabase();
+    const value = Reflect.get(active, prop, active);
+    if (typeof value === 'function') {
+      return value.bind(active);
+    }
+    return value;
+  },
+  has(_target, prop) {
+    return prop in getActiveDatabase();
+  },
+});
+
+/** Tenant-aware Database accessor (see note above). */
+export const db: Database = dbProxy;

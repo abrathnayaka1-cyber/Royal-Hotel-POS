@@ -1,12 +1,24 @@
-# Royal Hotel POS - Bar, Restaurant & Hotel Management System
+# Ape Hotels POS - Multi-Hotel Bar, Restaurant & Hotel Management System
 
-> Commercial-grade Point of Sale system with multi-size bottle variants, hotel room management, function & event bookings, daily stock sheet reconciliation, inventory, KOT, billing, and reporting.
+> Commercial-grade Point of Sale system that runs **three separate hotels under one POS**: Royal Green Garden Hotel, Home Field Hotel and Nuwara Eliya Hotel. Each hotel has its own logins, users, products, stock, bills, bookings, kitchen data and settings.
 
-![Version](https://img.shields.io/badge/version-1.4.0-blue)
+![Version](https://img.shields.io/badge/version-1.5.0-blue)
 ![Node](https://img.shields.io/badge/node-%3E%3D22-green)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
 ## 🌟 Features
+
+### v1.5.0 — Multi-Hotel Mode (Ape Hotels)
+
+- **One POS, three hotels:** Royal Green Garden Hotel, Home Field Hotel and Nuwara Eliya Hotel.
+- **Hotel picker on login:** choose the hotel before signing in. Each hotel has a completely separate `Super Admin`, `cashier` and `kitchen_manager` user list.
+- **Fully isolated data:** products, categories, companies, inventory, stock movements, bills, KOTs, held bills, rooms, room bookings, function halls/events, kitchen ingredients/recipes/wastage and settings are stored in a **separate JSON database per hotel**.
+  - `Royal Green Garden Hotel` → `data/pos_database.json` (keeps the existing single-tenant location so upgrades preserve current data)
+  - `Home Field Hotel` → `data/hotels/home-field/pos_database.json`
+  - `Nuwara Eliya Hotel` → `data/hotels/nuwara-eliya/pos_database.json`
+- **Separate management:** each hotel's Super Admin manages only its own users, pricing, stock, rooms and reports. A cashier logged in to one hotel can never see or change another hotel's data.
+- **Server-side tenant guard:** every request is resolved to a hotel via `X-Hotel-Id`/`X-Tenant-Id`, the login `hotelId`, query `?hotel=`, or the `hotelId` embedded in the session token. Tokens are per-hotel, so switching hotels requires their own login.
+- **Per-hotel receipts & settings:** `System Settings`, business name, address, phone, invoice prefixes, tax/service charge and printer settings are per hotel.
 
 ### POS & Billing
 - Fast touch-friendly POS interface with product grid & category tabs
@@ -144,8 +156,18 @@ npm run dev
 App runs at `http://localhost:3000`
 
 ### Default Login
-- Username: `Admin`
-- Password: `Araliya2000` (development / local only)
+
+Select a hotel on the login screen, then sign in. Every hotel starts with its
+own independent Super Admin account (same development-only default password —
+change each hotel's password separately from Admin → Users):
+
+| Hotel | Username | Password |
+|---|---|---|
+| Royal Green Garden Hotel | `Admin` | `Araliya2000` |
+| Home Field Hotel | `Admin` | `Araliya2000` |
+| Nuwara Eliya Hotel | `Admin` | `Araliya2000` |
+
+`Araliya2000` is development / local only.
 
 > Change password immediately after first login via Admin → Users.
 >

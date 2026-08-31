@@ -1,19 +1,44 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '../../context/AuthContext.tsx';
-import { User, KeyRound, AlertCircle, ArrowRight, Eye, EyeOff, Lock } from 'lucide-react';
-import { ApiException } from '../../lib/api.ts';
+import { Hotel as HotelIcon, User, KeyRound, AlertCircle, ArrowRight, Eye, EyeOff, Lock, Building2 } from 'lucide-react';
+import { ApiException, fetchApi } from '../../lib/api.ts';
+import { Hotel } from '../../types.ts';
 import { BrandLogo } from '../BrandLogo.tsx';
 
 export const LoginScreen: React.FC = () => {
-  const { login } = useAuth();
+  const { login, hotel } = useAuth();
   const [username, setUsername] = useState<string>('');
   const [password, setPassword] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [hotels, setHotels] = useState<Hotel[]>([]);
+  const [selectedHotelId, setSelectedHotelId] = useState<string>(hotel?.id || '');
+  const [loadingHotels, setLoadingHotels] = useState<boolean>(true);
+
+  useEffect(() => {
+    fetchApi<{ hotels: Hotel[]; defaultHotelId?: string }>('/hotels')
+      .then(data => {
+        const list = data?.hotels || [];
+        setHotels(list);
+        if (!selectedHotelId && list.length > 0) {
+          setSelectedHotelId((data.defaultHotelId && list.some(h => h.id === data.defaultHotelId) ? data.defaultHotelId : list[0].id) as string);
+        }
+      })
+      .catch(err => {
+        setErrorMsg(err?.message || 'Unable to load hotel list.');
+      })
+      .finally(() => setLoadingHotels(false));
+  }, [selectedHotelId]);
+
+  const selectedHotel = hotels.find(h => h.id === selectedHotelId);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!selectedHotelId) {
+      setErrorMsg('Please select a hotel to continue.');
+      return;
+    }
     if (!username.trim() || !password) {
       setErrorMsg('Please enter both username and password');
       return;
@@ -22,7 +47,11 @@ export const LoginScreen: React.FC = () => {
     try {
       setIsSubmitting(true);
       setErrorMsg(null);
-      await login(username.trim(), password);
+      await login({
+        username: username.trim(),
+        password,
+        hotelId: selectedHotelId,
+      });
     } catch (err: any) {
       if (err instanceof ApiException) {
         setErrorMsg(err.message);
@@ -46,14 +75,14 @@ export const LoginScreen: React.FC = () => {
             className="w-10 h-10"
             roundedClass="rounded-xl"
             imgClassName="shadow-lg shadow-blue-600/20 ring-1 ring-white/10"
-            alt="Royal Hotel POS"
+            alt="Hotel POS"
           />
           <div>
             <h1 className="font-extrabold text-base tracking-tight text-white uppercase">
-              Royal Hotel
+              Ape Hotels POS
             </h1>
             <p className="text-xs text-slate-400 font-medium">
-              Bar, Restaurant & Hotel Management POS
+              Multi-Hotel Bar, Restaurant & Hotel Management
             </p>
           </div>
         </div>
@@ -70,10 +99,10 @@ export const LoginScreen: React.FC = () => {
             </div>
             <h2 className="text-2xl font-black text-white uppercase tracking-tight">Sign In</h2>
             <p className="text-xs text-slate-400 font-medium">
-              Enter your credentials to access the system
+              Select your hotel and enter your credentials
             </p>
             <p className="text-[10px] text-slate-500 mt-2">
-              Access is restricted to authorised staff
+              Every hotel has its own login, users and business data
             </p>
           </div>
 
@@ -85,6 +114,37 @@ export const LoginScreen: React.FC = () => {
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+            <div>
+              <label htmlFor="login-hotel" className="text-xs font-bold uppercase tracking-wider text-slate-400 block mb-1.5">
+                Hotel
+              </label>
+              <div className="relative">
+                <Building2 className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+                <select
+                  id="login-hotel"
+                  value={selectedHotelId}
+                  onChange={e => setSelectedHotelId(e.target.value)}
+                  disabled={loadingHotels || hotels.length === 0}
+                  className="w-full pl-10 pr-3 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-sm font-semibold text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all disabled:opacity-50"
+                  aria-label="Hotel"
+                >
+                  {loadingHotels && <option value="">Loading hotels...</option>}
+                  {!loadingHotels && hotels.length === 0 && <option value="">No hotels available</option>}
+                  {hotels.map(h => (
+                    <option key={h.id} value={h.id}>
+                      {h.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {selectedHotel && (
+                <p className="text-[10px] text-slate-500 mt-1.5 flex items-center gap-1">
+                  <HotelIcon className="w-3 h-3" />
+                  {selectedHotel.tagline} • {selectedHotel.address}
+                </p>
+              )}
+            </div>
+
             <div>
               <label htmlFor="login-username" className="text-xs font-bold uppercase tracking-wider text-slate-400 block mb-1.5">
                 Username
@@ -137,7 +197,7 @@ export const LoginScreen: React.FC = () => {
             <button
               id="login-submit-btn"
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || !selectedHotelId || loadingHotels}
               className="w-full py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-xl font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-blue-600/20 transition-all cursor-pointer active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <span>{isSubmitting ? 'Authenticating...' : 'Sign In'}</span>
@@ -154,7 +214,7 @@ export const LoginScreen: React.FC = () => {
       </div>
 
       <div className="text-center text-[10px] uppercase font-bold tracking-widest text-slate-500 z-10 relative">
-        Royal Hotel • Commercial POS & Inventory Control • v1.1.0
+        Ape Hotels • Multi-Hotel Commercial POS & Inventory Control • v1.5.0
       </div>
     </div>
   );

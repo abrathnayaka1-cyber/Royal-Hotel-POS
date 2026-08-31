@@ -18,7 +18,45 @@ import bcrypt from 'bcryptjs';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { z } from 'zod';
 import { APP_ROOT, DIST_DIR, resolveDataDir } from './server/paths.ts';
-import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking, FunctionHall, FunctionBooking, StockImport, StockImportRowResult, StockImportType, KitchenIngredient, KitchenStockMovement, KitchenRecipe, KitchenRecipeItem, KitchenWastageRecord, KitchenPhysicalCount, KitchenAdjustmentRequest, KITCHEN_WASTAGE_CATEGORIES, KitchenWastageCategory, KitchenDeductionSnapshot, HealthReport, HealthReportIssue } from './server/db.ts';
+import {
+  db,
+  User,
+  Product,
+  ProductVariant,
+  Category,
+  Company,
+  OrderItem,
+  HeldBill,
+  KOT,
+  Bill,
+  StockMovement,
+  Room,
+  RoomBooking,
+  FunctionHall,
+  FunctionBooking,
+  StockImport,
+  StockImportRowResult,
+  StockImportType,
+  KitchenIngredient,
+  KitchenStockMovement,
+  KitchenRecipe,
+  KitchenRecipeItem,
+  KitchenWastageRecord,
+  KitchenPhysicalCount,
+  KitchenAdjustmentRequest,
+  KITCHEN_WASTAGE_CATEGORIES,
+  KitchenWastageCategory,
+  KitchenDeductionSnapshot,
+  HealthReport,
+  HealthReportIssue,
+  DEFAULT_HOTEL_ID,
+  getTenantDatabase,
+  getHotelInfo,
+  runWithDatabase,
+  listPublicHotels,
+  getAllDatabases,
+  flushAllDatabases,
+} from './server/db.ts';
 
 const app = express();
 
@@ -88,7 +126,7 @@ app.use(cors({
   origin: corsOrigin,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'X-Hotel-Id', 'X-Tenant-Id'],
 }));
 
 // Gzip responses. The main JS bundle is ~1.6 MB uncompressed vs ~457 kB gzipped
@@ -226,7 +264,7 @@ function getGeminiModel() {
 
 // Revoked tokens with TTL auto-cleanup
 const revokedTokens = new Map<string, number>(); // token -> expiresAt
-const activeSessions = new Map<string, { user: User; expiresAt: number }>();
+const activeSessions = new Map<string, { user: User; hotelId: string; expiresAt: number }>();
 
 // Cleanup expired revoked tokens and sessions every 10 minutes
 setInterval(() => {
@@ -254,6 +292,8 @@ interface TokenPayload {
   userId: string;
   username: string;
   role: string;
+  /** Hotel/tenant the token was issued for (multi-hotel support). */
+  hotelId?: string;
   issuedAt: number;
   expiresAt: number;
 }
@@ -300,16 +340,17 @@ function verifyTokenPayload(token: string): TokenPayload | null {
   }
 }
 
-function generateAuthToken(user: User): string {
+function generateAuthToken(user: User, hotelId: string = DEFAULT_HOTEL_ID): string {
   const payload: TokenPayload = {
     userId: user.id,
     username: user.username,
     role: user.role,
+    hotelId,
     issuedAt: Date.now(),
     expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 // 30 days
   };
   const token = signTokenPayload(payload);
-  activeSessions.set(token, { user, expiresAt: payload.expiresAt });
+  activeSessions.set(token, { user, hotelId, expiresAt: payload.expiresAt });
   return token;
 }
 
@@ -333,20 +374,24 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
 
   let session = activeSessions.get(token);
   let user: User | undefined;
+  const requestHotelId = resolveHotelIdFromRequest(req) || DEFAULT_HOTEL_ID;
 
-  if (session && session.expiresAt >= Date.now()) {
+  if (session && session.expiresAt >= Date.now() && session.hotelId === requestHotelId) {
     user = db.raw.users.find(u => u.id === session!.user.id && u.isActive);
     if (!user) {
       activeSessions.delete(token);
     }
   } else {
     if (session) activeSessions.delete(token);
-    // Verify HMAC signature for persistent tokens across restarts
+    // Verify HMAC signature for persistent tokens across restarts.
+    // The token's hotelId MUST match the request's hotel context — user IDs are
+    // intentionally the same across hotel databases (e.g. "user-admin"), so
+    // matching on id alone would let a token from Hotel A read Hotel B.
     const payload = verifyTokenPayload(token);
-    if (payload) {
+    if (payload && (!payload.hotelId || payload.hotelId === requestHotelId)) {
       user = db.raw.users.find(u => u.id === payload.userId && u.isActive);
       if (user) {
-        activeSessions.set(token, { user, expiresAt: payload.expiresAt });
+        activeSessions.set(token, { user, hotelId: payload.hotelId || requestHotelId, expiresAt: payload.expiresAt });
       }
     }
     // REMOVED: pos_tok_ legacy backdoor that allowed admin impersonation
@@ -358,6 +403,7 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
 
   (req as any).user = user;
   (req as any).token = token;
+  (req as any).hotelId = requestHotelId;
   next();
 }
 
@@ -441,6 +487,7 @@ function requireKitchenAdmin(req: Request, res: Response, next: NextFunction) {
 
 // Input validation schemas using Zod
 const loginSchema = z.object({
+  hotelId: z.string().trim().min(1).max(64).optional(),
   username: z.string().trim().min(1).max(128).optional(),
   password: z.string().min(1).max(128).optional(),
   pin: z.string().trim().min(1).max(32).optional(),
@@ -462,6 +509,58 @@ function getClientIp(req: Request): string {
   // Use express req.ip which respects trust proxy
   return req.ip || req.socket.remoteAddress || 'unknown';
 }
+
+// ==========================================
+// MULTI-HOTEL TENANT MIDDLEWARE (v1.5.0)
+// ==========================================
+// Every `/api` request must resolve to ONE hotel database. The tenant is taken
+// from (in priority order):
+//   1. `X-Hotel-Id` / `X-Tenant-Id` header (set by the frontend after login)
+//   2. `hotelId` on a POST body (login screen before a token exists)
+//   3. `?hotel=` query string
+//   4. The `hotelId` encoded in the Bearer token
+//   5. The default hotel
+// `runWithDatabase()` uses AsyncLocalStorage, so even async route handlers
+// (bcrypt compare, Gemini calls, …) keep the correct tenant throughout.
+function resolveHotelIdFromRequest(req: Request): string | undefined {
+  const header = req.header('X-Hotel-Id') || req.header('X-Tenant-Id');
+  if (header && String(header).trim()) return String(header).trim();
+
+  const bodyHotel = (req as any).body?.hotelId;
+  if (typeof bodyHotel === 'string' && bodyHotel.trim()) return bodyHotel.trim();
+
+  const queryHotel = req.query.hotel;
+  if (typeof queryHotel === 'string' && queryHotel.trim()) return queryHotel.trim();
+
+  const auth = req.headers.authorization || '';
+  if (auth.startsWith('Bearer ')) {
+    const payload = verifyTokenPayload(auth.substring(7).trim());
+    if (payload?.hotelId) return payload.hotelId;
+  }
+  return undefined;
+}
+
+function tenantMiddleware(req: Request, res: Response, next: NextFunction) {
+  try {
+    const hotelId = resolveHotelIdFromRequest(req) || DEFAULT_HOTEL_ID;
+    const tenant = getTenantDatabase(hotelId);
+    if (!tenant) {
+      return res.status(400).json({ error: `Unknown hotel selected: ${hotelId}` });
+    }
+    (req as any).hotelId = tenant.id;
+    runWithDatabase(tenant, () => next());
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Attach tenant resolution to every API request (before any auth/RBAC route).
+app.use('/api', tenantMiddleware);
+
+// Public hotel registry for the login screen.
+app.get('/api/hotels', (_req, res) => {
+  res.json({ hotels: listPublicHotels(), defaultHotelId: DEFAULT_HOTEL_ID });
+});
 
 // ==========================================
 // HEALTH CHECK
@@ -725,7 +824,8 @@ app.post('/api/auth/login', authLimiter, async (req: Request, res: Response) => 
     if (!parsed.success) {
       return res.status(400).json({ error: 'Invalid username or password.', details: parsed.error.flatten() });
     }
-    const { username, password, pin } = parsed.data;
+    const { hotelId: requestedHotelId, username, password, pin } = parsed.data;
+    const hotelId = (req as any).hotelId || requestedHotelId || DEFAULT_HOTEL_ID;
 
     const ipKey = getClientIp(req);
     const attemptRecord = failedAttemptsMap.get(ipKey);
@@ -804,14 +904,19 @@ app.post('/api/auth/login', authLimiter, async (req: Request, res: Response) => 
     user.lastLoginAt = new Date().toISOString();
     db.save();
 
-    const token = generateAuthToken(user);
+    const token = generateAuthToken(user, hotelId);
+    const hotel = getHotelInfo(hotelId);
 
-    db.logAudit(user.id, user.name, user.role, 'USER_LOGIN', 'AUTH', user.id, `User logged in from ${ipKey}`);
+    db.logAudit(user.id, user.name, user.role, 'USER_LOGIN', 'AUTH', user.id, `User logged in to ${hotel?.name || hotelId} from ${ipKey}`);
 
     const { passwordHash, ...safeUser } = user;
     res.json({
       token,
-      user: safeUser
+      user: { ...safeUser, hotelId },
+      hotelId,
+      hotel: hotel
+        ? { id: hotel.id, name: hotel.name, tagline: hotel.tagline, address: hotel.address, phone: hotel.phone, email: hotel.email, website: hotel.website }
+        : undefined,
     });
   } catch (err: any) {
     console.error('Login error:', err);
@@ -836,7 +941,8 @@ app.post('/api/auth/logout', authMiddleware, (req: Request, res: Response) => {
 app.get('/api/auth/me', authMiddleware, (req: Request, res: Response) => {
   const user = (req as any).user as User;
   const { passwordHash, ...safeUser } = user;
-  res.json({ user: safeUser });
+  const hotelId = (req as any).hotelId || DEFAULT_HOTEL_ID;
+  res.json({ user: { ...safeUser, hotelId }, hotelId });
 });
 
 app.post('/api/auth/change-password', authMiddleware, async (req: Request, res: Response) => {
@@ -6352,29 +6458,32 @@ async function start() {
     });
   });
 
-  // Seed an initial (rule-based) health report on boot so the Super Admin
-  // dashboard has a status to render immediately, even if nobody has clicked
-  // "Run health check" and whatever GEMINI_API_KEY is configured.
-  try {
-    if (!db.getLatestHealthReport()) {
-      const snapshot = collectHealthSnapshot();
-      const analysis = buildRuleBasedReport(snapshot);
-      db.addHealthReport({
-        id: `health-${Date.now()}-boot`,
-        createdAt: new Date().toISOString(),
-        generatedBy: 'rule-based',
-        aiConfigured: Boolean(GEMINI_API_KEY),
-        model: GEMINI_MODEL,
-        overallStatus: analysis.overallStatus,
-        summary: analysis.summary,
-        issues: analysis.issues,
-        recommendations: analysis.recommendations,
-        metrics: snapshot.metadata,
+  // Seed an initial (rule-based) health report for EVERY hotel on boot so each
+  // Super Admin dashboard has a status to render immediately.
+  for (const tenant of getAllDatabases()) {
+    try {
+      runWithDatabase(tenant, () => {
+        if (!db.getLatestHealthReport()) {
+          const snapshot = collectHealthSnapshot();
+          const analysis = buildRuleBasedReport(snapshot);
+          db.addHealthReport({
+            id: `health-${Date.now()}-boot-${tenant.id}`,
+            createdAt: new Date().toISOString(),
+            generatedBy: 'rule-based',
+            aiConfigured: Boolean(GEMINI_API_KEY),
+            model: GEMINI_MODEL,
+            overallStatus: analysis.overallStatus,
+            summary: analysis.summary,
+            issues: analysis.issues,
+            recommendations: analysis.recommendations,
+            metrics: snapshot.metadata,
+          });
+          console.log(`[AI-HEALTH] Boot health check (${tenant.id}) → ${analysis.overallStatus}. ${analysis.issues.length} issue(s).`);
+        }
       });
-      console.log(`[AI-HEALTH] Boot health check → ${analysis.overallStatus}. ${analysis.issues.length} issue(s).`);
+    } catch (bootErr) {
+      console.warn(`[AI-HEALTH] Could not seed boot health report for ${tenant.id}:`, bootErr);
     }
-  } catch (bootErr) {
-    console.warn('[AI-HEALTH] Could not seed boot health report:', bootErr);
   }
 
   const server = app.listen(PORT, '0.0.0.0', () => {
@@ -6416,7 +6525,7 @@ async function start() {
 
     const forceExit = setTimeout(() => {
       console.error('[SHUTDOWN] Timed out after 15s — forcing exit.');
-      try { db.flush(); } catch {}
+      try { flushAllDatabases(); } catch {}
       process.exit(1);
     }, 15_000);
     forceExit.unref();
@@ -6436,7 +6545,7 @@ async function start() {
       clearTimeout(dropLingering);
       if (err) console.error('[SHUTDOWN] Error while closing server:', err);
       try {
-        db.flush();
+        flushAllDatabases();
         console.log('[SHUTDOWN] Database flushed to disk. Bye.');
       } catch (flushErr) {
         console.error('[SHUTDOWN][CRITICAL] Final database flush FAILED:', flushErr);
@@ -6455,12 +6564,12 @@ async function start() {
   // what we have, log loudly, and exit so the process manager restarts clean.
   process.on('uncaughtException', err => {
     console.error('[FATAL] Uncaught exception:', err);
-    try { db.flush(); } catch {}
+    try { flushAllDatabases(); } catch {}
     process.exit(1);
   });
   process.on('unhandledRejection', reason => {
     console.error('[FATAL] Unhandled promise rejection:', reason);
-    try { db.flush(); } catch {}
+    try { flushAllDatabases(); } catch {}
     process.exit(1);
   });
 }
