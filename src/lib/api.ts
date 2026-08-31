@@ -27,6 +27,11 @@ export async function fetchApi<T = unknown>(
     headers.set('Authorization', `Bearer ${token}`);
   }
 
+  const hotelId = localStorage.getItem('pos_hotel_id');
+  if (hotelId && !headers.has('X-Hotel-Id')) {
+    headers.set('X-Hotel-Id', hotelId);
+  }
+
   if (!(options.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }

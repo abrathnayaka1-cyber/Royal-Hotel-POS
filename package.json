@@ -1,8 +1,8 @@
 {
   "name": "royal-hotel-pos",
   "private": true,
-  "version": "1.4.0",
-  "description": "Royal Hotel POS - Commercial Bar, Restaurant, Hotel Room Booking & Inventory Management System",
+  "version": "1.5.0",
+  "description": "Ape Hotels POS - Multi-hotel Commercial Bar, Restaurant, Hotel Room Booking & Inventory Management System",
   "type": "module",
   "main": "server.js",
   "engines": {

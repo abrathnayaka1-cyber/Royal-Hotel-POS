@@ -8,9 +8,21 @@ export interface User {
   role: UserRole;
   isActive: boolean;
   pin?: string;
+  /** Hotel/tenant this user belongs to (multi-hotel support). */
+  hotelId?: string;
   createdAt: string;
   lastLogin?: string;
   lastLoginAt?: string;
+}
+
+export interface Hotel {
+  id: string;
+  name: string;
+  tagline: string;
+  address: string;
+  phone: string;
+  email: string;
+  website: string;
 }
 
 export type CategoryType = 'bar' | 'restaurant' | 'service' | 'other';
