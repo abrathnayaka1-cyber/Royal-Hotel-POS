@@ -134,7 +134,7 @@ export const RoomBookingModal: React.FC = () => {
 
   // Computed Totals
   const totalRoomCharge = durationDays * ratePerDay;
-  const taxAmount = (totalRoomCharge * taxRate) / 100;
+  const taxAmount = Number(((totalRoomCharge * taxRate) / 100).toFixed(2));
   // The server enforces the same ceiling — this only keeps the UI honest.
   const maxDiscountAllowed = Math.max(0, Number((((totalRoomCharge + extraCharges) * Math.min(maxDiscountPct, 100)) / 100).toFixed(2)));
   const effectiveDiscount = discountsEnabled ? Math.min(discount, maxDiscountAllowed) : 0;

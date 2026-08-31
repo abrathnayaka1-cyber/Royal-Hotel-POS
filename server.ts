@@ -171,7 +171,7 @@ app.use('/api/', apiLimiter);
 // 5 per minute per IP with a 60-second lockout — so brute force stays throttled.
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 30,
+  max: resolveRateLimitInt(process.env.RATE_LIMIT_AUTH_MAX_REQUESTS, 30, 5, 100_000, 'RATE_LIMIT_AUTH_MAX_REQUESTS'),
   standardHeaders: true,
   legacyHeaders: false,
   skipSuccessfulRequests: true,
@@ -4962,7 +4962,12 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
 
     const totalRoomCharge = days * dailyRate;
     const extra = Math.max(0, Number(extraCharges) || 0);
-    const taxAmt = Math.max(0, Number(tax) || 0);
+    // Tax is ALWAYS derived from the hotel's configured tax rate, exactly like
+    // the POS cart. The client-supplied `tax` amount used to be trusted
+    // verbatim, so a tampered `tax: 0` sold a room tax-free while a tampered
+    // `tax: 99999` inflated the bill by the same amount. (Room extra charges
+    // are intentionally untaxed, matching the booking & checkout UI.)
+    const taxAmt = Number((((totalRoomCharge * (db.raw.settings.taxRate || 0)) / 100).toFixed(2)));
     // Booking discounts obey the same policy as the POS cart
     // (Enable Discounts switch + Max Discount %).
     const disc = clampBookingDiscount(discount, totalRoomCharge + extra);
@@ -5174,8 +5179,8 @@ app.post('/api/room-bookings/:id/payment', authMiddleware, (req: Request, res: R
       return res.status(400).json({ error: `Payment exceeds balance due (Rs. ${booking.balanceDue})` });
     }
 
-    booking.advancePaid += payAmt;
-    booking.balanceDue = Math.max(0, booking.grandTotal - booking.advancePaid);
+    booking.advancePaid = Number((booking.advancePaid + payAmt).toFixed(2));
+    booking.balanceDue = Number(Math.max(0, booking.grandTotal - booking.advancePaid).toFixed(2));
     if (notes && typeof notes === 'string') {
       booking.notes = (booking.notes ? booking.notes + ' | Payment: ' : 'Payment: ') + `${payAmt} (${paymentMethod || 'Cash'}) - ${notes.slice(0, 500)}`;
     }
@@ -5432,7 +5437,11 @@ app.post('/api/function-bookings', authMiddleware, (req: Request, res: Response)
     const plates = Math.max(0, Math.min(100000, Number(numberOfPlates) || 0));
     const plateCharge = Number((plateRate * plates).toFixed(2));
     const extra = Math.max(0, Number(extraServices) || 0);
-    const taxAmt = Math.max(0, Number(tax) || 0);
+    // Tax is ALWAYS derived from the hotel's configured tax rate (hall + plates
+    // + extra services, exactly what the booking UI shows). The client-supplied
+    // `tax` used to be trusted verbatim — a tampered `tax: 0` made an event
+    // tax-free and a tampered `tax: 99999` inflated the bill.
+    const taxAmt = Number((((hallRate + plateCharge + extra) * (db.raw.settings.taxRate || 0)) / 100).toFixed(2));
     // Same discount policy as the POS cart and room bookings.
     const disc = clampBookingDiscount(discount, hallRate + plateCharge + extra);
     const grandTotal = Number(Math.max(0, hallRate + plateCharge + extra + taxAmt - disc).toFixed(2));
