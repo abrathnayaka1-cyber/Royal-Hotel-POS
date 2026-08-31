@@ -17,6 +17,11 @@ export default defineConfig(() => {
       // Allow proxied preview hosts (Arena / Codespaces / tunnels).
       // Without this vite replies "Blocked request. This host is not allowed."
       allowedHosts: true as const,
+      // Never watch the runtime JSON database — every sale/booking write would
+      // otherwise trigger a full page reload for all open POS stations.
+      watch: {
+        ignored: ['**/.arena-data/**', '**/data/**'],
+      },
       // Proxy not needed because server.ts uses vite middleware, but keep for standalone vite dev
       proxy: {
         '/api': {

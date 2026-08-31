@@ -14,6 +14,7 @@ import { UserManagement } from './UserManagement.tsx';
 import { AuditLogsView } from './AuditLogsView.tsx';
 import { SystemSettingsView } from './SystemSettingsView.tsx';
 import { RoomManagement } from './RoomManagement.tsx';
+import { FunctionManagement } from './FunctionManagement.tsx';
 import { KitchenLayout } from '../kitchen/KitchenLayout.tsx';
 import { BrandLogo } from '../BrandLogo.tsx';
 import {
@@ -32,7 +33,8 @@ import {
   ArrowLeft,
   LogOut,
   BedDouble,
-  ChefHat
+  ChefHat,
+  PartyPopper
 } from 'lucide-react';
 
 interface AdminLayoutProps {
@@ -52,6 +54,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({ onSwitchToPOS }) => {
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'rooms', label: 'Rooms & Bookings', icon: BedDouble },
+    { id: 'functions', label: 'Functions & Events', icon: PartyPopper },
     { id: 'products', label: 'Products & Sizes', icon: Wine },
     { id: 'categories', label: 'Categories & Brands', icon: Layers },
     { id: 'inventory', label: 'Inventory Control', icon: Package },
@@ -147,6 +150,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({ onSwitchToPOS }) => {
           <AdminDashboard settings={settings} onNavigate={tab => setActiveTab(tab)} />
         )}
         {activeTab === 'rooms' && <RoomManagement />}
+        {activeTab === 'functions' && <FunctionManagement />}
         {activeTab === 'products' && <ProductManagement settings={settings} />}
         {activeTab === 'categories' && <CategoryCompanyManagement />}
         {activeTab === 'inventory' && <InventoryManagement settings={settings} />}

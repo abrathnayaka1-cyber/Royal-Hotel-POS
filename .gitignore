@@ -12,6 +12,7 @@ coverage/
 data/
 data/*.json
 data/backups/
+.arena-data/
 *.zip
 *.tgz
 .DS_Store

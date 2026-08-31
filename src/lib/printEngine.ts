@@ -1,4 +1,4 @@
-import { Bill, KOT, SystemSettings, OrderItem, RoomBooking, Room } from '../types.ts';
+import { Bill, KOT, SystemSettings, OrderItem, RoomBooking, Room, FunctionBooking, FunctionHall } from '../types.ts';
 
 /**
  * Commercial POS Native Thermal Print Engine
@@ -916,3 +916,334 @@ export async function printRoomBookingTicket(
   return printHtmlContent(html, `Booking_${booking.bookingNumber}`);
 }
 
+
+/**
+ * Print dedicated Hotel Function / Event Booking Ticket & Receipt
+ * (v1.4.0) — weddings, parties, meetings, corporate events.
+ * Formatted for thermal 80mm/58mm printers and standard paper.
+ */
+export async function printFunctionBookingTicket(
+  booking: FunctionBooking,
+  hall: FunctionHall | null,
+  settings: SystemSettings | null
+): Promise<boolean> {
+  const currencySymbol = settings?.currencySymbol || 'Rs.';
+  const businessName = settings?.businessName || 'Royal Hotel & Restaurant';
+  const logoSrc = getBrandLogoSrc();
+  const tagline = settings?.businessTagline || 'Fine Liquor, Cuisine & Hospitality';
+  const address = settings?.address || 'No. 42 Beach Road, Puttalam, Sri Lanka';
+  const phone = settings?.phone || '+94 32 226 5500';
+  const footerText = settings?.receiptFooter || 'Thank you for choosing Royal Hotel! We look forward to hosting your event.';
+
+  const is58mm = (settings?.thermalWidth || '80mm') === '58mm';
+  const pageWidth = is58mm ? '58mm' : '80mm';
+  const bodyWidth = is58mm ? '48mm' : '72mm';
+
+  const eventDateObj = new Date(booking.eventDate || booking.createdAt);
+
+  const formattedCreated = new Date(booking.createdAt).toLocaleString('en-US', {
+    month: 'short',
+    day: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true
+  });
+
+  const formattedEventDate = eventDateObj.toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: '2-digit',
+    year: 'numeric'
+  });
+
+  const sessionLabel =
+    booking.session === 'day' ? 'Day Session (9 AM - 5 PM)' :
+    booking.session === 'evening' ? 'Evening Session (6 PM - 12 AM)' :
+    'Full Day Session';
+
+  const eventTypeLabel = booking.eventType.replace('_', ' ').toUpperCase();
+  const statusLabel = booking.status.toUpperCase().replace('_', ' ');
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <title>Event_${escapeHtml(booking.bookingNumber)}</title>
+        <style>
+          @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap');
+
+          @media print {
+            @page {
+              size: ${pageWidth} auto;
+              margin: 0mm;
+            }
+            body {
+              width: ${pageWidth};
+              margin: 0;
+              padding: 0;
+              background: #fff;
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+            }
+            .no-print { display: none !important; }
+          }
+
+          * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+          }
+
+          body {
+            font-family: 'JetBrains Mono', monospace, 'Courier New', Courier;
+            font-size: ${is58mm ? '11px' : '12px'};
+            font-weight: 600;
+            color: #000;
+            background: #fff;
+            margin: 0 auto;
+            padding: ${is58mm ? '3mm 2mm' : '5mm 3mm'};
+            width: ${bodyWidth};
+            line-height: 1.3;
+            letter-spacing: -0.2px;
+          }
+
+          .text-center { text-align: center; }
+          .text-right { text-align: right; }
+          .text-left { text-align: left; }
+
+          .divider {
+            border-top: 1.5px dashed #000;
+            margin: 4px 0;
+          }
+
+          .divider-solid {
+            border-top: 2px solid #000;
+            margin: 5px 0;
+          }
+
+          .header-title {
+            font-size: ${is58mm ? '13px' : '15px'};
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+          }
+          .receipt-logo {
+            width: ${is58mm ? '26px' : '32px'};
+            height: ${is58mm ? '26px' : '32px'};
+            display: block;
+            margin: 0 auto 3px auto;
+          }
+
+          .booking-title {
+            font-size: ${is58mm ? '13px' : '15px'};
+            font-weight: 900;
+            margin: 3px 0 1px 0;
+            letter-spacing: 0.5px;
+          }
+
+          .hall-badge {
+            font-size: ${is58mm ? '13px' : '15px'};
+            font-weight: 900;
+            background: #000;
+            color: #fff;
+            padding: 3px 8px;
+            display: inline-block;
+            margin: 4px 0;
+            border-radius: 4px;
+            letter-spacing: 0.5px;
+          }
+
+          .status-tag {
+            display: inline-block;
+            font-size: ${is58mm ? '10px' : '11px'};
+            font-weight: 800;
+            border: 1.5px solid #000;
+            padding: 1px 6px;
+            border-radius: 3px;
+            margin-top: 2px;
+          }
+
+          table {
+            width: 100%;
+            border-collapse: collapse;
+          }
+
+          .kv-table td {
+            padding: 1.5px 0;
+            font-size: ${is58mm ? '10.5px' : '11.5px'};
+            vertical-align: top;
+          }
+
+          .highlight-row {
+            font-weight: 800;
+            font-size: ${is58mm ? '12px' : '13.5px'};
+          }
+
+          .grand-total-row {
+            font-size: ${is58mm ? '13px' : '15px'};
+            font-weight: 900;
+          }
+        </style>
+      </head>
+      <body>
+        <!-- Header -->
+        <div class="text-center">
+          <img src="${logoSrc}" class="receipt-logo" alt="" />
+          <div class="header-title">${escapeHtml(businessName)}</div>
+          <div style="font-size: 10px; margin: 1px 0;">${escapeHtml(tagline)}</div>
+          <div style="font-size: 9.5px;">${escapeHtml(address)}</div>
+          <div style="font-size: 9.5px;">Tel: ${escapeHtml(phone)}</div>
+
+          <div class="divider"></div>
+          <div class="booking-title">*** FUNCTION BOOKING TICKET ***</div>
+          <div style="font-size: 11px; font-weight: bold;">TICKET #${escapeHtml(booking.bookingNumber)}</div>
+          <div class="hall-badge">${escapeHtml(booking.hallName)}</div>
+          <div><span class="status-tag">[ ${statusLabel} ]</span></div>
+          <div style="font-size: 10px; margin-top: 2px;">${escapeHtml(booking.hallType)}${hall?.floor ? ' &bull; ' + escapeHtml(hall.floor) : ''}</div>
+          <div style="font-size: 11px; margin-top: 2px; font-weight: 800;">${eventTypeLabel} EVENT</div>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- Customer Details -->
+        <table class="kv-table">
+          <tr>
+            <td style="width: 38%;"><strong>Customer:</strong></td>
+            <td style="width: 62%;" class="text-right"><strong>${escapeHtml(booking.customerName)}</strong></td>
+          </tr>
+          <tr>
+            <td><strong>Phone:</strong></td>
+            <td class="text-right">${escapeHtml(booking.customerPhone)}</td>
+          </tr>
+          ${booking.customerAddress ? `
+          <tr>
+            <td><strong>Address:</strong></td>
+            <td class="text-right">${escapeHtml(booking.customerAddress)}</td>
+          </tr>` : ''}
+          <tr>
+            <td><strong>Expected Guests:</strong></td>
+            <td class="text-right">${booking.expectedGuests} Person(s)</td>
+          </tr>
+        </table>
+
+        <div class="divider"></div>
+
+        <!-- Event Schedule -->
+        <table class="kv-table">
+          <tr>
+            <td style="width: 40%;"><strong>Event Date:</strong></td>
+            <td style="width: 60%;" class="text-right"><strong>${formattedEventDate}</strong></td>
+          </tr>
+          <tr>
+            <td><strong>Session:</strong></td>
+            <td class="text-right">${escapeHtml(sessionLabel)}</td>
+          </tr>
+          <tr>
+            <td><strong>Issued At:</strong></td>
+            <td class="text-right">${formattedCreated}</td>
+          </tr>
+          <tr>
+            <td><strong>Booked By:</strong></td>
+            <td class="text-right">${escapeHtml(booking.cashierName || 'Admin')}</td>
+          </tr>
+        </table>
+
+        <div class="divider-solid"></div>
+
+        <!-- Financial Charges Breakdown -->
+        <table class="kv-table">
+          <tr>
+            <td>Hall Charge:</td>
+            <td class="text-right">${formatCurrency(booking.hallCharge, currencySymbol)}</td>
+          </tr>
+          ${booking.numberOfPlates > 0 ? `
+          <tr>
+            <td>Food (${booking.numberOfPlates} plates x ${formatCurrency(booking.perPlateRate, currencySymbol)}):</td>
+            <td class="text-right">${formatCurrency(booking.plateCharge, currencySymbol)}</td>
+          </tr>` : ''}
+          ${booking.extraServices > 0 ? `
+          <tr>
+            <td>Extra Services / Decor:</td>
+            <td class="text-right">${formatCurrency(booking.extraServices, currencySymbol)}</td>
+          </tr>` : ''}
+          ${booking.tax > 0 ? `
+          <tr>
+            <td>Tax / Govt Levy:</td>
+            <td class="text-right">${formatCurrency(booking.tax, currencySymbol)}</td>
+          </tr>` : ''}
+          ${booking.discount > 0 ? `
+          <tr>
+            <td>Discount:</td>
+            <td class="text-right">-${formatCurrency(booking.discount, currencySymbol)}</td>
+          </tr>` : ''}
+        </table>
+
+        <div class="divider"></div>
+
+        <!-- Grand Total & Balances -->
+        <table class="kv-table">
+          <tr class="grand-total-row">
+            <td>TOTAL AMOUNT:</td>
+            <td class="text-right">${formatCurrency(booking.grandTotal, currencySymbol)}</td>
+          </tr>
+          <tr class="highlight-row">
+            <td>ADVANCE PAID:</td>
+            <td class="text-right">${formatCurrency(booking.advancePaid, currencySymbol)}</td>
+          </tr>
+          <tr class="highlight-row">
+            <td><strong>BALANCE DUE:</strong></td>
+            <td class="text-right"><strong>${formatCurrency(booking.balanceDue, currencySymbol)}</strong></td>
+          </tr>
+          <tr>
+            <td>Payment Method:</td>
+            <td class="text-right">${escapeHtml(booking.paymentMethod.toUpperCase().replace('_', ' '))}</td>
+          </tr>
+        </table>
+
+        ${booking.notes ? `
+        <div class="divider"></div>
+        <div style="font-size: 10px; padding: 3px; border: 1px solid #000; margin-top: 3px;">
+          <strong>Notes / Special Requests:</strong>
+          <div>${escapeHtml(booking.notes)}</div>
+        </div>` : ''}
+
+        <div class="divider-solid"></div>
+
+        <!-- Hotel Policies -->
+        <div style="font-size: 9.5px; line-height: 1.25; margin: 4px 0;">
+          <div>&bull; Hall opens: <strong>8:00 AM</strong> &bull; Event end: <strong>12:00 AM</strong></div>
+          <div>&bull; Outside catering/bands need prior approval</div>
+          <div>&bull; Reservations: <strong>Ext. 100 / Reception</strong></div>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- Signatures -->
+        <table style="width: 100%; margin-top: 14px; font-size: 9.5px;">
+          <tr>
+            <td style="width: 50%; text-align: center;">
+              ____________________<br>
+              <strong>Customer Signature</strong>
+            </td>
+            <td style="width: 50%; text-align: center;">
+              ____________________<br>
+              <strong>Authorized Sign</strong>
+            </td>
+          </tr>
+        </table>
+
+        <div class="divider" style="margin-top: 12px;"></div>
+
+        <!-- Footer -->
+        <div class="text-center" style="margin-top: 4px;">
+          <div style="font-size: 10.5px; font-weight: bold;">${escapeHtml(footerText)}</div>
+          <div style="font-size: 9px; color: #333; margin-top: 2px;">Royal Hotel Management System</div>
+        </div>
+      </body>
+    </html>
+  `;
+
+  return printHtmlContent(html, `Event_${booking.bookingNumber}`);
+}

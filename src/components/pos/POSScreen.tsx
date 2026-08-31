@@ -3,6 +3,7 @@ import { CategorySidebar } from './CategorySidebar.tsx';
 import { CategoryTabs } from './CategoryTabs.tsx';
 import { ProductGrid } from './ProductGrid.tsx';
 import { RoomsView } from './RoomsView.tsx';
+import { FunctionsView } from './FunctionsView.tsx';
 import { CartPanel } from './CartPanel.tsx';
 import { FooterStatusBar } from './FooterStatusBar.tsx';
 import { VariantSelectorModal } from './VariantSelectorModal.tsx';
@@ -11,8 +12,8 @@ import { HeldBillsModal } from './HeldBillsModal.tsx';
 import { KOTModal } from './KOTModal.tsx';
 import { ReceiptModal } from './ReceiptModal.tsx';
 import { RoomBookingModal } from './RoomBookingModal.tsx';
-import { RoomBookingTicketModal } from './RoomBookingTicketModal.tsx';
 import { DamageReportModal } from './DamageReportModal.tsx';
+import { FunctionBookingModal } from './FunctionBookingModal.tsx';
 import { BarcodeScannerListener } from './BarcodeScannerListener.tsx';
 import { usePOS } from '../../context/POSContext.tsx';
 import { Loader2, CheckCircle2, AlertTriangle, XCircle, X } from 'lucide-react';
@@ -34,6 +35,7 @@ export const POSScreen: React.FC = () => {
   }
 
   const isRoomsView = selectedCategory === 'rooms';
+  const isFunctionsView = selectedCategory === 'functions';
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-slate-100 dark:bg-slate-950">
@@ -45,9 +47,11 @@ export const POSScreen: React.FC = () => {
         {/* Left: Category Sidebar */}
         <CategorySidebar />
 
-        {/* Center: Search / Filters + Product Grid OR Rooms View */}
+        {/* Center: Search / Filters + Product Grid OR Rooms View OR Functions View */}
         {isRoomsView ? (
           <RoomsView />
+        ) : isFunctionsView ? (
+          <FunctionsView />
         ) : (
           <main className="flex-1 flex flex-col overflow-hidden p-3 md:p-4 gap-3 bg-slate-100 dark:bg-slate-950 min-w-0">
             {/* Scan Notification Banner */}
@@ -104,7 +108,7 @@ export const POSScreen: React.FC = () => {
       <KOTModal />
       <ReceiptModal />
       <RoomBookingModal />
-      <RoomBookingTicketModal />
+      <FunctionBookingModal />
       <DamageReportModal />
     </div>
   );

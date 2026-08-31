@@ -18,7 +18,7 @@ import bcrypt from 'bcryptjs';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { z } from 'zod';
 import { APP_ROOT, DIST_DIR, resolveDataDir } from './server/paths.ts';
-import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking, StockImport, StockImportRowResult, StockImportType, KitchenIngredient, KitchenStockMovement, KitchenRecipe, KitchenRecipeItem, KitchenWastageRecord, KitchenPhysicalCount, KitchenAdjustmentRequest, KITCHEN_WASTAGE_CATEGORIES, KitchenWastageCategory, KitchenDeductionSnapshot, HealthReport, HealthReportIssue } from './server/db.ts';
+import { db, User, Product, ProductVariant, Category, Company, OrderItem, HeldBill, KOT, Bill, StockMovement, Room, RoomBooking, FunctionHall, FunctionBooking, StockImport, StockImportRowResult, StockImportType, KitchenIngredient, KitchenStockMovement, KitchenRecipe, KitchenRecipeItem, KitchenWastageRecord, KitchenPhysicalCount, KitchenAdjustmentRequest, KITCHEN_WASTAGE_CATEGORIES, KitchenWastageCategory, KitchenDeductionSnapshot, HealthReport, HealthReportIssue } from './server/db.ts';
 
 const app = express();
 
@@ -4641,6 +4641,399 @@ app.post('/api/room-bookings/:id/payment', authMiddleware, (req: Request, res: R
     db.save();
 
     db.logAudit(user.id, user.name, user.role, 'ROOM_BOOKING_PAYMENT', 'ROOM_BOOKING', booking.id, `Received payment of Rs. ${payAmt} for Room ${booking.roomNumber} (${booking.bookingNumber})`);
+
+    res.json({ success: true, booking, message: `Payment of Rs. ${payAmt} recorded.` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to record payment.' });
+  }
+});
+
+// ==========================================
+// HOTEL FUNCTIONS & EVENTS (v1.4.0)
+// Function-hall / event bookings entered straight from the POS register.
+// Any authenticated role can view halls & bookings and take bookings /
+// payments / checkout / cancel. Hall master data stays Super Admin only
+// (same split as the Rooms module).
+// ==========================================
+
+app.get('/api/function-halls', authMiddleware, (req: Request, res: Response) => {
+  try {
+    const { status } = req.query;
+    let halls = db.raw.functionHalls || [];
+
+    if (status && status !== 'all') {
+      halls = halls.filter(h => h.status === status);
+    }
+
+    res.json(halls);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to fetch function halls.' });
+  }
+});
+
+app.post('/api/function-halls', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user as User;
+    const { hallName, hallType, floor, capacity, ratePerDay, amenities, status, notes } = req.body;
+
+    if (!hallName || typeof hallName !== 'string' || !hallName.trim() || !hallType || !ratePerDay) {
+      return res.status(400).json({ error: 'Hall name, type, and rate are required.' });
+    }
+
+    const rate = Number(ratePerDay);
+    if (isNaN(rate) || rate <= 0 || rate > 10000000) {
+      return res.status(400).json({ error: 'Invalid hall rate (must be 1-10,000,000)' });
+    }
+
+    const existing = (db.raw.functionHalls || []).find(h => h.hallName.trim().toLowerCase() === hallName.trim().toLowerCase());
+    if (existing) {
+      return res.status(400).json({ error: `A hall named "${hallName}" already exists.` });
+    }
+
+    const newHall: FunctionHall = {
+      id: `hall-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      hallName: hallName.trim().slice(0, 128),
+      hallType: String(hallType).trim().slice(0, 128),
+      floor: floor ? String(floor).trim().slice(0, 64) : undefined,
+      capacity: Math.max(1, Math.min(10000, Number(capacity) || 100)),
+      ratePerDay: rate,
+      amenities: Array.isArray(amenities) ? amenities.map((a: any) => String(a).slice(0, 64)).slice(0, 20) : [],
+      status: status === 'maintenance' ? 'maintenance' : 'available',
+      notes: notes ? String(notes).slice(0, 1000) : '',
+      isActive: true,
+      createdAt: new Date().toISOString()
+    };
+
+    db.raw.functionHalls.push(newHall);
+    db.save();
+
+    db.logAudit(user.id, user.name, user.role, 'CREATE_FUNCTION_HALL', 'FUNCTION_HALL', newHall.id, `Created function hall "${newHall.hallName}" (${newHall.hallType}) at Rs. ${newHall.ratePerDay}/booking`);
+
+    res.status(201).json(newHall);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to create function hall.' });
+  }
+});
+
+app.put('/api/function-halls/:id', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user as User;
+    const { id } = req.params;
+    const hall = (db.raw.functionHalls || []).find(h => h.id === id);
+
+    if (!hall) {
+      return res.status(404).json({ error: 'Function hall not found.' });
+    }
+
+    const { hallName, hallType, floor, capacity, ratePerDay, amenities, status, notes, isActive } = req.body;
+
+    if (hallName !== undefined && typeof hallName === 'string' && hallName.trim().toLowerCase() !== hall.hallName.toLowerCase()) {
+      const existing = (db.raw.functionHalls || []).find(h => h.id !== id && h.hallName.trim().toLowerCase() === hallName.trim().toLowerCase());
+      if (existing) {
+        return res.status(400).json({ error: `A hall named "${hallName}" already exists.` });
+      }
+      hall.hallName = hallName.trim().slice(0, 128);
+    }
+    if (hallType !== undefined && typeof hallType === 'string') hall.hallType = hallType.trim().slice(0, 128);
+    if (floor !== undefined && typeof floor === 'string') hall.floor = floor.trim().slice(0, 64);
+    if (capacity !== undefined) hall.capacity = Math.max(1, Math.min(10000, Number(capacity) || 100));
+    if (ratePerDay !== undefined) {
+      const rate = Number(ratePerDay);
+      if (!isNaN(rate) && rate > 0 && rate <= 10000000) hall.ratePerDay = rate;
+    }
+    if (amenities !== undefined && Array.isArray(amenities)) hall.amenities = amenities.map((a: any) => String(a).slice(0, 64)).slice(0, 20);
+    if (status !== undefined && ['available', 'maintenance'].includes(status)) hall.status = status;
+    if (notes !== undefined && typeof notes === 'string') hall.notes = notes.slice(0, 1000);
+    if (isActive !== undefined) hall.isActive = Boolean(isActive);
+
+    db.save();
+
+    db.logAudit(user.id, user.name, user.role, 'UPDATE_FUNCTION_HALL', 'FUNCTION_HALL', hall.id, `Updated function hall "${hall.hallName}" (Status: ${hall.status})`);
+
+    res.json(hall);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to update function hall.' });
+  }
+});
+
+app.delete('/api/function-halls/:id', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user as User;
+    const { id } = req.params;
+    const halls = db.raw.functionHalls || [];
+    const index = halls.findIndex(h => h.id === id);
+
+    if (index === -1) {
+      return res.status(404).json({ error: 'Function hall not found.' });
+    }
+
+    const hall = halls[index];
+    const upcoming = (db.raw.functionBookings || []).find(
+      b => b.hallId === id && b.status === 'confirmed' && new Date(b.eventDate).getTime() >= Date.now() - 86400000
+    );
+    if (upcoming) {
+      return res.status(400).json({ error: `Cannot delete "${hall.hallName}" — it has an upcoming event booking (${upcoming.bookingNumber}). Cancel it first.` });
+    }
+
+    halls.splice(index, 1);
+    db.save();
+
+    db.logAudit(user.id, user.name, user.role, 'DELETE_FUNCTION_HALL', 'FUNCTION_HALL', id, `Deleted function hall "${hall.hallName}" (${hall.hallType})`);
+
+    res.json({ success: true, message: `Function hall "${hall.hallName}" deleted successfully.` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to delete function hall.' });
+  }
+});
+
+app.get('/api/function-bookings', authMiddleware, (req: Request, res: Response) => {
+  try {
+    const { status, hallId, search } = req.query;
+    let bookings = db.raw.functionBookings || [];
+
+    if (status && status !== 'all') {
+      bookings = bookings.filter(b => b.status === status);
+    }
+    if (hallId && hallId !== 'all') {
+      bookings = bookings.filter(b => b.hallId === hallId);
+    }
+    if (search && typeof search === 'string') {
+      const q = search.toLowerCase();
+      bookings = bookings.filter(
+        b =>
+          b.bookingNumber.toLowerCase().includes(q) ||
+          b.customerName.toLowerCase().includes(q) ||
+          b.customerPhone.toLowerCase().includes(q) ||
+          b.hallName.toLowerCase().includes(q) ||
+          b.eventType.toLowerCase().includes(q)
+      );
+    }
+
+    bookings.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    res.json(bookings);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to fetch function bookings.' });
+  }
+});
+
+app.post('/api/function-bookings', authMiddleware, (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user as User;
+    const {
+      hallId, eventType, session, customerName, customerPhone, customerAddress,
+      eventDate, expectedGuests, hallCharge, perPlateRate, numberOfPlates,
+      extraServices, discount, tax, advancePaid, paymentMethod, paymentDetails, notes
+    } = req.body;
+
+    if (!hallId || !customerName || typeof customerName !== 'string' || !customerName.trim() || !customerPhone) {
+      return res.status(400).json({ error: 'Hall, Customer Name, and Phone Number are required.' });
+    }
+
+    const hall = (db.raw.functionHalls || []).find(h => h.id === hallId);
+    if (!hall) {
+      return res.status(404).json({ error: 'Selected function hall not found.' });
+    }
+    if (!hall.isActive || hall.status === 'maintenance') {
+      return res.status(400).json({ error: `"${hall.hallName}" is not available for bookings right now.` });
+    }
+
+    // Validate the event date (accepts YYYY-MM-DD or ISO strings; keeps the day)
+    const parsedDate = eventDate ? new Date(eventDate) : null;
+    if (!parsedDate || isNaN(parsedDate.getTime())) {
+      return res.status(400).json({ error: 'A valid event date is required.' });
+    }
+    const eventDayKey = parsedDate.toISOString().split('T')[0];
+
+    // Guard against double-booking a hall for the same day — a second booking
+    // on the same date previously could silently overlap the first one.
+    const conflicting = (db.raw.functionBookings || []).find(b => {
+      if (b.hallId !== hall.id || b.status !== 'confirmed') return false;
+      return (new Date(b.eventDate).toISOString().split('T')[0]) === eventDayKey;
+    });
+    if (conflicting) {
+      return res.status(400).json({
+        error: `"${hall.hallName}" is already booked on ${eventDayKey} (${conflicting.bookingNumber} — ${conflicting.customerName}). Choose another date or hall.`
+      });
+    }
+
+    const validEventTypes = ['wedding', 'birthday', 'meeting', 'party', 'corporate', 'other'];
+    const validSessions = ['day', 'evening', 'full_day'];
+    const eventTypeFinal = validEventTypes.includes(eventType) ? eventType : 'other';
+    const sessionFinal = validSessions.includes(session) ? session : 'full_day';
+
+    const hallRate = Math.max(0, Number(hallCharge) || hall.ratePerDay);
+    const plateRate = Math.max(0, Number(perPlateRate) || 0);
+    const plates = Math.max(0, Math.min(100000, Number(numberOfPlates) || 0));
+    const plateCharge = Number((plateRate * plates).toFixed(2));
+    const extra = Math.max(0, Number(extraServices) || 0);
+    const disc = Math.max(0, Number(discount) || 0);
+    const taxAmt = Math.max(0, Number(tax) || 0);
+    const grandTotal = Number(Math.max(0, hallRate + plateCharge + extra + taxAmt - disc).toFixed(2));
+    const advance = Math.max(0, Number(advancePaid) || 0);
+    if (advance > grandTotal) {
+      return res.status(400).json({ error: 'Advance cannot exceed the grand total' });
+    }
+    const balanceDue = Number(Math.max(0, grandTotal - advance).toFixed(2));
+
+    const bookingNumber = db.getNextFunctionBookingNumber();
+
+    const booking: FunctionBooking = {
+      id: `evt-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      bookingNumber,
+      hallId: hall.id,
+      hallName: hall.hallName,
+      hallType: hall.hallType,
+      eventType: eventTypeFinal,
+      customerName: customerName.trim().slice(0, 128),
+      customerPhone: String(customerPhone).trim().slice(0, 32),
+      customerAddress: customerAddress ? String(customerAddress).trim().slice(0, 500) : '',
+      eventDate: `${eventDayKey}T00:00:00.000Z`,
+      session: sessionFinal,
+      expectedGuests: Math.max(1, Math.min(100000, Number(expectedGuests) || 50)),
+      hallCharge: hallRate,
+      perPlateRate: plateRate,
+      numberOfPlates: plates,
+      plateCharge,
+      extraServices: extra,
+      discount: disc,
+      tax: taxAmt,
+      grandTotal,
+      advancePaid: advance,
+      balanceDue,
+      paymentMethod: paymentMethod || 'cash',
+      paymentDetails,
+      status: 'confirmed',
+      cashierId: user.id,
+      cashierName: user.name,
+      notes: notes ? String(notes).slice(0, 1000) : '',
+      createdAt: new Date().toISOString()
+    };
+
+    if (!Array.isArray(db.raw.functionBookings)) {
+      db.raw.functionBookings = [];
+    }
+    db.raw.functionBookings.unshift(booking);
+
+    db.save();
+
+    db.logAudit(user.id, user.name, user.role, 'FUNCTION_BOOKING_CREATED', 'FUNCTION_BOOKING', booking.id, `Created ${booking.eventType} booking ${booking.bookingNumber} at "${hall.hallName}" for ${booking.customerName} on ${eventDayKey} (Total: Rs. ${booking.grandTotal}, Advance: Rs. ${booking.advancePaid})`);
+
+    res.status(201).json({ success: true, booking, hall });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to create function booking.' });
+  }
+});
+
+app.put('/api/function-bookings/:id/checkout', authMiddleware, (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user as User;
+    const { id } = req.params;
+    const { paymentMethod, additionalCharges, finalPaymentAmount, notes } = req.body;
+
+    const booking = (db.raw.functionBookings || []).find(b => b.id === id);
+    if (!booking) {
+      return res.status(404).json({ error: 'Function booking not found.' });
+    }
+    if (booking.status === 'completed') {
+      return res.status(400).json({ error: 'This event is already completed.' });
+    }
+    if (booking.status === 'cancelled') {
+      return res.status(400).json({ error: 'This booking was cancelled and cannot be completed.' });
+    }
+
+    // Validate everything BEFORE mutating the booking (same guard as rooms).
+    const rawAdd = Number(additionalCharges);
+    const add = Number.isFinite(rawAdd) && rawAdd > 0 ? Math.min(rawAdd, 10000000) : 0;
+
+    const newGrandTotal = Number((booking.grandTotal + add).toFixed(2));
+    const newBalanceDue = Number(Math.max(0, newGrandTotal - booking.advancePaid).toFixed(2));
+
+    const rawFinal = Number(finalPaymentAmount);
+    const finalPay = Number.isFinite(rawFinal) && rawFinal > 0 ? Number(rawFinal.toFixed(2)) : newBalanceDue;
+    if (finalPay > newBalanceDue + 0.01) {
+      return res.status(400).json({ error: `Final payment cannot exceed balance due (Rs. ${newBalanceDue.toFixed(2)}).` });
+    }
+
+    booking.extraServices = Number((booking.extraServices + add).toFixed(2));
+    booking.grandTotal = newGrandTotal;
+    booking.advancePaid = Number((booking.advancePaid + finalPay).toFixed(2));
+    booking.balanceDue = Number(Math.max(0, booking.grandTotal - booking.advancePaid).toFixed(2));
+    booking.status = 'completed';
+    booking.completedAt = new Date().toISOString();
+    if (paymentMethod) booking.paymentMethod = paymentMethod;
+    if (notes && typeof notes === 'string') booking.notes = (booking.notes ? booking.notes + ' | ' : '') + notes.slice(0, 500);
+
+    db.save();
+
+    db.logAudit(user.id, user.name, user.role, 'FUNCTION_BOOKING_COMPLETED', 'FUNCTION_BOOKING', booking.id, `Completed ${booking.eventType} booking ${booking.bookingNumber} at "${booking.hallName}" (${booking.customerName}). Final settlement: Rs. ${finalPay}.`);
+
+    res.json({ success: true, booking, message: `Event ${booking.bookingNumber} completed successfully.` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to complete function booking.' });
+  }
+});
+
+app.put('/api/function-bookings/:id/cancel', authMiddleware, (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user as User;
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    const booking = (db.raw.functionBookings || []).find(b => b.id === id);
+    if (!booking) {
+      return res.status(404).json({ error: 'Function booking not found.' });
+    }
+    if (booking.status === 'completed') {
+      return res.status(400).json({ error: 'Cannot cancel a completed event' });
+    }
+
+    booking.status = 'cancelled';
+    if (reason && typeof reason === 'string') {
+      booking.notes = (booking.notes ? booking.notes + ' | Cancel Reason: ' : 'Cancel Reason: ') + reason.slice(0, 500);
+    }
+
+    db.save();
+
+    db.logAudit(user.id, user.name, user.role, 'FUNCTION_BOOKING_CANCELLED', 'FUNCTION_BOOKING', booking.id, `Cancelled event booking ${booking.bookingNumber} at "${booking.hallName}". Reason: ${reason ? String(reason).slice(0, 500) : 'N/A'}`);
+
+    res.json({ success: true, booking, message: `Booking ${booking.bookingNumber} cancelled.` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to cancel function booking.' });
+  }
+});
+
+app.post('/api/function-bookings/:id/payment', authMiddleware, (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user as User;
+    const { id } = req.params;
+    const { amount, paymentMethod, notes } = req.body;
+
+    const booking = (db.raw.functionBookings || []).find(b => b.id === id);
+    if (!booking) {
+      return res.status(404).json({ error: 'Function booking not found.' });
+    }
+    if (booking.status === 'completed' || booking.status === 'cancelled') {
+      return res.status(400).json({ error: 'Cannot add payment to a completed or cancelled booking' });
+    }
+
+    const payAmt = Number(amount) || 0;
+    if (!Number.isFinite(payAmt) || payAmt <= 0 || payAmt > 10000000) {
+      return res.status(400).json({ error: 'Payment amount must be between 1 and 10,000,000.' });
+    }
+    if (payAmt > booking.balanceDue) {
+      return res.status(400).json({ error: `Payment exceeds balance due (Rs. ${booking.balanceDue})` });
+    }
+
+    booking.advancePaid = Number((booking.advancePaid + payAmt).toFixed(2));
+    booking.balanceDue = Number(Math.max(0, booking.grandTotal - booking.advancePaid).toFixed(2));
+    if (paymentMethod) booking.paymentMethod = paymentMethod;
+    if (notes && typeof notes === 'string') {
+      booking.notes = (booking.notes ? booking.notes + ' | Payment: ' : 'Payment: ') + `${payAmt} (${paymentMethod || 'Cash'}) - ${notes.slice(0, 500)}`;
+    }
+
+    db.save();
+
+    db.logAudit(user.id, user.name, user.role, 'FUNCTION_BOOKING_PAYMENT', 'FUNCTION_BOOKING', booking.id, `Received payment of Rs. ${payAmt} for event ${booking.bookingNumber} at "${booking.hallName}"`);
 
     res.json({ success: true, booking, message: `Payment of Rs. ${payAmt} recorded.` });
   } catch (err: any) {
