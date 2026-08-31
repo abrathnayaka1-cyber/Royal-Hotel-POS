@@ -27,7 +27,11 @@ export const ProductGrid: React.FC = () => {
 
     // Category filter
     if (selectedCategory !== 'all') {
-      if (selectedCategory.startsWith('type:')) {
+      if (selectedCategory.startsWith('catids:')) {
+        // Multi-category quick filter (e.g. multiple Beer categories).
+        const ids = new Set(selectedCategory.slice('catids:'.length).split('|'));
+        if (!ids.has(product.categoryId)) return false;
+      } else if (selectedCategory.startsWith('type:')) {
         const type = selectedCategory.replace('type:', '');
         const cat = categories.find(c => c.id === product.categoryId);
         if (!cat || cat.type !== type) return false;

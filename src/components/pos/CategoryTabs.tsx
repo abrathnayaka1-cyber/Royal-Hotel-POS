@@ -18,14 +18,25 @@ export const CategoryTabs: React.FC = () => {
 
   const occupiedRoomsCount = rooms.filter(r => r.status === 'occupied').length;
 
+  // Resolve quick groups from the LIVE categories so they keep working after an
+  // admin renames categories or the per-hotel database uses different IDs.
+  // (The old code hardcoded `cat-3` for BEERS and `type:service` for SOFT DRINKS,
+  // so renamed/other-hotel data broke the buttons or pointed at the wrong items.)
+  const beerCategories = categories.filter(c => c.isActive && /beer|ale|lager|stout/i.test(c.name));
+  const drinkCategory = categories.find(
+    c => c.isActive && /soft\s*drink|\bdrink|\bwater\b|beverage|juice|mixer|chaser/i.test(c.name)
+  );
+
   // Preset quick broad groups
   const quickGroups = [
     { id: 'all', label: 'ALL ITEMS', icon: Sparkles },
     { id: 'rooms', label: `HOTEL ROOMS (${rooms.length})`, icon: BedDouble, highlight: true },
     { id: 'type:bar', label: 'BAR SPIRITS', icon: Wine },
     { id: 'type:restaurant', label: 'FOOD & KITCHEN', icon: Utensils },
-    { id: 'cat-3', label: 'BEERS', icon: Beer },
-    { id: 'type:service', label: 'SOFT DRINKS', icon: GlassWater },
+    ...(beerCategories.length > 0
+      ? [{ id: beerCategories.length === 1 ? beerCategories[0].id : `catids:${beerCategories.map(c => c.id).join('|')}`, label: 'BEERS', icon: Beer }]
+      : []),
+    ...(drinkCategory ? [{ id: drinkCategory.id, label: 'SOFT DRINKS', icon: GlassWater }] : []),
   ];
 
   return (

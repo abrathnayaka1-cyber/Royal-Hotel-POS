@@ -1887,10 +1887,15 @@ function computeOrderTotals(
   let discountPercentage = 0;
   let discount = 0;
 
-  if (Number.isFinite(rawPct) && rawPct > 0) {
+  // The "Enable Discounts" switch in System Settings must actually work: when
+  // it is off, discounts are forbidden even if a client sends a percentage or
+  // an amount (or a held bill carries a stale discount from before it was off).
+  const discountsEnabled = settings.enableDiscounts !== false;
+
+  if (discountsEnabled && Number.isFinite(rawPct) && rawPct > 0) {
     discountPercentage = Math.min(rawPct, maxDiscountPct, 100);
     discount = (subtotal * discountPercentage) / 100;
-  } else if (Number.isFinite(rawAmt) && rawAmt > 0) {
+  } else if (discountsEnabled && Number.isFinite(rawAmt) && rawAmt > 0) {
     const maxDiscountAmount = (subtotal * maxDiscountPct) / 100;
     discount = Math.min(rawAmt, subtotal, maxDiscountAmount);
     discountPercentage = subtotal > 0 ? Number(((discount / subtotal) * 100).toFixed(2)) : 0;
@@ -3694,7 +3699,12 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
 
   // Must stay in sync with the PaymentMethod union in src/types.ts
   const validPaymentMethods = ['cash', 'card', 'bank_transfer', 'other', 'split'];
-  const safePaymentMethod = validPaymentMethods.includes(paymentMethod) ? paymentMethod : 'cash';
+  // Never silently coerce an unknown payment method to cash — that used to turn
+  // a tampered "split"/invalid value into a cash sale and hide the error.
+  if (!validPaymentMethods.includes(paymentMethod)) {
+    return res.status(400).json({ error: 'Invalid payment method.' });
+  }
+  const safePaymentMethod = paymentMethod;
 
   // Server recomputes every money value - never trust the client
   const totals = computeOrderTotals(safeItems, { discount, discountPercentage });
@@ -3708,13 +3718,14 @@ app.post('/api/bills/checkout', authMiddleware, (req: Request, res: Response) =>
     return res.status(400).json({ error: 'Invalid amount received' });
   }
 
-  if (safePaymentMethod === 'cash' && numReceived + 0.01 < numGrandTotal) {
-    return res.status(400).json({ error: `Received amount cannot be less than Grand Total (Rs. ${numGrandTotal.toFixed(2)}).` });
-  }
-
-  // For non-cash, ensure amountReceived >= grandTotal or at least grandTotal if split not fully implemented
-  if (safePaymentMethod !== 'cash' && safePaymentMethod !== 'split' && numReceived + 0.01 < numGrandTotal) {
-    return res.status(400).json({ error: `Payment amount cannot be less than Grand Total (Rs. ${numGrandTotal.toFixed(2)}) for this payment method.` });
+  // EVERY payment method must cover the grand total. Split payments are not
+  // implemented as a workflow in this POS (the UI only exposes cash/card/
+  // bank/other) so allowing a 0-amount "split" bill would mark an unpaid order
+  // as paid and let the cashier under-record money collected.
+  if (numReceived + 0.01 < numGrandTotal) {
+    return res.status(400).json({
+      error: `Received amount cannot be less than Grand Total (Rs. ${numGrandTotal.toFixed(2)}) for ${safePaymentMethod === 'cash' ? 'cash' : 'this payment method'} payment.`
+    });
   }
 
   // Split cart into normal items and shot items (shots pour from the 750ml bottle stock)
@@ -4649,6 +4660,12 @@ app.put('/api/room-bookings/:id/checkout', authMiddleware, (req: Request, res: R
     if (finalPay > newBalanceDue + 0.01) {
       return res.status(400).json({ error: `Final payment cannot exceed balance due (Rs. ${newBalanceDue.toFixed(2)}).` });
     }
+    // Check-out is a FULL settlement. A positive but short final payment would
+    // close the booking with an un-collected balance; record a partial payment
+    // first (POST /:id/payment) and only then check out.
+    if (finalPay + 0.01 < newBalanceDue) {
+      return res.status(400).json({ error: `Final payment cannot be less than balance due (Rs. ${newBalanceDue.toFixed(2)}). Record a partial payment before settling in full.` });
+    }
 
     booking.extraCharges = Number((booking.extraCharges + add).toFixed(2));
     booking.grandTotal = newGrandTotal;
@@ -5058,6 +5075,12 @@ app.put('/api/function-bookings/:id/checkout', authMiddleware, (req: Request, re
     const finalPay = Number.isFinite(rawFinal) && rawFinal > 0 ? Number(rawFinal.toFixed(2)) : newBalanceDue;
     if (finalPay > newBalanceDue + 0.01) {
       return res.status(400).json({ error: `Final payment cannot exceed balance due (Rs. ${newBalanceDue.toFixed(2)}).` });
+    }
+    // Completing an event is a FULL settlement. A positive but short final
+    // payment would close the event with an un-collected balance; record a
+    // partial payment first and complete once the balance is settled.
+    if (finalPay + 0.01 < newBalanceDue) {
+      return res.status(400).json({ error: `Final payment cannot be less than balance due (Rs. ${newBalanceDue.toFixed(2)}). Record a partial payment before completing the event.` });
     }
 
     booking.extraServices = Number((booking.extraServices + add).toFixed(2));
@@ -6353,6 +6376,15 @@ app.put('/api/settings', authMiddleware, requireRole('super_admin'), (req: Reque
     const pct = Number(updates.maxDiscountPercentage);
     if (isNaN(pct) || pct < 0 || pct > 100) {
       return res.status(400).json({ error: 'Max discount percentage must be between 0 and 100' });
+    }
+  }
+
+  // Normalise boolean switches so `"false"`/`"0"` (JSON strings) are not stored
+  // as truthy values that later make `settings.enableDiscounts === false` fail.
+  for (const key of ['enableDiscounts', 'allowNegativeStock', 'autoPrintAfterPayment', 'allowCashierToPrint']) {
+    if (updates[key] !== undefined) {
+      const v = updates[key];
+      updates[key] = v === true || v === 'true' || v === 1 || v === '1';
     }
   }
 

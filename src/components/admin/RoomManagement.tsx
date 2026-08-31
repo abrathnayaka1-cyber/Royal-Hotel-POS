@@ -171,8 +171,8 @@ export const RoomManagement: React.FC = () => {
     if (floorFilter !== 'all' && room.floor !== floorFilter) return false;
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      const matchNum = room.roomNumber.toLowerCase().includes(q);
-      const matchType = room.roomType.toLowerCase().includes(q);
+      const matchNum = String(room.roomNumber || '').toLowerCase().includes(q);
+      const matchType = String(room.roomType || '').toLowerCase().includes(q);
       if (!matchNum && !matchType) return false;
     }
     return true;
@@ -181,10 +181,10 @@ export const RoomManagement: React.FC = () => {
   const filteredBookings = roomBookings.filter(b => {
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      const matchTicket = b.bookingNumber.toLowerCase().includes(q);
-      const matchGuest = b.guestName.toLowerCase().includes(q);
-      const matchPhone = b.guestPhone.toLowerCase().includes(q);
-      const matchRoom = b.roomNumber.toLowerCase().includes(q);
+      const matchTicket = String(b.bookingNumber || '').toLowerCase().includes(q);
+      const matchGuest = String(b.guestName || '').toLowerCase().includes(q);
+      const matchPhone = String(b.guestPhone || '').toLowerCase().includes(q);
+      const matchRoom = String(b.roomNumber || '').toLowerCase().includes(q);
       if (!matchTicket && !matchGuest && !matchPhone && !matchRoom) return false;
     }
     return true;

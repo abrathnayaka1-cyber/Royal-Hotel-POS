@@ -63,9 +63,9 @@ export const FunctionsView: React.FC = () => {
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
     return (
-      hall.hallName.toLowerCase().includes(q) ||
-      hall.hallType.toLowerCase().includes(q) ||
-      (hall.floor || '').toLowerCase().includes(q)
+      String(hall.hallName || '').toLowerCase().includes(q) ||
+      String(hall.hallType || '').toLowerCase().includes(q) ||
+      String(hall.floor || '').toLowerCase().includes(q)
     );
   });
 

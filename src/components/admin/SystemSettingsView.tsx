@@ -406,6 +406,54 @@ export const SystemSettingsView: React.FC<{
               />
             </div>
           </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2 border-t border-slate-100 dark:border-slate-800">
+            <div>
+              <label className="text-xs font-bold text-slate-500 block mb-1">Enable Discounts</label>
+              <label className="flex items-center gap-2 p-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.enableDiscounts}
+                  onChange={e =>
+                    setForm(f => ({
+                      ...f,
+                      enableDiscounts: e.target.checked,
+                      maxDiscountPercentage: e.target.checked ? (f.maxDiscountPercentage || 20) : 0,
+                    }))
+                  }
+                  className="w-4 h-4 accent-blue-600"
+                />
+                <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  Allow cashiers to apply discounts
+                </span>
+              </label>
+            </div>
+
+            <div>
+              <label className="text-xs font-bold text-slate-500 block mb-1">Max Discount (%)</label>
+              <input
+                type="number"
+                min="0"
+                max="100"
+                disabled={!form.enableDiscounts}
+                value={form.maxDiscountPercentage}
+                onChange={e => setForm({ ...form, maxDiscountPercentage: Math.max(0, Math.min(100, Number(e.target.value))) })}
+                className="w-full text-xs font-bold px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white disabled:opacity-50"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs font-bold text-slate-500 block mb-1">Low Stock Alert Threshold</label>
+              <input
+                type="number"
+                min="0"
+                max="100000"
+                value={form.lowStockDefaultThreshold}
+                onChange={e => setForm({ ...form, lowStockDefaultThreshold: Math.max(0, Number(e.target.value)) })}
+                className="w-full text-xs font-bold px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
+              />
+            </div>
+          </div>
         </div>
 
         {/* Receipt Messages Card */}
