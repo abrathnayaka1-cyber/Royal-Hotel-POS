@@ -16,7 +16,11 @@ import {
   CreditCard,
   Banknote,
   Building2,
-  RefreshCw
+  RefreshCw,
+  Wine,
+  UtensilsCrossed,
+  BedDouble,
+  PartyPopper
 } from 'lucide-react';
 
 interface ReportResponse {
@@ -45,6 +49,28 @@ interface ReportResponse {
   bills: Bill[];
 }
 
+interface DailySummaryStream {
+  sales: number;
+  bookingsCount?: number;
+  billsCount?: number;
+  itemsSold?: number;
+  guests?: number;
+  nights?: number;
+  topItems?: Array<{ name: string; size: string; quantity: number; revenue: number }>;
+  paymentBreakdown?: Record<string, { count: number; total: number }>;
+}
+
+interface DailySalesSummary {
+  date: string;
+  formattedDate: string;
+  registerTotal: number;
+  grandTotal: number;
+  bar: DailySummaryStream;
+  food: DailySummaryStream;
+  rooms: DailySummaryStream;
+  functions: DailySummaryStream;
+}
+
 export const ReportsView: React.FC<{ settings: SystemSettings | null }> = ({ settings }) => {
   const { user } = useAuth();
   const [period, setPeriod] = useState<'today' | 'week' | 'month' | 'year' | 'custom'>('today');
@@ -52,6 +78,12 @@ export const ReportsView: React.FC<{ settings: SystemSettings | null }> = ({ set
   const [endDate, setEndDate] = useState<string>('');
   const [reportData, setReportData] = useState<ReportResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+
+  // Daily Sales Summary (Bar / Food / Rooms / Functions shown separately)
+  const todayISO = new Date().toISOString().split('T')[0];
+  const [dailySummary, setDailySummary] = useState<DailySalesSummary | null>(null);
+  const [dailyDate, setDailyDate] = useState<string>(todayISO);
+  const [dailyLoading, setDailyLoading] = useState<boolean>(true);
 
   const currencySymbol = settings?.currencySymbol || 'Rs.';
 
@@ -71,9 +103,25 @@ export const ReportsView: React.FC<{ settings: SystemSettings | null }> = ({ set
     }
   };
 
+  const loadDailySummary = async (date: string) => {
+    try {
+      setDailyLoading(true);
+      const res = await fetchApi<DailySalesSummary>(`/reports/daily-sales-summary?date=${date}`);
+      setDailySummary(res);
+    } catch (err) {
+      console.error('Failed to load daily sales summary:', err);
+    } finally {
+      setDailyLoading(false);
+    }
+  };
+
   useEffect(() => {
     loadReport();
   }, [period]);
+
+  useEffect(() => {
+    loadDailySummary(dailyDate);
+  }, [dailyDate]);
 
   const handleCustomFilter = (e: React.FormEvent) => {
     e.preventDefault();
@@ -191,6 +239,178 @@ export const ReportsView: React.FC<{ settings: SystemSettings | null }> = ({ set
             </button>
           </form>
         )}
+      </div>
+
+      {/* Daily Sales Summary — Bar / Food / Rooms / Functions shown separately */}
+      <div className="bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-2xl shadow-xs overflow-hidden">
+        <div className="p-5 pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800">
+          <div>
+            <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <Calendar className="w-4 h-4 text-blue-600" />
+              Daily Sales Summary
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Revenues for the selected day — Bar, Food, Rooms and Functions are totalled separately (never mixed)
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="date"
+              value={dailyDate}
+              max={todayISO}
+              onChange={e => setDailyDate(e.target.value || todayISO)}
+              className="text-xs px-2.5 py-1.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl"
+            />
+            <button
+              onClick={() => { setDailyDate(todayISO); loadDailySummary(todayISO); }}
+              className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+              title="Jump to today"
+            >
+              <RefreshCw className="w-3.5 h-3.5" /> {dailyDate === todayISO ? 'Today' : 'Go to Today'}
+            </button>
+          </div>
+        </div>
+
+        <div className="p-5">
+          {dailyLoading ? (
+            <div className="py-8 text-center text-xs text-slate-400">Loading daily sales summary…</div>
+          ) : dailySummary ? (
+            <div className="space-y-5">
+              {/* 4 revenue streams */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                {/* Bar & Liquor */}
+                <div className="p-4 bg-amber-50 dark:bg-amber-500/10 border border-amber-200/70 dark:border-amber-500/20 rounded-2xl">
+                  <div className="flex items-center gap-2 text-amber-700 dark:text-amber-400">
+                    <Wine className="w-4 h-4" />
+                    <span className="text-[11px] font-black uppercase tracking-wider">Bar & Liquor</span>
+                  </div>
+                  <div className="text-xl font-black text-slate-900 dark:text-white mt-2">
+                    {currencySymbol} {(dailySummary.bar.sales || 0).toLocaleString()}
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                    {dailySummary.bar.billsCount || 0} bills • {dailySummary.bar.itemsSold || 0} items
+                  </div>
+                </div>
+
+                {/* Restaurant / Food */}
+                <div className="p-4 bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200/70 dark:border-emerald-500/20 rounded-2xl">
+                  <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400">
+                    <UtensilsCrossed className="w-4 h-4" />
+                    <span className="text-[11px] font-black uppercase tracking-wider">Hotel Foods</span>
+                  </div>
+                  <div className="text-xl font-black text-slate-900 dark:text-white mt-2">
+                    {currencySymbol} {(dailySummary.food.sales || 0).toLocaleString()}
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                    {dailySummary.food.billsCount || 0} bills • {dailySummary.food.itemsSold || 0} items
+                  </div>
+                </div>
+
+                {/* Rooms */}
+                <div className="p-4 bg-sky-50 dark:bg-sky-500/10 border border-sky-200/70 dark:border-sky-500/20 rounded-2xl">
+                  <div className="flex items-center gap-2 text-sky-700 dark:text-sky-400">
+                    <BedDouble className="w-4 h-4" />
+                    <span className="text-[11px] font-black uppercase tracking-wider">Rooms</span>
+                  </div>
+                  <div className="text-xl font-black text-slate-900 dark:text-white mt-2">
+                    {currencySymbol} {(dailySummary.rooms.sales || 0).toLocaleString()}
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                    {dailySummary.rooms.bookingsCount || 0} bookings • {dailySummary.rooms.nights || 0} nights • {dailySummary.rooms.guests || 0} guests
+                  </div>
+                </div>
+
+                {/* Functions / Events */}
+                <div className="p-4 bg-violet-50 dark:bg-violet-500/10 border border-violet-200/70 dark:border-violet-500/20 rounded-2xl">
+                  <div className="flex items-center gap-2 text-violet-700 dark:text-violet-400">
+                    <PartyPopper className="w-4 h-4" />
+                    <span className="text-[11px] font-black uppercase tracking-wider">Functions</span>
+                  </div>
+                  <div className="text-xl font-black text-slate-900 dark:text-white mt-2">
+                    {currencySymbol} {(dailySummary.functions.sales || 0).toLocaleString()}
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                    {dailySummary.functions.bookingsCount || 0} bookings • {dailySummary.functions.guests || 0} guests
+                  </div>
+                </div>
+              </div>
+
+              {/* Overall totals for the day */}
+              <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-slate-50 dark:bg-slate-800/40 rounded-xl">
+                <div className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                  {dailySummary.formattedDate} —
+                  <span className="ml-1 text-slate-400 font-semibold normal-case">POS Register</span>
+                </div>
+                <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs">
+                  <span className="text-slate-500">Register total: <b className="text-slate-900 dark:text-white">{currencySymbol} {(dailySummary.registerTotal || 0).toLocaleString()}</b></span>
+                  <span className="text-slate-500">Rooms + Functions: <b className="text-slate-900 dark:text-white">{currencySymbol} {((dailySummary.rooms.sales || 0) + (dailySummary.functions.sales || 0)).toLocaleString()}</b></span>
+                  <span className="text-slate-500">Grand total: <b className="text-blue-600 dark:text-blue-400">{currencySymbol} {(dailySummary.grandTotal || 0).toLocaleString()}</b></span>
+                </div>
+              </div>
+
+              {/* Bar & Food top items (side by side) */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div className="border border-slate-100 dark:border-slate-800 rounded-xl overflow-hidden">
+                  <div className="px-4 py-2.5 bg-amber-500/10 text-xs font-black uppercase tracking-wider text-amber-700 dark:text-amber-400 border-b border-slate-100 dark:border-slate-800 flex items-center gap-1.5">
+                    <Wine className="w-3.5 h-3.5" /> Top Bar Items
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-100 dark:border-slate-800 text-slate-400 font-bold uppercase">
+                          <th className="py-2 px-3">Item</th>
+                          <th className="py-2 px-3 text-center">Qty</th>
+                          <th className="py-2 px-3 text-right">Revenue</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                        {dailySummary.bar.topItems?.length ? dailySummary.bar.topItems.slice(0, 6).map((it, i) => (
+                          <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                            <td className="py-2 px-3 font-bold text-slate-900 dark:text-white">{it.name} <span className="font-normal text-slate-400">({it.size})</span></td>
+                            <td className="py-2 px-3 text-center font-extrabold text-amber-600 dark:text-amber-400">{it.quantity}</td>
+                            <td className="py-2 px-3 text-right font-black text-slate-900 dark:text-white">{currencySymbol} {(it.revenue || 0).toLocaleString()}</td>
+                          </tr>
+                        )) : (
+                          <tr><td colSpan={3} className="py-5 text-center text-slate-400">No bar sales on this day.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="border border-slate-100 dark:border-slate-800 rounded-xl overflow-hidden">
+                  <div className="px-4 py-2.5 bg-emerald-500/10 text-xs font-black uppercase tracking-wider text-emerald-700 dark:text-emerald-400 border-b border-slate-100 dark:border-slate-800 flex items-center gap-1.5">
+                    <UtensilsCrossed className="w-3.5 h-3.5" /> Top Food Items
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-100 dark:border-slate-800 text-slate-400 font-bold uppercase">
+                          <th className="py-2 px-3">Item</th>
+                          <th className="py-2 px-3 text-center">Qty</th>
+                          <th className="py-2 px-3 text-right">Revenue</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                        {dailySummary.food.topItems?.length ? dailySummary.food.topItems.slice(0, 6).map((it, i) => (
+                          <tr key={i} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                            <td className="py-2 px-3 font-bold text-slate-900 dark:text-white">{it.name} <span className="font-normal text-slate-400">({it.size})</span></td>
+                            <td className="py-2 px-3 text-center font-extrabold text-emerald-600 dark:text-emerald-400">{it.quantity}</td>
+                            <td className="py-2 px-3 text-right font-black text-slate-900 dark:text-white">{currencySymbol} {(it.revenue || 0).toLocaleString()}</td>
+                          </tr>
+                        )) : (
+                          <tr><td colSpan={3} className="py-5 text-center text-slate-400">No food sales on this day.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="py-8 text-center text-xs text-slate-400">No daily summary data available.</div>
+          )}
+        </div>
       </div>
 
       {/* Financial KPI Summary Cards */}
