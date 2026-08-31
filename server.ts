@@ -2232,6 +2232,177 @@ app.post('/api/inventory/adjust', authMiddleware, requireRole('super_admin'), (r
 });
 
 // ==========================================
+// FULL STOCK RESET (Super Admin ONLY) — start the stock count from zero
+// ==========================================
+// Zeroes EVERY product-size stock (and optionally the kitchen ingredient
+// store) so the admin can rebuild the stock books from scratch — e.g. after a
+// fresh physical count or when opening a new season/year.
+//
+// Safety rails:
+//   1. Super Admin only (same as every other inventory write).
+//   2. Explicit confirmation: body.confirm === 'RESET ALL STOCK' — a stray
+//      click or a retried request without the token can never wipe stock.
+//   3. A full database snapshot backup is written FIRST (same backup folder
+//      the "Download Backup" button uses), so the reset is always reversible.
+//   4. Every zeroed line gets a 'correction' movement in the stock ledger,
+//      and the whole action is written to the audit log — history is NEVER
+//      silently deleted unless the admin explicitly opts in.
+app.post('/api/inventory/reset-all-stock', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
+  const user = (req as any).user as User;
+
+  // Hard confirmation gate (typo-safe, case-insensitive).
+  const confirm = typeof req.body?.confirm === 'string' ? req.body.confirm.trim().toUpperCase() : '';
+  if (confirm !== 'RESET ALL STOCK') {
+    return res.status(400).json({ error: 'Reset not confirmed. Send confirm="RESET ALL STOCK" to proceed.' });
+  }
+
+  const includeKitchen = req.body?.includeKitchen !== false; // default: yes
+  const clearHistory = req.body?.clearHistory === true;      // default: keep ledger
+  const reason = (typeof req.body?.reason === 'string' && req.body.reason.trim())
+    ? req.body.reason.trim().slice(0, 500)
+    : 'Full stock reset to zero — rebuilding stock books from physical count';
+
+  // 1) Safety snapshot BEFORE touching anything (same dir as manual backups).
+  let backup: { filename: string; timestamp: string; size: number };
+  try {
+    backup = db.backupDatabase();
+  } catch (e: any) {
+    console.error('[STOCK-RESET] Pre-reset backup failed — aborting reset:', e);
+    return res.status(500).json({ error: 'Reset aborted: the automatic safety backup could not be written. Fix the data directory permissions and try again — no stock was changed.' });
+  }
+
+  const nowIso = new Date().toISOString();
+  const resetRef = `RESET-${nowIso.replace(/[-:T.Z]/g, '').slice(0, 14)}`;
+
+  // 2) Zero every non-shot product variant (shots hold no stock of their own —
+  //    they pour from the 750ml bottle, which IS zeroed here). Archived
+  //    products are reset too so nothing comes back with a phantom balance.
+  let variantsZeroed = 0;
+  let variantsAlreadyZero = 0;
+  let bottlesZeroed = 0;
+  let shotProductsReset = 0;
+
+  for (const product of db.raw.products) {
+    let productTouched = false;
+
+    for (const variant of product.variants) {
+      if (isShotVariant(product, variant)) continue; // derived from the bottle — never has its own stock
+
+      const before = Number(variant.stock) || 0;
+      if (before === 0) {
+        variantsAlreadyZero++;
+        continue;
+      }
+
+      variant.stock = 0;
+      variantsZeroed++;
+      productTouched = true;
+      if (product.servesShots && getBottleVariant(product)?.id === variant.id) bottlesZeroed++;
+
+      // Ledger record per zeroed line — keeps stock reports/movements honest.
+      db.recordStockMovement(
+        product.id,
+        product.name,
+        variant.id,
+        variant.size,
+        -before,
+        before,
+        0,
+        'correction',
+        user.id,
+        user.name,
+        reason,
+        resetRef
+      );
+    }
+
+    // Shot-pouring products: the open-bottle remainder must also start clean.
+    if (product.servesShots) {
+      if (Number(product.openBottleUsedMl) > 0 || productTouched) {
+        product.openBottleUsedMl = 0;
+        shotProductsReset++;
+      }
+    }
+  }
+
+  // 3) Optionally zero the kitchen ingredient store (rice, oil, chicken, …).
+  let ingredientsZeroed = 0;
+  let ingredientsAlreadyZero = 0;
+  if (includeKitchen && Array.isArray(db.raw.kitchenIngredients)) {
+    for (const ing of db.raw.kitchenIngredients) {
+      const before = Number(ing.currentStock) || 0;
+      if (before === 0) {
+        ingredientsAlreadyZero++;
+        continue;
+      }
+      ing.currentStock = 0;
+      ing.updatedAt = nowIso;
+      ingredientsZeroed++;
+
+      db.recordKitchenMovement(
+        ing,
+        -before,
+        before,
+        0,
+        'count_correction',
+        user.id,
+        user.name,
+        reason,
+        resetRef
+      );
+    }
+  }
+
+  // 4) Optional: wipe the stock movement ledgers for a genuinely fresh start.
+  //    The reset itself is ALWAYS preserved in the audit log below.
+  let productMovementsCleared = 0;
+  let kitchenMovementsCleared = 0;
+  if (clearHistory) {
+    productMovementsCleared = Array.isArray(db.raw.stockMovements) ? db.raw.stockMovements.length : 0;
+    kitchenMovementsCleared = Array.isArray(db.raw.kitchenMovements) ? db.raw.kitchenMovements.length : 0;
+    db.raw.stockMovements = [];
+    db.raw.kitchenMovements = [];
+  }
+
+  db.save();
+
+  db.logAudit(
+    user.id,
+    user.name,
+    user.role,
+    'STOCK_RESET_ALL',
+    'INVENTORY',
+    resetRef,
+    `FULL STOCK RESET to zero: ${variantsZeroed} product size(s) reset (${variantsAlreadyZero} already at 0), ` +
+    `${shotProductsReset} shot-pouring product(s) open-bottle tracker cleared, ` +
+    (includeKitchen ? `${ingredientsZeroed} kitchen ingredient(s) reset (${ingredientsAlreadyZero} already at 0), ` : 'kitchen store not touched, ') +
+    (clearHistory ? `stock movement history WIPED (${productMovementsCleared} product + ${kitchenMovementsCleared} kitchen records). ` : 'stock movement history kept. ') +
+    `Reason: ${reason}. Safety backup: ${backup.filename}`
+  );
+
+  res.status(200).json({
+    success: true,
+    message: `All stock reset to zero: ${variantsZeroed} product size(s)` +
+      (includeKitchen ? ` and ${ingredientsZeroed} kitchen ingredient(s)` : '') +
+      ` set to 0. Rebuild stock with Smart Import or Stock In.`,
+    ref: resetRef,
+    backup: { filename: backup.filename, size: backup.size },
+    reset: {
+      productVariantsZeroed: variantsZeroed,
+      productVariantsAlreadyZero: variantsAlreadyZero,
+      shotProductsReset,
+      sourceBottlesZeroed: bottlesZeroed,
+      kitchenIncluded: includeKitchen,
+      kitchenIngredientsZeroed: ingredientsZeroed,
+      kitchenIngredientsAlreadyZero: ingredientsAlreadyZero,
+      historyCleared: clearHistory,
+      productMovementsCleared,
+      kitchenMovementsCleared,
+    },
+  });
+});
+
+// ==========================================
 // POS DAMAGE / BREAKAGE REPORTING (CASHIER-ACCESSIBLE)
 // ==========================================
 

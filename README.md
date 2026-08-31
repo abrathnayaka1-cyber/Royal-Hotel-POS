@@ -63,6 +63,7 @@
 - Allow / Disallow negative stock (configurable)
 - Daily Stock Sheet (Physical register reconciliation) - matches paper format: In-Hand, Received, Stock, Balance, Sold, Value
 - Physical audit reconciliation
+- **Full Stock Reset** (`Admin → Inventory → Reset All Stock to 0`): zeroes every product size (and optionally the kitchen ingredient store) so you can rebuild the stock books from scratch with Smart Import / Stock In. Takes an automatic safety backup first, writes a ledger correction per item, logs `STOCK_RESET_ALL`, and offers an optional full movement-history wipe. CLI equivalent: `npx tsx scripts/reset-stock.ts --confirm "RESET ALL STOCK"` (preview with `--dry-run`); MySQL deployments use `migration-reset-stock.sql`.
 
 ### Reports & Analytics
 - Sales analytics with date range, cashier filter
