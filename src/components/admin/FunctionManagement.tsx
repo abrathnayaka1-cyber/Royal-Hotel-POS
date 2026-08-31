@@ -164,8 +164,8 @@ export const FunctionManagement: React.FC = () => {
     if (statusFilter !== 'all' && hall.status !== statusFilter) return false;
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      const matchName = hall.hallName.toLowerCase().includes(q);
-      const matchType = hall.hallType.toLowerCase().includes(q);
+      const matchName = String(hall.hallName || '').toLowerCase().includes(q);
+      const matchType = String(hall.hallType || '').toLowerCase().includes(q);
       if (!matchName && !matchType) return false;
     }
     return true;
@@ -175,10 +175,10 @@ export const FunctionManagement: React.FC = () => {
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
     return (
-      b.bookingNumber.toLowerCase().includes(q) ||
-      b.customerName.toLowerCase().includes(q) ||
-      b.customerPhone.toLowerCase().includes(q) ||
-      b.hallName.toLowerCase().includes(q)
+      String(b.bookingNumber || '').toLowerCase().includes(q) ||
+      String(b.customerName || '').toLowerCase().includes(q) ||
+      String(b.customerPhone || '').toLowerCase().includes(q) ||
+      String(b.hallName || '').toLowerCase().includes(q)
     );
   });
 

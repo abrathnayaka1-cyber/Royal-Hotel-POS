@@ -68,17 +68,18 @@ export const BarcodePrintModal: React.FC<BarcodePrintModalProps> = ({
         // BOTTLE ONLY FILTER: Exclude Shot variants
         if (v.isShot) continue;
 
-        const effectiveCode = (v.barcode && v.barcode.trim()) ? v.barcode.trim() : v.sku;
+        const effectiveCode = (v.barcode && v.barcode.trim()) ? v.barcode.trim() : (v.sku || '');
         const isSelected = Boolean(initialSelectedVariantId && v.id === initialSelectedVariantId);
 
+        // Normalise to strings so missing legacy sku/barcode never crashes search/print.
         list.push({
           productId: p.id,
-          productName: p.name,
+          productName: String(p.name || ''),
           variantId: v.id,
-          size: v.size,
-          sku: v.sku,
-          barcode: effectiveCode,
-          sellingPrice: v.sellingPrice,
+          size: String(v.size || ''),
+          sku: String(v.sku || ''),
+          barcode: String(effectiveCode || ''),
+          sellingPrice: Number(v.sellingPrice) || 0,
           companyName: p.companyId,
           quantity: isSelected ? 10 : 5, // default print 5 stickers
           isSelected: isSelected || false,
@@ -102,10 +103,10 @@ export const BarcodePrintModal: React.FC<BarcodePrintModalProps> = ({
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase().trim();
     return (
-      i.productName.toLowerCase().includes(q) ||
-      i.size.toLowerCase().includes(q) ||
-      i.barcode.toLowerCase().includes(q) ||
-      i.sku.toLowerCase().includes(q)
+      String(i.productName || '').toLowerCase().includes(q) ||
+      String(i.size || '').toLowerCase().includes(q) ||
+      String(i.barcode || '').toLowerCase().includes(q) ||
+      String(i.sku || '').toLowerCase().includes(q)
     );
   });
 

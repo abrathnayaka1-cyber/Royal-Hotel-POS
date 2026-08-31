@@ -100,11 +100,11 @@ export const BillsInvoicesView: React.FC<{ settings: SystemSettings | null }> = 
     if (statusFilter !== 'all' && b.status !== statusFilter) return false;
     if (search.trim()) {
       const q = search.toLowerCase();
-      const matchBill = b.billNumber.toLowerCase().includes(q);
-      const matchInv = b.invoiceNumber.toLowerCase().includes(q);
+      const matchBill = String(b.billNumber || '').toLowerCase().includes(q);
+      const matchInv = String(b.invoiceNumber || '').toLowerCase().includes(q);
       const matchCust = b.customerName?.toLowerCase().includes(q);
       const matchTable = b.tableNumber?.toLowerCase().includes(q);
-      const matchCashier = b.cashierName.toLowerCase().includes(q);
+      const matchCashier = String(b.cashierName || '').toLowerCase().includes(q);
       if (!matchBill && !matchInv && !matchCust && !matchTable && !matchCashier) return false;
     }
     return true;

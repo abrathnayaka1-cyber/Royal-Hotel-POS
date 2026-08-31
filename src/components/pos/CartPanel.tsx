@@ -261,14 +261,21 @@ export const CartPanel: React.FC = () => {
       <div className="p-3.5 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
         {/* Quick Toggles for Discount & Order Note */}
         <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-slate-200 dark:border-slate-700">
-          <button
-            type="button"
-            onClick={() => setIsDiscountOpen(!isDiscountOpen)}
-            className="flex items-center gap-1 text-[11px] font-bold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
-          >
-            <Tag className="w-3 h-3" />
-            {discountPercentage > 0 ? `Discount (${discountPercentage}%)` : '+ Add Discount'}
-          </button>
+          {settings?.enableDiscounts !== false ? (
+            <button
+              type="button"
+              onClick={() => setIsDiscountOpen(!isDiscountOpen)}
+              className="flex items-center gap-1 text-[11px] font-bold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+            >
+              <Tag className="w-3 h-3" />
+              {discountPercentage > 0 ? `Discount (${discountPercentage}%)` : '+ Add Discount'}
+            </button>
+          ) : (
+            <span className="flex items-center gap-1 text-[11px] font-bold text-slate-400 dark:text-slate-500">
+              <Tag className="w-3 h-3" />
+              Discounts Disabled
+            </span>
+          )}
 
           <button
             type="button"
@@ -281,7 +288,7 @@ export const CartPanel: React.FC = () => {
         </div>
 
         {/* Discount Form */}
-        {isDiscountOpen && (
+        {settings?.enableDiscounts !== false && isDiscountOpen && (
           <div className="p-2 mb-2 bg-blue-50/70 dark:bg-blue-950/40 rounded-lg flex items-center gap-1.5">
             <span className="font-bold text-slate-700 dark:text-slate-300 text-[10px]">DISC %:</span>
             {[0, 5, 10, 15, 20].map(pct => (

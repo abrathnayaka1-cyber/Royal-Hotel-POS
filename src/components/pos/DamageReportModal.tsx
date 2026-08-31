@@ -52,7 +52,7 @@ export const DamageReportModal: React.FC = () => {
       const q = search.toLowerCase();
       return (
         p.name.toLowerCase().includes(q) ||
-        p.variants.some(v => v.size.toLowerCase().includes(q) || (v.sku || '').toLowerCase().includes(q))
+        p.variants.some(v => String(v.size || '').toLowerCase().includes(q) || String(v.sku || '').toLowerCase().includes(q))
       );
     })
     .slice(0, 30);

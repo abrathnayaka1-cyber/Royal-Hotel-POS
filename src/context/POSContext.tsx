@@ -471,12 +471,15 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const sub = cart.reduce((sum, item) => sum + (item.unitPrice * item.quantity), 0);
     
     let disc = 0;
+    // When "Enable Discounts" is off in System Settings, no discount may be
+    // applied even if a stale discount is still set in the cart.
+    const discountsEnabled = settings?.enableDiscounts !== false;
     const maxDiscountPct = settings?.maxDiscountPercentage || 100;
     
-    if (discountPercentage > 0) {
+    if (discountsEnabled && discountPercentage > 0) {
       const clampedPct = Math.min(discountPercentage, maxDiscountPct, 100);
       disc = (sub * clampedPct) / 100;
-    } else if (discountAmount > 0) {
+    } else if (discountsEnabled && discountAmount > 0) {
       const maxDiscountAmount = (sub * maxDiscountPct) / 100;
       disc = Math.min(discountAmount, sub, maxDiscountAmount);
     }
