@@ -23,7 +23,7 @@ interface NavbarProps {
 
 export const Navbar: React.FC<NavbarProps> = ({ currentView, onSwitchView }) => {
   const { user, logout } = useAuth();
-  const { heldBills, setIsHeldBillsModalOpen, settings } = usePOS();
+  const { heldBills, setIsHeldBillsModalOpen } = usePOS();
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [isDark, setIsDark] = useState<boolean>(false);
   const [currentTime, setCurrentTime] = useState<string>('');
@@ -90,18 +90,6 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onSwitchView }) => 
             imgClassName="shadow-md shadow-blue-600/20 ring-1 ring-white/10"
             alt="Royal Hotel POS"
           />
-          <span className="text-base sm:text-lg font-bold tracking-tight text-white">
-            {settings?.businessName ? (
-              <>
-                {settings.businessName.split(' ')[0]}{' '}
-                <span className="text-blue-400 font-extrabold">PRO POS</span>
-              </>
-            ) : (
-              <>
-                ROYAL HOTEL <span className="text-blue-400">PRO POS</span>
-              </>
-            )}
-          </span>
         </div>
 
         <div className="hidden md:block h-6 w-px bg-slate-600 mx-1"></div>
