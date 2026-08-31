@@ -236,7 +236,10 @@ export interface HeldBill {
   subtotal: number;
   discount: number;
   discountPercentage?: number;
+  serviceCharge?: number;
+  serviceChargeRate?: number;
   tax: number;
+  taxRate?: number;
   grandTotal: number;
   notes?: string;
   createdAt: string;
