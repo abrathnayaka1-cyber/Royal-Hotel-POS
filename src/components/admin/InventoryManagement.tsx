@@ -18,7 +18,8 @@ import {
   ArrowDownCircle,
   ArrowUpCircle,
   UploadCloud,
-  Printer
+  Printer,
+  RotateCcw
 } from 'lucide-react';
 
 interface VariantInventoryItem {
@@ -66,6 +67,15 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
   const [isBarcodePrintModalOpen, setIsBarcodePrintModalOpen] = useState<boolean>(false);
   const [selectedVariantForPrint, setSelectedVariantForPrint] = useState<string | undefined>(undefined);
   const [productsList, setProductsList] = useState<Product[]>([]);
+
+  // Full Stock Reset (all items → 0, rebuild from scratch)
+  const [isResetModalOpen, setIsResetModalOpen] = useState<boolean>(false);
+  const [resetConfirmText, setResetConfirmText] = useState<string>('');
+  const [resetIncludeKitchen, setResetIncludeKitchen] = useState<boolean>(true);
+  const [resetClearHistory, setResetClearHistory] = useState<boolean>(false);
+  const [resetBusy, setResetBusy] = useState<boolean>(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetResult, setResetResult] = useState<string | null>(null);
 
   const loadProducts = async () => {
     try {
@@ -132,6 +142,48 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
     }
   };
 
+  const openResetModal = () => {
+    setResetConfirmText('');
+    setResetIncludeKitchen(true);
+    setResetClearHistory(false);
+    setResetError(null);
+    setResetResult(null);
+    setIsResetModalOpen(true);
+  };
+
+  const handleResetAllStock = async () => {
+    setResetError(null);
+    setResetResult(null);
+
+    if (resetConfirmText.trim().toUpperCase() !== 'RESET ALL STOCK') {
+      setResetError('Type "RESET ALL STOCK" exactly to confirm.');
+      return;
+    }
+
+    try {
+      setResetBusy(true);
+      const res = await fetchApi<{ message: string; ref: string; backup?: { filename: string } }>('/inventory/reset-all-stock', {
+        method: 'POST',
+        body: JSON.stringify({
+          confirm: 'RESET ALL STOCK',
+          includeKitchen: resetIncludeKitchen,
+          clearHistory: resetClearHistory,
+          reason: 'Full stock reset from Inventory screen — rebuilding stock from physical count',
+        }),
+      });
+
+      setResetResult(
+        `${res.message || 'All stock set to 0.'}${res.backup?.filename ? ` Safety backup: ${res.backup.filename}` : ''}`
+      );
+      setResetConfirmText('');
+      await loadInventory();
+    } catch (err: any) {
+      setResetError(err.message || 'Failed to reset stock.');
+    } finally {
+      setResetBusy(false);
+    }
+  };
+
   // Calculations (shot sizes share the 750ml bottle liquid — exclude them so nothing is double-counted)
   const countable = items.filter(i => !i.isShot);
   const totalStockUnits = countable.reduce((sum, i) => sum + (i.stock || 0), 0);
@@ -166,7 +218,15 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={openResetModal}
+            className="px-3.5 py-2.5 bg-rose-50 dark:bg-rose-950/60 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer w-fit"
+            title="Set every item's stock to 0 so you can rebuild stock from scratch (safety backup is taken automatically)"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            Reset All Stock to 0
+          </button>
           <button
             onClick={async () => {
               await loadProducts();
@@ -514,6 +574,128 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Full Stock Reset Modal — all items to 0, rebuild stock from scratch */}
+      {isResetModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+          <div className="bg-white dark:bg-slate-900 border border-rose-200 dark:border-rose-900/60 rounded-2xl shadow-xl max-w-md w-full p-5 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-rose-100 dark:bg-rose-950/60 rounded-xl">
+                  <AlertTriangle className="w-5 h-5 text-rose-600 dark:text-rose-400" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-base text-slate-900 dark:text-white">
+                    Reset ALL Stock to Zero
+                  </h3>
+                  <p className="text-xs text-slate-500">Start the stock books fresh</p>
+                </div>
+              </div>
+              <button
+                onClick={() => !resetBusy && setIsResetModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-600 disabled:opacity-40"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {resetResult ? (
+              <div className="space-y-4">
+                <div className="p-3 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 rounded-xl text-xs font-medium flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                  <span>{resetResult}</span>
+                </div>
+                <p className="text-xs text-slate-500">
+                  Tip: use <strong>Smart Import</strong> (supplier invoice / physical count sheet) or
+                  the per-item <strong>Stock In</strong> buttons to enter the new opening stock.
+                </p>
+                <div className="flex justify-end">
+                  <button
+                    onClick={() => setIsResetModalOpen(false)}
+                    className="px-4 py-1.5 bg-slate-900 dark:bg-blue-600 hover:bg-slate-800 dark:hover:bg-blue-700 text-white rounded-xl text-xs font-bold cursor-pointer"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="p-3 bg-rose-50 dark:bg-rose-950/40 text-rose-800 dark:text-rose-300 rounded-xl text-xs leading-relaxed">
+                  Every product size with stock will be set to <strong>0</strong> (bottles, portions,
+                  cans — shot sizes follow the 750ml bottle automatically). Each change is recorded in
+                  the stock movement ledger and a <strong>full database backup is saved first</strong>,
+                  so this can be undone from Admin → Database Backups.
+                </div>
+
+                <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={resetIncludeKitchen}
+                    onChange={e => setResetIncludeKitchen(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 accent-blue-600 cursor-pointer"
+                  />
+                  <span className="text-xs text-slate-700 dark:text-slate-300">
+                    Also reset the <strong>Kitchen store</strong> ingredients (rice, chicken, oil, …) to 0
+                  </span>
+                </label>
+
+                <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={resetClearHistory}
+                    onChange={e => setResetClearHistory(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 accent-rose-600 cursor-pointer"
+                  />
+                  <span className="text-xs text-slate-700 dark:text-slate-300">
+                    Also <strong>delete the old stock movement history</strong> (product &amp; kitchen
+                    ledgers) for a completely clean start. The reset itself stays in the Audit Log.
+                  </span>
+                </label>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-500 block mb-1">
+                    Type <span className="text-rose-600 font-extrabold">RESET ALL STOCK</span> to confirm
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="RESET ALL STOCK"
+                    value={resetConfirmText}
+                    onChange={e => setResetConfirmText(e.target.value)}
+                    disabled={resetBusy}
+                    className="w-full text-sm font-bold px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-rose-500"
+                  />
+                </div>
+
+                {resetError && (
+                  <div className="p-2.5 bg-rose-50 text-rose-700 rounded-xl text-xs flex items-center gap-1.5">
+                    <AlertCircle className="w-4 h-4" />
+                    <span>{resetError}</span>
+                  </div>
+                )}
+
+                <div className="flex justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setIsResetModalOpen(false)}
+                    disabled={resetBusy}
+                    className="px-3 py-1.5 text-xs text-slate-600 dark:text-slate-300 disabled:opacity-40 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleResetAllStock}
+                    disabled={resetBusy || resetConfirmText.trim().toUpperCase() !== 'RESET ALL STOCK'}
+                    className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 disabled:bg-rose-300 dark:disabled:bg-rose-900/50 text-white rounded-xl text-xs font-bold shadow-md shadow-rose-600/20 cursor-pointer disabled:cursor-not-allowed"
+                  >
+                    {resetBusy ? 'Resetting…' : 'Reset Everything to 0'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
