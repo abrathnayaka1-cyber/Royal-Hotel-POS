@@ -15,8 +15,8 @@ $input = getJsonInput();
 $currentPassword = $input['currentPassword'] ?? '';
 $newPassword = trim($input['newPassword'] ?? '');
 
-if (empty($newPassword) || strlen($newPassword) < 4) {
-    sendError('New password must be at least 4 characters long.');
+if (empty($newPassword) || strlen($newPassword) < 8 || strlen($newPassword) > 128) {
+    sendError('New password must be between 8 and 128 characters long.');
 }
 
 $pdo = Database::getConnection();
@@ -29,16 +29,27 @@ if (empty($currentPassword)) {
     sendError('Current password is required.', 400);
 }
 
+if ($currentPassword === $newPassword) {
+    sendError('New password must be different from the current password.', 400);
+}
+
 $stmt = $pdo->prepare("SELECT password_hash FROM users WHERE id = ?");
 $stmt->execute([$user['id']]);
 $row = $stmt->fetch();
-if (!$row || !password_verify($currentPassword, $row['password_hash'])) {
+if (!$row || !password_verify($currentPassword, (string)$row['password_hash'])) {
+    logAudit($user['id'], $user['name'], $user['role'], 'PASSWORD_CHANGE_FAILED', 'AUTH', $user['id'], 'Incorrect current password supplied.');
     sendError('Current password is incorrect.', 400);
 }
 
 $newHash = password_hash($newPassword, PASSWORD_BCRYPT);
 $upStmt = $pdo->prepare("UPDATE users SET password_hash = ?, updated_at = NOW() WHERE id = ?");
 $upStmt->execute([$newHash, $user['id']]);
+
+// Invalidate every other session so a stolen token cannot survive the password
+// change. The session currently in use is kept alive so the user is not logged
+// out mid-request.
+$delStmt = $pdo->prepare("DELETE FROM user_sessions WHERE user_id = ? AND token <> ?");
+$delStmt->execute([$user['id'], $user['token']]);
 
 logAudit($user['id'], $user['name'], $user['role'], 'PASSWORD_CHANGE', 'USER', $user['id'], 'User changed password.');
 

@@ -62,7 +62,7 @@
 |---|-----|-----|
 | 49 | **POS product search crash (bug #46 එකේම class එක, ඉතිරි වුණු තැනක්)** — `src/components/pos/ProductGrid.tsx` එකේ තාම `v.sku.toLowerCase()` **unguarded**. Bug #46 වලින් prove වුණා runtime data එකේ (legacy import/restore) variant එකක `sku` අතුරුදහන් වෙන්න පුළුවන් කියලා (type එකේ `sku: string` කියලා තිබුණත්). `GET /api/products` එක ඒ variants නොවෙනස්ව පසුකර යවනවා (`productForClient` normalize නොකරයි). ඒ නිසා POS එකේ product search කළාම `TypeError: Cannot read properties of undefined (reading 'toLowerCase')` → React error boundary → **blank screen**. Bug #46 fix වුණේ `DailyStockSheet` + `ProductManagement` වලට පමණයි; **`ProductGrid` අතපසු වී තිබුණා** | `String(v.sku || '').toLowerCase()` guard (consistency සඳහා `String(v.size || '')` ද එකතු කළා). දැන් legacy/imported variant එකක sku නැති වුණත් search crash නොවේ ✅ |
 | 50 | **Weak minimum password length — 4 characters** — user create (`userCreateSchema`: `z.string().min(4)`), `POST /api/auth/change-password` (`< 4`), `PUT /api/users/:id` (`< 4`), සහ frontend `UserManagement.tsx` (3 තැනක `< 4`) — සියල්ල 4-char passwords පිළිගත්තා. OWASP/NIST recommend **8+** | සියලුම minimum **8** දක්වා ඉහළ නැංවූවා (server `min(8)`, change-password `< 8`, PUT user `< 8`, UserManagement `< 8`). Verified: 4-char → 400 "at least 8", 8-char → created ✅. පවතින users වල login වලට බලපාන්නේ නැහැ (login length check නොකරයි); e2e suite එකේ passwords සියල්ල ≥8 නිසා tests බිඳුනේ නැහැ ✅ |
-| — | **High-severity dependency vulnerability (`xlsx@0.18.5`)** — `npm audit` එකේ **1 high severity**: prototype pollution (GHSA-4r6h-8v6p-xvw6) + ReDoS (GHSA-5pgg-2g8v-p4x9). **No fix available** (npm එකේ patched version නැත). එය පාවිච්චි වන්නේ **client-side පමණයි** (`StockImportModal.tsx` Excel parse + `exportUtils.ts` export) නිසා impact එක cashier/browser session එකට සීමා වේ — නමුත් malicious Excel file එකකින් browser එකේ ReDoS/prototype pollution අවුල් කරන්න පුළුවන් | **Fix නැත** — known limitation ලෙස document කළා. ඊළඟ release එකකදී maintained Excel parser එකකට (e.g. `exceljs`) මාරු කිරීම recommend ✅ |
+| — | **High-severity dependency vulnerability (`xlsx@0.18.5`)** — `npm audit` එකේ **1 high severity**: prototype pollution (GHSA-4r6h-8v6p-xvw6) + ReDoS (GHSA-5pgg-2g8v-p4x9). **No fix available** (npm එකේ patched version නැත). එය පාවිච්චි වන්නේ **client-side පමණයි** (`StockImportModal.tsx` Excel parse + `exportUtils.ts` export) නිසා impact එක cashier/browser session එකට සීමා වේ — නමුත් malicious Excel file එකකින් browser එකේ ReDoS/prototype pollution අවුල් කරන්න පුළුවන් | **✅ විසඳන ලදී** — `xlsx` වෙනුවට `read-excel-file` (parse), `write-excel-file` (export) සහ `papaparse` (CSV) මාරු කළා (`npm audit`: 0 vulnerabilities) |
 | — | **Room booking silent date default (minor)** — `checkInDate`/`checkOutDate` එක්ක එවන්නේ නැත්නම් server එක නිශ්ශබ්දව `now` / `now+1day` ලෙස default කරනවා. Frontend එක හැම විටම දෙකම එවන නිසා live bug එකක් නොවේ; API client එකක් dates අතහැරියොත් unexpected booking එකක් නිර්මාණය වේ | Breaking change එකක් වළක්වන්න හිතාමතාම වෙනස් නොකළා. Note කර ඇත ✅ |
 
 **Verification (fresh DB, live server):** e2e suites 141/141 pass (Seven Audit Round එකට පෙර තිබූ සියල්ල regression නැත). `tsc --noEmit` clean ✅ · production build OK ✅ · password min hardening verified (4→reject, 8→accept) ✅ · ProductGrid sku fix typecheck/build OK ✅.
@@ -174,6 +174,35 @@
 | 21 | Out-of-stock single-variant product එකක card එකට click කළ විට කෙළින්ම cart එකට ගියා | `addToCart` stock guard + පැහැදිලි message |
 | 22 | Cart quantity එක stock එකට වඩා වැඩි කළ හැකි විය | `updateCartQuantity` clamp |
 | 23 | Live preview / tunnel host වලින් app එක load නොවීය (`Blocked request. This host is not allowed`) | `allowedHosts` (vite.config + server.ts vite middleware), hardcoded HMR host ඉවත් කළා |
+
+## 🐘 PHP Backend (Hostinger) — 2026-08-24
+
+`api/` folder එකේ තිබූ fatal errors. මේවා නිසා Hostinger shared hosting එකේදී endpoints 500 දුන්නා.
+
+| # | Bug | කලින් සිදුවූ දේ | Fix |
+|---|-----|----------------|-----|
+| P1 | `api/reports/daily-stock-sheet.php` → `require_once '/../db.php'` | `api/db.php` කියන file එකක් නැහැ → **PHP Fatal error** (500) | ඉවත් කළා (`middleware.php` දැනටමත් `config/database.php` load කරනවා) |
+| P2 | එම file එකේම `authenticate()` | නොපවතින function එකක් → **Fatal error** | `requireAuth()` |
+| P3 | එම file එකේම `http_response_type()` (×4) | නොපවතින function එකක් → **Fatal error** | `http_response_code()` / `sendError()` |
+| P4 | එම file එකේම `get_db_connection()` | නොපවතින function එකක් → **Fatal error** | `Database::getConnection()` |
+| P5 | Daily sheet එකේ In-Hand ගණනය Node version එකට වඩා වෙනස් (positive adjustments "received" ලෙස නොසැලකුණා) | Paper register එකේ opening stock වැරදියි | `server.ts` logic එකට සමාන කළා |
+| P6 | Daily sheet POST — `variantId` නැති row එකක් ආවොත් PHP warning, `newBalance` සීමා නැහැ, audit log නැහැ | Reconcile එක අසම්පූර්ණයි / transaction එක open ඉතුරු විය හැක | Validation + audit log + `inTransaction()` rollback |
+| P7 | Daily sheet response එකේ `companyName` නැහැ | UI එකේ brand නම පෙන්වන්නේ නැහැ | `LEFT JOIN companies` |
+| P8 | `change-password.php` — `currentPassword` අනිවාර්ය නැහැ | Token එකක් තියෙන ඕනෑම කෙනෙකුට password එක වෙනස් කළ හැකි විය (Node එකේ fix කර තිබුණත් PHP එකේ නැහැ) | අනිවාර්ය + වැරදි password check + same-password check + 8..128 සීමා + වෙනත් sessions revoke |
+| P9 | `users/index.php` PUT — තමන්ගේම account එක disable/demote කළ හැකි විය | Super Admin ලොක් වෙනවා | Self-guard + PATCH toggle + email validation/duplicate check + name/password length checks |
+| P10 | `generateNextNumber()` — `COUNT(*)` මත පදනම් විය | Bill එකක් delete/void කළාම අංකය නැවත භාවිතා වී **duplicate key (SQLSTATE 23000)** | ඉහළම අංකයෙන් ඊළඟ අංකය සාදන `nextSequenceNumber()` |
+| P11 | CORS — ඕනෑම Origin එකක් `Allow-Credentials: true` සමග reflect විය | වෙනත් site එකකට authenticated requests යැවිය හැකි විය | Same-host (හෝ `CORS_ALLOWED_ORIGINS`) origin පමණයි |
+| P12 | `config/database.php` — `$_SERVER['PHP_SELF']` CLI එකේදී notice එකක් දුන්නා | Notice/warning | `?? ''` guard |
+
+### PHP backend පරීක්ෂා කරන ආකාරය (PHP install එකක් නැතුව)
+
+```bash
+npm run check:php
+```
+
+`tools/check-php.mjs` — syntax parse (php-parser), require targets, undefined functions, සහ
+`database.sql` schema එකට එරෙහිව හැම SQL statement එකක්ම පරීක්ෂා කරනවා. Fix කරන්න කලින්
+ඉහත P1–P4 එය exit 1 සමග අල්ලා ගන්නවා; දැන් සියල්ල pass.
 
 ## ✅ Verification
 
