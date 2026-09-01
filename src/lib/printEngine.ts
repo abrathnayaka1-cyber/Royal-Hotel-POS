@@ -946,7 +946,10 @@ export async function printFunctionBookingTicket(
   const pageWidth = is58mm ? '58mm' : '80mm';
   const bodyWidth = is58mm ? '48mm' : '72mm';
 
-  const eventDateObj = new Date(booking.eventDate || booking.createdAt);
+  // Printed on the hotel's own calendar day: going through toISOString() moved
+  // a "2026-11-01" event to the previous day for any timezone behind UTC.
+  const eventDayKey = String(booking.eventDate || '').slice(0, 10);
+  const eventDateObj = eventDayKey ? new Date(`${eventDayKey}T00:00:00`) : new Date(booking.createdAt || Date.now());
 
   const formattedCreated = new Date(booking.createdAt).toLocaleString('en-US', {
     month: 'short',
@@ -969,8 +972,29 @@ export async function printFunctionBookingTicket(
     booking.session === 'evening' ? 'Evening Session (6 PM - 12 AM)' :
     'Full Day Session';
 
-  const eventTypeLabel = booking.eventType.replace('_', ' ').toUpperCase();
-  const statusLabel = booking.status.toUpperCase().replace('_', ' ');
+  // The printed policy block used to hard-code "Hall opens 8:00 AM / Event ends
+  // 12:00 AM" on every ticket, including Day-session bookings that were quoted
+  // 9 AM - 5 PM. It now follows the booked session, exactly like the on-screen
+  // preview, so the customer never signs a ticket that contradicts the hall team.
+  const sessionHours =
+    booking.session === 'day'
+      ? { open: '8:30 AM', event: '9:00 AM - 5:00 PM', out: '6:00 PM' }
+      : booking.session === 'evening'
+      ? { open: '5:00 PM', event: '6:00 PM - 12:00 AM', out: '1:00 AM' }
+      : { open: '8:00 AM', event: '9:00 AM - 12:00 AM', out: '1:00 AM' };
+
+  // Defensive: every string below is read straight off a stored booking. One
+  // legacy row without an eventType/status/print details threw inside the print
+  // helper, so the cashier pressed "Print" and nothing at all happened.
+  const eventTypeLabel = String(booking.eventType || 'other').replace('_', ' ').toUpperCase();
+  const statusLabel = String(booking.status || 'confirmed').toUpperCase().replace('_', ' ');
+  const paymentLabel = String(booking.paymentMethod || 'cash').toUpperCase().replace('_', ' ');
+  const depositRef = String(
+    (booking as any).paymentDetails?.reference || ''
+  ).trim();
+  const depositBank = String(
+    (booking as any).paymentDetails?.bank || ''
+  ).trim();
 
   const html = `
     <!DOCTYPE html>
@@ -1131,7 +1155,7 @@ export async function printFunctionBookingTicket(
           </tr>` : ''}
           <tr>
             <td><strong>Expected Guests:</strong></td>
-            <td class="text-right">${booking.expectedGuests} Person(s)</td>
+            <td class="text-right">${Number(booking.expectedGuests) || 0} Person(s)${hall?.capacity ? ` / max ${hall.capacity}` : ''}</td>
           </tr>
         </table>
 
@@ -1205,8 +1229,13 @@ export async function printFunctionBookingTicket(
           </tr>
           <tr>
             <td>Payment Method:</td>
-            <td class="text-right">${escapeHtml(booking.paymentMethod.toUpperCase().replace('_', ' '))}</td>
+            <td class="text-right">${escapeHtml(paymentLabel)}</td>
           </tr>
+          ${depositRef || depositBank ? `
+          <tr>
+            <td>Deposit Ref:</td>
+            <td class="text-right">${escapeHtml([depositRef, depositBank].filter(Boolean).join(' • '))}</td>
+          </tr>` : ''}
         </table>
 
         ${booking.notes ? `
@@ -1220,7 +1249,8 @@ export async function printFunctionBookingTicket(
 
         <!-- Hotel Policies -->
         <div style="font-size: 9.5px; line-height: 1.25; margin: 4px 0;">
-          <div>&bull; Hall opens: <strong>8:00 AM</strong> &bull; Event end: <strong>12:00 AM</strong></div>
+          <div>&bull; Hall opens: <strong>${sessionHours.open}</strong> &bull; Event: <strong>${sessionHours.event}</strong> &bull; Hand-over: <strong>${sessionHours.out}</strong></div>
+          <div>&bull; One event per hall per day &bull; Balance due before the event starts</div>
           <div>&bull; Outside catering/bands need prior approval</div>
           <div>&bull; Reservations: <strong>Ext. 100 / Reception</strong></div>
         </div>

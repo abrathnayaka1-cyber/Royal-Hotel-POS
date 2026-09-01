@@ -5724,6 +5724,269 @@ app.post('/api/room-bookings/:id/payment', authMiddleware, (req: Request, res: R
 // (same split as the Rooms module).
 // ==========================================
 
+// ---- Shared guards for the Events module ----------------------------------
+// Every single money field used to be copied from the request verbatim: a
+// per-plate rate of 1e9 with 1e9 plates produced a Rs. 1,000,000,000,060,000
+// "booking", `paymentMethod: "paypal"` was stored as-is (and broke the payment
+// method reports), `customerPhone: "abc"` made the customer un-contactable, and
+// `expectedGuests: 99999` was accepted for a 350-seat hall. Events also had no
+// date ceiling at all, so a mistyped year (2038 instead of 2028) blocked the
+// hall on that day forever. These constants are the single source of truth for
+// the limits — the POS booking form mirrors them.
+const EVENT_TYPES: FunctionBooking['eventType'][] = ['wedding', 'birthday', 'meeting', 'party', 'corporate', 'other'];
+const EVENT_SESSIONS: FunctionBooking['session'][] = ['day', 'evening', 'full_day'];
+const EVENT_PAYMENT_METHODS: string[] = ['cash', 'card', 'bank_transfer', 'other'];
+const EVENT_MAX_LEAD_DAYS = 730;          // ≈ 2 years out; anything later is a typo
+const EVENT_LINE_CAP = 10000000;          // hall charge / extra services / additional charges
+const EVENT_PLATE_RATE_CAP = 1000000;     // one single plate
+const EVENT_MAX_PLATES = 100000;
+const EVENT_GUEST_CAP = 100000;
+const EVENT_MAX_HALL_CAPACITY = 10000;   // seats configured on a hall (master data)
+const EVENT_GRAND_TOTAL_CAP = 50000000;   // one event invoice cannot exceed this
+const EVENT_NOTES_LIMIT = 2000;           // notes grow with payments/cancellations
+
+/** Day key ("YYYY-MM-DD") from a client-supplied date, in the hotel's LOCAL day. */
+function eventDayKeyFromInput(raw: unknown): string | null {
+  if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+  const text = String(raw).trim();
+  if (!text) return null;
+  // A plain <input type="date"> value (YYYY-MM-DD) is a calendar day, not an
+  // instant — never re-derive it through UTC, or a UTC+05:30 hotel loses a day.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    const parsed = new Date(`${text}T00:00:00`);
+    if (isNaN(parsed.getTime()) || localDateKey(parsed) !== text) return null; // e.g. 2026-02-31
+    return text;
+  }
+  const parsed = new Date(text);
+  if (isNaN(parsed.getTime())) return null;
+  return localDateKey(parsed);
+}
+
+/** Day key of an event date already stored on a booking (always YYYY-MM-DD…). */
+function storedEventDayKey(booking: { eventDate?: string }): string {
+  return String(booking.eventDate || '').slice(0, 10);
+}
+
+/** Every money field a booking owns, fully derived. Shared by create & edit. */
+type EventBookingFields = Pick<
+  FunctionBooking,
+  | 'eventType' | 'session' | 'customerName' | 'customerPhone' | 'customerAddress'
+  | 'eventDate' | 'expectedGuests' | 'hallCharge' | 'perPlateRate' | 'numberOfPlates'
+  | 'plateCharge' | 'extraServices' | 'discount' | 'tax' | 'grandTotal'
+  | 'advancePaid' | 'balanceDue' | 'paymentMethod'
+>;
+
+function normalizeEventPaymentMethod(
+  raw: unknown,
+  fallback: FunctionBooking['paymentMethod'] = 'cash'
+): FunctionBooking['paymentMethod'] {
+  const value = raw === undefined || raw === null || raw === '' ? String(fallback) : String(raw);
+  return (EVENT_PAYMENT_METHODS as string[]).includes(value)
+    ? (value as FunctionBooking['paymentMethod'])
+    : fallback;
+}
+
+/**
+ * Validates an event booking payload and derives EVERY money field from master
+ * data (hall rate, hotel tax rate, discount policy) instead of trusting the
+ * client. Shared by "new booking" and "edit booking" so the two can never
+ * drift apart.
+ */
+function validateEventBookingPayload(
+  hall: FunctionHall,
+  body: any,
+  user: User,
+  opts: { excludeBookingId?: string; lockedAdvance?: number } = {}
+): { error?: string; errorStatus?: number; fields?: EventBookingFields } {
+  const customerName = typeof body.customerName === 'string' ? body.customerName.trim() : '';
+  if (customerName.length < 2) {
+    return { error: 'Customer name is required (at least 2 characters).', errorStatus: 400 };
+  }
+  const customerPhone = String(body.customerPhone ?? '').trim();
+  if (customerPhone.replace(/\D/g, '').length < 7) {
+    return { error: 'Please enter a valid customer phone number (at least 7 digits).', errorStatus: 400 };
+  }
+
+  // ---- Event date: real day, never in the past, never a typo-year away ----
+  const eventDayKey = eventDayKeyFromInput(body.eventDate);
+  if (!eventDayKey) {
+    return { error: 'A valid event date is required (YYYY-MM-DD).', errorStatus: 400 };
+  }
+  const todayKey = localDateKey(new Date());
+  if (eventDayKey < todayKey) {
+    return {
+      error: `The event date (${eventDayKey}) is in the past. Choose today or a future date.`,
+      errorStatus: 400
+    };
+  }
+  const leadDays = Math.round(
+    (new Date(`${eventDayKey}T00:00:00`).getTime() - new Date(`${todayKey}T00:00:00`).getTime()) / 86400000
+  );
+  if (leadDays > EVENT_MAX_LEAD_DAYS) {
+    return {
+      error: `An event can be booked at most ${EVENT_MAX_LEAD_DAYS} days ahead — ${eventDayKey} is ${leadDays} days away. Please check the year.`,
+      errorStatus: 400
+    };
+  }
+
+  // One event per hall per day. Day / evening sessions share the hall's kitchen
+  // and the single hall booking calendar, so a second event on the same date is
+  // always rejected — including when a booking is being RESCHEDULED onto it
+  // (the booking being edited must not conflict with itself).
+  // COMPLETED events block the day too: closing an event early settled the
+  // money, and because only "confirmed" bookings were checked the hall looked
+  // free that night — a second couple could then be sold the same hall, the
+  // same date, with a paid ticket on file for both.
+  const conflicting = (db.raw.functionBookings || []).find(b => {
+    if (b.hallId !== hall.id || (b.status !== 'confirmed' && b.status !== 'completed')) return false;
+    if (opts.excludeBookingId && b.id === opts.excludeBookingId) return false;
+    return storedEventDayKey(b) === eventDayKey;
+  });
+  if (conflicting) {
+    return {
+      error: `"${hall.hallName}" is already booked on ${eventDayKey} (${conflicting.bookingNumber} — ${conflicting.customerName}). Choose another date or hall.`,
+      errorStatus: 400
+    };
+  }
+
+  // ---- Guest count: capped by what the hall can actually hold ----
+  const guestsRaw = body.expectedGuests === undefined || body.expectedGuests === null || body.expectedGuests === ''
+    ? 50
+    : Number(body.expectedGuests);
+  if (!Number.isFinite(guestsRaw) || guestsRaw <= 0) {
+    return { error: 'Expected guests must be a positive number.', errorStatus: 400 };
+  }
+  const guests = Math.round(guestsRaw);
+  if (guests > EVENT_GUEST_CAP) {
+    return { error: `Expected guests cannot exceed ${EVENT_GUEST_CAP.toLocaleString()}.`, errorStatus: 400 };
+  }
+  if (guests > hall.capacity) {
+    return {
+      error: `"${hall.hallName}" holds a maximum of ${hall.capacity} guests — the event expects ${guests}. Pick a bigger hall or reduce the guest count.`,
+      errorStatus: 400
+    };
+  }
+
+  // ---- Hall charge: master data, only a Super Admin may quote otherwise ----
+  let hallRate = Number(hall.ratePerDay);
+  if (!Number.isFinite(hallRate) || hallRate < 0) hallRate = 0;
+  const requestedHallCharge = body.hallCharge;
+  if (requestedHallCharge !== undefined && requestedHallCharge !== null && requestedHallCharge !== '') {
+    if (user.role !== 'super_admin') {
+      hallRate = Number(hall.ratePerDay); // silently ignore a tampered charge
+    } else {
+      const override = Number(requestedHallCharge);
+      if (!Number.isFinite(override) || override < 0 || override > EVENT_LINE_CAP) {
+        return { error: `Invalid hall charge (must be between 0 and ${EVENT_LINE_CAP.toLocaleString()}).`, errorStatus: 400 };
+      }
+      hallRate = override;
+    }
+  }
+
+  const num = (value: unknown, label: string, cap: number): number | { error: string } => {
+    if (value === undefined || value === null || value === '') return 0;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return { error: `${label} must be a number between 0 and ${cap.toLocaleString()}.` };
+    }
+    if (parsed > cap) {
+      return { error: `${label} cannot exceed ${cap.toLocaleString()}.` };
+    }
+    return Number(parsed.toFixed(2));
+  };
+
+  const plateRate = num(body.perPlateRate, 'Per-plate rate', EVENT_PLATE_RATE_CAP);
+  if (typeof plateRate !== 'number') return { error: plateRate.error, errorStatus: 400 };
+  const extra = num(body.extraServices, 'Extra services / decor', EVENT_LINE_CAP);
+  if (typeof extra !== 'number') return { error: extra.error, errorStatus: 400 };
+
+  let plates = 0;
+  if (body.numberOfPlates !== undefined && body.numberOfPlates !== null && body.numberOfPlates !== '') {
+    const parsedPlates = Number(body.numberOfPlates);
+    if (!Number.isFinite(parsedPlates) || parsedPlates < 0) {
+      return { error: 'Number of plates must be 0 or more.', errorStatus: 400 };
+    }
+    plates = Math.round(parsedPlates);
+    if (plates > EVENT_MAX_PLATES) {
+      return { error: `Number of plates cannot exceed ${EVENT_MAX_PLATES.toLocaleString()}.`, errorStatus: 400 };
+    }
+  }
+  const plateCharge = Number((plateRate * plates).toFixed(2));
+
+  // Tax is ALWAYS derived from the hotel's configured tax rate (hall + plates
+  // + extra services, exactly what the booking UI shows). The client-supplied
+  // `tax` used to be trusted verbatim — a tampered `tax: 0` made an event
+  // tax-free and a tampered `tax: 99999` inflated the bill.
+  const taxableBase = Number((hallRate + plateCharge + extra).toFixed(2));
+  const taxAmt = Number(((taxableBase * (db.raw.settings.taxRate || 0)) / 100).toFixed(2));
+  // Same discount policy as the POS cart and the room bookings.
+  const disc = clampBookingDiscount(body.discount, taxableBase);
+  const grandTotal = Number(Math.max(0, taxableBase + taxAmt - disc).toFixed(2));
+  if (grandTotal > EVENT_GRAND_TOTAL_CAP) {
+    return {
+      error: `The event total is above the allowed ceiling of ${db.raw.settings.currencySymbol || 'Rs.'} ${EVENT_GRAND_TOTAL_CAP.toLocaleString()}. Check the plate rate, plate count and extra services.`,
+      errorStatus: 400
+    };
+  }
+
+  // An advance that has already been collected can never be edited away — the
+  // edit form only re-prices what is still to come.
+  let advance = 0;
+  if (opts.lockedAdvance !== undefined) {
+    advance = Number(opts.lockedAdvance) || 0;
+    if (grandTotal < advance) {
+      const cur = db.raw.settings.currencySymbol || 'Rs.';
+      return {
+        error: `The new total (${cur} ${grandTotal.toFixed(2)}) is below the advance already received (${cur} ${advance.toFixed(2)}). Refund or adjust the advance first.`,
+        errorStatus: 400
+      };
+    }
+  } else {
+    // An absent advance means "nothing collected yet", exactly like the POS
+    // register's own default — only a PRESENT value can be invalid.
+    const rawAdvance = body.advancePaid;
+    const requestedAdvance = rawAdvance === undefined || rawAdvance === null || rawAdvance === '' ? 0 : Number(rawAdvance);
+    if (!Number.isFinite(requestedAdvance) || requestedAdvance < 0) {
+      return { error: 'Advance paid must be 0 or more.', errorStatus: 400 };
+    }
+    if (requestedAdvance > grandTotal) {
+      return { error: 'Advance cannot exceed the grand total', errorStatus: 400 };
+    }
+    advance = Number(requestedAdvance.toFixed(2));
+  }
+
+  const paymentMethod = normalizeEventPaymentMethod(body.paymentMethod);
+
+  return {
+    fields: {
+      eventType: EVENT_TYPES.includes(body.eventType) ? body.eventType : 'other',
+      session: EVENT_SESSIONS.includes(body.session) ? body.session : 'full_day',
+      customerName: customerName.slice(0, 128),
+      customerPhone: customerPhone.slice(0, 32),
+      customerAddress: body.customerAddress ? String(body.customerAddress).trim().slice(0, 500) : '',
+      eventDate: `${eventDayKey}T00:00:00.000Z`,
+      expectedGuests: guests,
+      hallCharge: Number(hallRate.toFixed(2)),
+      perPlateRate: plateRate,
+      numberOfPlates: plates,
+      plateCharge,
+      extraServices: extra,
+      discount: disc,
+      tax: taxAmt,
+      grandTotal,
+      advancePaid: advance,
+      balanceDue: Number(Math.max(0, grandTotal - advance).toFixed(2)),
+      paymentMethod: paymentMethod as FunctionBooking['paymentMethod']
+    }
+  };
+}
+
+/** Appends a bounded line to a booking's notes so the JSON DB cannot bloat. */
+function appendEventBookingNotes(booking: FunctionBooking, line: string): string {
+  const merged = `${booking.notes ? booking.notes + ' | ' : ''}${line}`;
+  return merged.length > EVENT_NOTES_LIMIT ? merged.slice(merged.length - EVENT_NOTES_LIMIT) : merged;
+}
+
 app.get('/api/function-halls', authMiddleware, (req: Request, res: Response) => {
   try {
     const { status } = req.query;
@@ -5733,7 +5996,26 @@ app.get('/api/function-halls', authMiddleware, (req: Request, res: Response) => 
       halls = halls.filter(h => h.status === status);
     }
 
-    res.json(halls);
+    // Next booked date + how many events are still open on each hall, so the
+    // POS hall cards and the admin grid can show real availability without
+    // pulling the whole booking list.
+    const nowDay = localDateKey(new Date());
+    const enriched = halls.map(hall => {
+      const onHall = (db.raw.functionBookings || []).filter(
+        b => b.hallId === hall.id && b.status === 'confirmed'
+      );
+      const upcoming = onHall.filter(b => storedEventDayKey(b) >= nowDay);
+      return {
+        ...hall,
+        upcomingCount: upcoming.length,
+        nextEventDate: upcoming.length
+          ? [...upcoming].sort((a, b) => storedEventDayKey(a).localeCompare(storedEventDayKey(b)))[0].eventDate
+          : null,
+        openBalance: Number(onHall.reduce((sum, b) => sum + Number(b.balanceDue || 0), 0).toFixed(2))
+      };
+    });
+
+    res.json(enriched);
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to fetch function halls.' });
   }
@@ -5744,18 +6026,29 @@ app.post('/api/function-halls', authMiddleware, requireRole('super_admin'), (req
     const user = (req as any).user as User;
     const { hallName, hallType, floor, capacity, ratePerDay, amenities, status, notes } = req.body;
 
-    if (!hallName || typeof hallName !== 'string' || !hallName.trim() || !hallType || !ratePerDay) {
-      return res.status(400).json({ error: 'Hall name, type, and rate are required.' });
+    if (!hallName || typeof hallName !== 'string' || !hallName.trim() || !String(hallType || '').trim()) {
+      return res.status(400).json({ error: 'Hall name and hall type are required.' });
     }
 
     const rate = Number(ratePerDay);
-    if (isNaN(rate) || rate <= 0 || rate > 10000000) {
-      return res.status(400).json({ error: 'Invalid hall rate (must be 1-10,000,000)' });
+    if (!Number.isFinite(rate) || rate <= 0 || rate > EVENT_LINE_CAP) {
+      return res.status(400).json({ error: `Invalid hall rate (must be between 1 and ${EVENT_LINE_CAP.toLocaleString()})` });
     }
 
-    const existing = (db.raw.functionHalls || []).find(h => h.hallName.trim().toLowerCase() === hallName.trim().toLowerCase());
+    // A capacity of 0 used to be silently rewritten to 100 — which then capped
+    // every booking on this hall at 100 guests with no explanation at all.
+    const seats = capacity === undefined || capacity === null || capacity === '' ? 100 : Number(capacity);
+    if (!Number.isFinite(seats) || seats < 1 || seats > EVENT_MAX_HALL_CAPACITY) {
+      return res.status(400).json({ error: `Hall capacity must be between 1 and ${EVENT_MAX_HALL_CAPACITY.toLocaleString()} guests.` });
+    }
+
+    if (status !== undefined && status !== '' && !['available', 'maintenance'].includes(String(status))) {
+      return res.status(400).json({ error: 'Hall status must be "available" or "maintenance".' });
+    }
+
+    const existing = (db.raw.functionHalls || []).find(h => String(h.hallName || '').trim().toLowerCase() === hallName.trim().toLowerCase());
     if (existing) {
-      return res.status(400).json({ error: `A hall named "${hallName}" already exists.` });
+      return res.status(400).json({ error: `A hall named "${hallName.trim()}" already exists.` });
     }
 
     const newHall: FunctionHall = {
@@ -5763,15 +6056,20 @@ app.post('/api/function-halls', authMiddleware, requireRole('super_admin'), (req
       hallName: hallName.trim().slice(0, 128),
       hallType: String(hallType).trim().slice(0, 128),
       floor: floor ? String(floor).trim().slice(0, 64) : undefined,
-      capacity: Math.max(1, Math.min(10000, Number(capacity) || 100)),
+      capacity: Math.round(seats),
       ratePerDay: rate,
-      amenities: Array.isArray(amenities) ? amenities.map((a: any) => String(a).slice(0, 64)).slice(0, 20) : [],
+      amenities: Array.isArray(amenities) ? amenities.map((a: any) => String(a).trim().slice(0, 64)).filter((a: string) => a.length > 0).slice(0, 20) : [],
       status: status === 'maintenance' ? 'maintenance' : 'available',
       notes: notes ? String(notes).slice(0, 1000) : '',
       isActive: true,
       createdAt: new Date().toISOString()
     };
 
+    // Older databases (pre-v1.4.0) simply did not have this key — pushing onto
+    // it threw a raw TypeError (500) instead of saving the hall.
+    if (!Array.isArray(db.raw.functionHalls)) {
+      db.raw.functionHalls = [];
+    }
     db.raw.functionHalls.push(newHall);
     db.save();
 
@@ -5795,28 +6093,71 @@ app.put('/api/function-halls/:id', authMiddleware, requireRole('super_admin'), (
 
     const { hallName, hallType, floor, capacity, ratePerDay, amenities, status, notes, isActive } = req.body;
 
-    if (hallName !== undefined && typeof hallName === 'string' && hallName.trim().toLowerCase() !== hall.hallName.toLowerCase()) {
-      const existing = (db.raw.functionHalls || []).find(h => h.id !== id && h.hallName.trim().toLowerCase() === hallName.trim().toLowerCase());
-      if (existing) {
-        return res.status(400).json({ error: `A hall named "${hallName}" already exists.` });
+    // A rename that only changed the CAPITALISATION used to be dropped on the
+    // floor (the old case-insensitive comparison skipped the assignment), so
+    // "grand ballroom" could never be corrected to "Grand Ballroom".
+    if (hallName !== undefined) {
+      if (typeof hallName !== 'string' || !hallName.trim()) {
+        return res.status(400).json({ error: 'Hall name cannot be empty.' });
       }
-      hall.hallName = hallName.trim().slice(0, 128);
+      const nextName = hallName.trim().slice(0, 128);
+      const existing = (db.raw.functionHalls || []).find(
+        h => h.id !== id && String(h.hallName || '').trim().toLowerCase() === nextName.toLowerCase()
+      );
+      if (existing) {
+        return res.status(400).json({ error: `A hall named "${nextName}" already exists.` });
+      }
+      hall.hallName = nextName;
     }
-    if (hallType !== undefined && typeof hallType === 'string') hall.hallType = hallType.trim().slice(0, 128);
-    if (floor !== undefined && typeof floor === 'string') hall.floor = floor.trim().slice(0, 64);
-    if (capacity !== undefined) hall.capacity = Math.max(1, Math.min(10000, Number(capacity) || 100));
+    if (hallType !== undefined) {
+      if (typeof hallType !== 'string' || !hallType.trim()) {
+        return res.status(400).json({ error: 'Hall type cannot be empty.' });
+      }
+      hall.hallType = hallType.trim().slice(0, 128);
+    }
+    if (floor !== undefined && typeof floor === 'string') hall.floor = floor.trim().slice(0, 64) || undefined;
+    if (capacity !== undefined) {
+      const seats = Number(capacity);
+      // An invalid value used to be ignored silently — the request answered 200
+      // while the hall kept capping bookings with its old capacity.
+      if (!Number.isFinite(seats) || seats < 1 || seats > EVENT_MAX_HALL_CAPACITY) {
+        return res.status(400).json({ error: `Hall capacity must be between 1 and ${EVENT_MAX_HALL_CAPACITY.toLocaleString()} guests.` });
+      }
+      hall.capacity = Math.round(seats);
+    }
     if (ratePerDay !== undefined) {
       const rate = Number(ratePerDay);
-      if (!isNaN(rate) && rate > 0 && rate <= 10000000) hall.ratePerDay = rate;
+      if (!Number.isFinite(rate) || rate <= 0 || rate > EVENT_LINE_CAP) {
+        return res.status(400).json({ error: `Invalid hall rate (must be between 1 and ${EVENT_LINE_CAP.toLocaleString()})` });
+      }
+      hall.ratePerDay = rate;
     }
-    if (amenities !== undefined && Array.isArray(amenities)) hall.amenities = amenities.map((a: any) => String(a).slice(0, 64)).slice(0, 20);
-    if (status !== undefined && ['available', 'maintenance'].includes(status)) hall.status = status;
+    if (amenities !== undefined && Array.isArray(amenities)) {
+      hall.amenities = amenities
+        .map((a: any) => String(a).trim().slice(0, 64))
+        .filter((a: string) => a.length > 0)
+        .slice(0, 20);
+    }
+    if (status !== undefined) {
+      if (!['available', 'maintenance'].includes(String(status))) {
+        return res.status(400).json({ error: 'Hall status must be "available" or "maintenance".' });
+      }
+      hall.status = status;
+    }
     if (notes !== undefined && typeof notes === 'string') hall.notes = notes.slice(0, 1000);
     if (isActive !== undefined) hall.isActive = Boolean(isActive);
 
+    // Rate / capacity edits only apply to FUTURE bookings (every booking keeps
+    // its own signed snapshot), so upcoming events are surfaced in the audit log
+    // instead of being silently re-priced or cancelled.
+    const todayKey = localDateKey(new Date());
+    const eventsAhead = (db.raw.functionBookings || []).filter(
+      b => b.hallId === hall.id && b.status === 'confirmed' && storedEventDayKey(b) >= todayKey
+    );
+
     db.save();
 
-    db.logAudit(user.id, user.name, user.role, 'UPDATE_FUNCTION_HALL', 'FUNCTION_HALL', hall.id, `Updated function hall "${hall.hallName}" (Status: ${hall.status})`);
+    db.logAudit(user.id, user.name, user.role, 'UPDATE_FUNCTION_HALL', 'FUNCTION_HALL', hall.id, `Updated function hall "${hall.hallName}" (Status: ${hall.status}${hall.isActive ? '' : ', retired'}${eventsAhead.length ? `, ${eventsAhead.length} upcoming event(s) keep their booked rates` : ''})`);
 
     res.json(hall);
   } catch (err: any) {
@@ -5836,11 +6177,16 @@ app.delete('/api/function-halls/:id', authMiddleware, requireRole('super_admin')
     }
 
     const hall = halls[index];
-    const upcoming = (db.raw.functionBookings || []).find(
-      b => b.hallId === id && b.status === 'confirmed' && new Date(b.eventDate).getTime() >= Date.now() - 86400000
-    );
-    if (upcoming) {
-      return res.status(400).json({ error: `Cannot delete "${hall.hallName}" — it has an upcoming event booking (${upcoming.bookingNumber}). Cancel it first.` });
+    // The old guard only looked at events up to tomorrow, so a hall could be
+    // deleted while it still had a confirmed booking next month — that booking
+    // then pointed at a hall record that no longer exists (and its uncollected
+    // balance could never be settled again).
+    const openOnHall = (db.raw.functionBookings || []).filter(b => b.hallId === id && b.status !== 'cancelled');
+    if (openOnHall.length > 0) {
+      const unpaid = openOnHall.filter(b => Number(b.balanceDue || 0) > 0);
+      return res.status(400).json({
+        error: `Cannot delete "${hall.hallName}" — it still has ${openOnHall.length} event booking(s) (e.g. ${openOnHall[0].bookingNumber}${unpaid.length ? `, ${unpaid.length} with an open balance` : ''}). Complete or cancel them first, or de-activate the hall instead.`
+      });
     }
 
     halls.splice(index, 1);
@@ -5857,7 +6203,7 @@ app.delete('/api/function-halls/:id', authMiddleware, requireRole('super_admin')
 app.get('/api/function-bookings', authMiddleware, (req: Request, res: Response) => {
   try {
     const { status, hallId, search } = req.query;
-    let bookings = db.raw.functionBookings || [];
+    let bookings = [...(db.raw.functionBookings || [])];
 
     if (status && status !== 'all') {
       bookings = bookings.filter(b => b.status === status);
@@ -5867,17 +6213,17 @@ app.get('/api/function-bookings', authMiddleware, (req: Request, res: Response) 
     }
     if (search && typeof search === 'string') {
       const q = search.toLowerCase();
-      bookings = bookings.filter(
-        b =>
-          b.bookingNumber.toLowerCase().includes(q) ||
-          b.customerName.toLowerCase().includes(q) ||
-          b.customerPhone.toLowerCase().includes(q) ||
-          b.hallName.toLowerCase().includes(q) ||
-          b.eventType.toLowerCase().includes(q)
+      // String(...) guards: one legacy row without a customerName used to throw
+      // a TypeError inside .filter() and the whole list answered 500.
+      bookings = bookings.filter(b =>
+        [b.bookingNumber, b.customerName, b.customerPhone, b.hallName, b.eventType]
+          .some(field => String(field || '').toLowerCase().includes(q))
       );
     }
 
-    bookings.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    // A copy is sorted (the previous in-place sort re-ordered the stored array,
+    // which is also the insertion order new bookings are unshifted onto).
+    bookings.sort((a, b) => (new Date(b.createdAt).getTime() || 0) - (new Date(a.createdAt).getTime() || 0));
     res.json(bookings);
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to fetch function bookings.' });
@@ -5887,15 +6233,7 @@ app.get('/api/function-bookings', authMiddleware, (req: Request, res: Response) 
 app.post('/api/function-bookings', authMiddleware, (req: Request, res: Response) => {
   try {
     const user = (req as any).user as User;
-    const {
-      hallId, eventType, session, customerName, customerPhone, customerAddress,
-      eventDate, expectedGuests, hallCharge, perPlateRate, numberOfPlates,
-      extraServices, discount, tax, advancePaid, paymentMethod, paymentDetails, notes
-    } = req.body;
-
-    if (!hallId || !customerName || typeof customerName !== 'string' || !customerName.trim() || !customerPhone) {
-      return res.status(400).json({ error: 'Hall, Customer Name, and Phone Number are required.' });
-    }
+    const { hallId, notes, paymentDetails } = req.body;
 
     const hall = (db.raw.functionHalls || []).find(h => h.id === hallId);
     if (!hall) {
@@ -5905,74 +6243,24 @@ app.post('/api/function-bookings', authMiddleware, (req: Request, res: Response)
       return res.status(400).json({ error: `"${hall.hallName}" is not available for bookings right now.` });
     }
 
-    // Validate the event date (accepts YYYY-MM-DD or ISO strings; keeps the day)
-    const parsedDate = eventDate ? new Date(eventDate) : null;
-    if (!parsedDate || isNaN(parsedDate.getTime())) {
-      return res.status(400).json({ error: 'A valid event date is required.' });
-    }
-    const eventDayKey = parsedDate.toISOString().split('T')[0];
-    const todayKey = new Date().toISOString().split('T')[0];
-    // A back-dated event never shows up in the "upcoming" lists and leaves the
-    // hall looking free, so it is almost always a typo (2024 instead of 2026).
-    if (eventDayKey < todayKey) {
-      return res.status(400).json({
-        error: `The event date (${eventDayKey}) is in the past. Choose today or a future date.`
-      });
+    // Customer details, the event date, the guest count and EVERY money field
+    // are validated and derived by one shared guard (also used by
+    // PUT /api/function-bookings/:id, so a booking can never be posted through
+    // one path but not the other). Nothing here trusts the client's totals.
+    const priced = validateEventBookingPayload(hall, req.body, user);
+    if (!priced.fields) {
+      return res.status(priced.errorStatus || 400).json({ error: priced.error || 'Invalid booking details.' });
     }
 
-    // Guard against double-booking a hall for the same day — a second booking
-    // on the same date previously could silently overlap the first one.
-    const conflicting = (db.raw.functionBookings || []).find(b => {
-      if (b.hallId !== hall.id || b.status !== 'confirmed') return false;
-      return (new Date(b.eventDate).toISOString().split('T')[0]) === eventDayKey;
-    });
-    if (conflicting) {
-      return res.status(400).json({
-        error: `"${hall.hallName}" is already booked on ${eventDayKey} (${conflicting.bookingNumber} — ${conflicting.customerName}). Choose another date or hall.`
-      });
-    }
-
-    const validEventTypes = ['wedding', 'birthday', 'meeting', 'party', 'corporate', 'other'];
-    const validSessions = ['day', 'evening', 'full_day'];
-    const eventTypeFinal = validEventTypes.includes(eventType) ? eventType : 'other';
-    const sessionFinal = validSessions.includes(session) ? session : 'full_day';
-
-    // The hall charge is master data, exactly like a room rate: only a Super
-    // Admin may agree to a different amount. A cashier used to be able to book
-    // a Rs. 150,000 hall for Rs. 100.
-    let hallRate = hall.ratePerDay;
-    if (hallCharge !== undefined && hallCharge !== null && hallCharge !== '') {
-      if (user.role !== 'super_admin') {
-        hallRate = hall.ratePerDay; // silently ignore a tampered charge
-      } else {
-        const override = Number(hallCharge);
-        if (!Number.isFinite(override) || override < 0 || override > 10000000) {
-          return res.status(400).json({ error: 'Invalid hall charge (must be between 0 and 10,000,000).' });
-        }
-        hallRate = override;
-      }
-    }
-    if (!Number.isFinite(hallRate) || hallRate < 0) hallRate = hall.ratePerDay;
-
-    const plateRate = Math.max(0, Number(perPlateRate) || 0);
-    const plates = Math.max(0, Math.min(100000, Number(numberOfPlates) || 0));
-    const plateCharge = Number((plateRate * plates).toFixed(2));
-    const extra = Math.max(0, Number(extraServices) || 0);
-    // Tax is ALWAYS derived from the hotel's configured tax rate (hall + plates
-    // + extra services, exactly what the booking UI shows). The client-supplied
-    // `tax` used to be trusted verbatim — a tampered `tax: 0` made an event
-    // tax-free and a tampered `tax: 99999` inflated the bill.
-    const taxAmt = Number((((hallRate + plateCharge + extra) * (db.raw.settings.taxRate || 0)) / 100).toFixed(2));
-    // Same discount policy as the POS cart and room bookings.
-    const disc = clampBookingDiscount(discount, hallRate + plateCharge + extra);
-    const grandTotal = Number(Math.max(0, hallRate + plateCharge + extra + taxAmt - disc).toFixed(2));
-    const advance = Math.max(0, Number(advancePaid) || 0);
-    if (advance > grandTotal) {
-      return res.status(400).json({ error: 'Advance cannot exceed the grand total' });
-    }
-    const balanceDue = Number(Math.max(0, grandTotal - advance).toFixed(2));
-
+    const currency = db.raw.settings.currencySymbol || 'Rs.';
     const bookingNumber = db.getNextFunctionBookingNumber();
+
+    // A deposit normally arrives by bank transfer; the slip / reference number
+    // used to be accepted by the UI shape and then thrown away, so the cashier
+    // had nowhere to write it and the money could not be traced back later.
+    const rawDetails = paymentDetails && typeof paymentDetails === 'object' ? paymentDetails : {};
+    const reference = String(rawDetails.reference ?? '').trim().slice(0, 64);
+    const bank = String(rawDetails.bank ?? '').trim().slice(0, 64);
 
     const booking: FunctionBooking = {
       id: `evt-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
@@ -5980,29 +6268,14 @@ app.post('/api/function-bookings', authMiddleware, (req: Request, res: Response)
       hallId: hall.id,
       hallName: hall.hallName,
       hallType: hall.hallType,
-      eventType: eventTypeFinal,
-      customerName: customerName.trim().slice(0, 128),
-      customerPhone: String(customerPhone).trim().slice(0, 32),
-      customerAddress: customerAddress ? String(customerAddress).trim().slice(0, 500) : '',
-      eventDate: `${eventDayKey}T00:00:00.000Z`,
-      session: sessionFinal,
-      expectedGuests: Math.max(1, Math.min(100000, Number(expectedGuests) || 50)),
-      hallCharge: hallRate,
-      perPlateRate: plateRate,
-      numberOfPlates: plates,
-      plateCharge,
-      extraServices: extra,
-      discount: disc,
-      tax: taxAmt,
-      grandTotal,
-      advancePaid: advance,
-      balanceDue,
-      paymentMethod: paymentMethod || 'cash',
-      paymentDetails,
+      ...priced.fields,
+      paymentDetails: reference || bank
+        ? { ...(reference ? { reference } : {}), ...(bank ? { bank } : {}) }
+        : undefined,
       status: 'confirmed',
       cashierId: user.id,
       cashierName: user.name,
-      notes: notes ? String(notes).slice(0, 1000) : '',
+      notes: notes ? String(notes).trim().slice(0, 1000) : '',
       createdAt: new Date().toISOString()
     };
 
@@ -6013,11 +6286,126 @@ app.post('/api/function-bookings', authMiddleware, (req: Request, res: Response)
 
     db.save();
 
-    db.logAudit(user.id, user.name, user.role, 'FUNCTION_BOOKING_CREATED', 'FUNCTION_BOOKING', booking.id, `Created ${booking.eventType} booking ${booking.bookingNumber} at "${hall.hallName}" for ${booking.customerName} on ${eventDayKey} (Total: Rs. ${booking.grandTotal}, Advance: Rs. ${booking.advancePaid})`);
+    db.logAudit(user.id, user.name, user.role, 'FUNCTION_BOOKING_CREATED', 'FUNCTION_BOOKING', booking.id, `Created ${booking.eventType} booking ${booking.bookingNumber} at "${hall.hallName}" for ${booking.customerName} on ${storedEventDayKey(booking)} (${booking.expectedGuests} guests, ${booking.session} session, ${booking.numberOfPlates} plates | Total: ${currency} ${booking.grandTotal}, Advance: ${currency} ${booking.advancePaid}, Balance: ${currency} ${booking.balanceDue})`);
 
     res.status(201).json({ success: true, booking, hall });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to create function booking.' });
+  }
+});
+
+/**
+ * Correct a booking that was typed in wrong, or move an event to another day
+ * (the cancel-reason box literally suggested "Customer postponed the event"
+ * while no reschedule path existed — the only option was to cancel the booking,
+ * lose the ticket number and the recorded advance, and re-enter everything).
+ *
+ * Money rules: an advance that has already been received is NEVER touched here.
+ * Re-pricing an event can only reduce what is still outstanding, and the whole
+ * payload goes through the same validator as a new booking (hall capacity,
+ * same-day conflicts, caps, server-side tax and discount policy included).
+ */
+app.put('/api/function-bookings/:id', authMiddleware, (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user as User;
+    const { id } = req.params;
+    const booking = (db.raw.functionBookings || []).find(b => b.id === id);
+    if (!booking) {
+      return res.status(404).json({ error: 'Function booking not found.' });
+    }
+    if (booking.status !== 'confirmed') {
+      return res.status(400).json({
+        error: booking.status === 'completed'
+          ? 'A completed event cannot be edited — its money is already settled. Void the settlement in the audit trail if a correction is needed.'
+          : 'A cancelled booking cannot be edited. Create a new booking instead.'
+      });
+    }
+
+    const hall = (db.raw.functionHalls || []).find(h => h.id === booking.hallId);
+    if (!hall) {
+      return res.status(400).json({ error: `The hall "${booking.hallName}" this event belongs to no longer exists. Create a new booking instead.` });
+    }
+    // A hall that has been retired or sent to maintenance can still have its
+    // already-confirmed event corrected (the contract exists), but moving it to
+    // ANOTHER date is only possible while the hall is bookable.
+    const changingDate = req.body?.eventDate !== undefined || req.body?.session !== undefined;
+    if (changingDate && (!hall.isActive || hall.status === 'maintenance')) {
+      return res.status(400).json({ error: `"${hall.hallName}" is not available for new bookings, so the event cannot be moved to another date.` });
+    }
+
+    // Only a Super Admin may change what the event costs; a cashier may fix the
+    // customer details, the date and the guest count.
+    const moneyKeys = ['hallCharge', 'perPlateRate', 'numberOfPlates', 'extraServices', 'discount'];
+    const touchesMoney = moneyKeys.some(key => req.body?.[key] !== undefined);
+    if (touchesMoney && user.role !== 'super_admin') {
+      return res.status(403).json({ error: 'Only a Super Admin can change the charges on an existing event booking.' });
+    }
+
+    const merged = {
+      hallId: booking.hallId,
+      eventType: booking.eventType,
+      session: booking.session,
+      customerName: booking.customerName,
+      customerPhone: booking.customerPhone,
+      customerAddress: booking.customerAddress,
+      eventDate: booking.eventDate,
+      expectedGuests: booking.expectedGuests,
+      hallCharge: booking.hallCharge,
+      perPlateRate: booking.perPlateRate,
+      numberOfPlates: booking.numberOfPlates,
+      extraServices: booking.extraServices,
+      discount: booking.discount,
+      advancePaid: booking.advancePaid,
+      paymentMethod: booking.paymentMethod,
+      ...(req.body || {})
+    };
+    // The advance already collected is the one input that can never be edited.
+    delete merged.advancePaid;
+
+    const priced = validateEventBookingPayload(hall, merged, user, {
+      excludeBookingId: booking.id,
+      lockedAdvance: booking.advancePaid
+    });
+    if (!priced.fields) {
+      return res.status(priced.errorStatus || 400).json({ error: priced.error || 'Invalid booking details.' });
+    }
+
+    const currency = db.raw.settings.currencySymbol || 'Rs.';
+    const previous = {
+      eventDate: storedEventDayKey(booking),
+      hallName: booking.hallName,
+      grandTotal: booking.grandTotal,
+      expectedGuests: booking.expectedGuests
+    };
+
+    const changed: string[] = [];
+    if (previous.eventDate !== storedEventDayKey(priced.fields)) {
+      changed.push(`date ${previous.eventDate} → ${storedEventDayKey(priced.fields)}`);
+    }
+    if (previous.grandTotal !== priced.fields.grandTotal) {
+      changed.push(`total ${currency} ${previous.grandTotal.toFixed(2)} → ${currency} ${Number(priced.fields.grandTotal).toFixed(2)}`);
+    }
+    if (previous.expectedGuests !== priced.fields.expectedGuests) {
+      changed.push(`guests ${previous.expectedGuests} → ${priced.fields.expectedGuests}`);
+    }
+    if (booking.hallId !== hall.id) changed.push(`hall ${booking.hallName} → ${hall.hallName}`);
+
+    Object.assign(booking, priced.fields, {
+      hallName: hall.hallName,
+      hallType: hall.hallType,
+      updatedAt: new Date().toISOString()
+    });
+    if (req.body?.notes !== undefined) {
+      booking.notes = String(req.body.notes ?? '').trim().slice(0, 1000);
+    }
+
+    db.save();
+
+    db.logAudit(user.id, user.name, user.role, 'FUNCTION_BOOKING_UPDATED', 'FUNCTION_BOOKING', booking.id, `Updated event booking ${booking.bookingNumber} at "${booking.hallName}" (${booking.customerName})${changed.length ? `: ${changed.join(', ')}` : ': contact/details only'}. Balance due is now ${currency} ${booking.balanceDue.toFixed(2)}.`);
+
+    res.json({ success: true, booking, hall, changed, message: `Booking ${booking.bookingNumber} updated.` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to update function booking.' });
   }
 });
 
@@ -6039,22 +6427,35 @@ app.put('/api/function-bookings/:id/checkout', authMiddleware, (req: Request, re
     }
 
     // Validate everything BEFORE mutating the booking (same guard as rooms).
-    const rawAdd = Number(additionalCharges);
-    const add = Number.isFinite(rawAdd) && rawAdd > 0 ? Math.min(rawAdd, 10000000) : 0;
+    // A non-numeric / negative / oversized add-on used to be turned into 0 (or
+    // silently capped at 10,000,000) — the cashier pressed "Complete Event", saw
+    // a success message and the extra bar bill simply never reached the invoice.
+    const rawAdd = Number(additionalCharges ?? 0);
+    if (!Number.isFinite(rawAdd) || rawAdd < 0) {
+      return res.status(400).json({ error: 'Additional charges must be a positive number.' });
+    }
+    if (rawAdd > EVENT_LINE_CAP) {
+      return res.status(400).json({ error: `Additional charges cannot exceed ${EVENT_LINE_CAP.toLocaleString()}. Record them as a separate payment instead.` });
+    }
+    if (Number((booking.grandTotal + rawAdd).toFixed(2)) > EVENT_GRAND_TOTAL_CAP) {
+      return res.status(400).json({ error: `The event total would exceed the ${EVENT_GRAND_TOTAL_CAP.toLocaleString()} ceiling. Please check the additional charges.` });
+    }
+    const add = Number(rawAdd.toFixed(2));
 
     const newGrandTotal = Number((booking.grandTotal + add).toFixed(2));
     const newBalanceDue = Number(Math.max(0, newGrandTotal - booking.advancePaid).toFixed(2));
 
     const rawFinal = Number(finalPaymentAmount);
     const finalPay = Number.isFinite(rawFinal) && rawFinal > 0 ? Number(rawFinal.toFixed(2)) : newBalanceDue;
+    const cur = db.raw.settings.currencySymbol || 'Rs.';
     if (finalPay > newBalanceDue + 0.01) {
-      return res.status(400).json({ error: `Final payment cannot exceed balance due (Rs. ${newBalanceDue.toFixed(2)}).` });
+      return res.status(400).json({ error: `Final payment cannot exceed balance due (${cur} ${newBalanceDue.toFixed(2)}).` });
     }
     // Completing an event is a FULL settlement. A positive but short final
     // payment would close the event with an un-collected balance; record a
     // partial payment first and complete once the balance is settled.
     if (finalPay + 0.01 < newBalanceDue) {
-      return res.status(400).json({ error: `Final payment cannot be less than balance due (Rs. ${newBalanceDue.toFixed(2)}). Record a partial payment before completing the event.` });
+      return res.status(400).json({ error: `Final payment cannot be less than balance due (${cur} ${newBalanceDue.toFixed(2)}). Record a partial payment before completing the event.` });
     }
 
     booking.extraServices = Number((booking.extraServices + add).toFixed(2));
@@ -6063,12 +6464,15 @@ app.put('/api/function-bookings/:id/checkout', authMiddleware, (req: Request, re
     booking.balanceDue = Number(Math.max(0, booking.grandTotal - booking.advancePaid).toFixed(2));
     booking.status = 'completed';
     booking.completedAt = new Date().toISOString();
-    if (paymentMethod) booking.paymentMethod = paymentMethod;
-    if (notes && typeof notes === 'string') booking.notes = (booking.notes ? booking.notes + ' | ' : '') + notes.slice(0, 500);
+    booking.updatedAt = booking.completedAt;
+    booking.paymentMethod = normalizeEventPaymentMethod(paymentMethod, booking.paymentMethod);
+    if (notes && typeof notes === 'string') {
+      booking.notes = appendEventBookingNotes(booking, `Settled with ${cur} ${finalPay.toFixed(2)} (${booking.paymentMethod}). ${notes.trim().slice(0, 300)}`);
+    }
 
     db.save();
 
-    db.logAudit(user.id, user.name, user.role, 'FUNCTION_BOOKING_COMPLETED', 'FUNCTION_BOOKING', booking.id, `Completed ${booking.eventType} booking ${booking.bookingNumber} at "${booking.hallName}" (${booking.customerName}). Final settlement: Rs. ${finalPay}.`);
+    db.logAudit(user.id, user.name, user.role, 'FUNCTION_BOOKING_COMPLETED', 'FUNCTION_BOOKING', booking.id, `Completed ${booking.eventType} booking ${booking.bookingNumber} at "${booking.hallName}" (${booking.customerName}). Extra charges: ${cur} ${add.toFixed(2)}, final settlement: ${cur} ${finalPay.toFixed(2)}, total collected: ${cur} ${booking.advancePaid.toFixed(2)}.`);
 
     res.json({ success: true, booking, message: `Event ${booking.bookingNumber} completed successfully.` });
   } catch (err: any) {
@@ -6087,19 +6491,39 @@ app.put('/api/function-bookings/:id/cancel', authMiddleware, (req: Request, res:
       return res.status(404).json({ error: 'Function booking not found.' });
     }
     if (booking.status === 'completed') {
-      return res.status(400).json({ error: 'Cannot cancel a completed event' });
+      return res.status(400).json({ error: 'Cannot cancel a completed event — its money has already been settled.' });
+    }
+    // Cancelling twice used to re-run the whole flow and append a second
+    // "Cancel Reason" to the notes.
+    if (booking.status === 'cancelled') {
+      return res.status(400).json({ error: 'This booking is already cancelled.' });
     }
 
+    const cur = db.raw.settings.currencySymbol || 'Rs.';
+    const refundDue = Number(Math.max(0, Number(booking.advancePaid) || 0).toFixed(2));
+
     booking.status = 'cancelled';
+    booking.updatedAt = new Date().toISOString();
+    // A cancelled event is owed nothing any more. Leaving balanceDue set kept
+    // every cancelled booking inside the "outstanding dues" figures forever.
+    booking.balanceDue = 0;
     if (reason && typeof reason === 'string') {
-      booking.notes = (booking.notes ? booking.notes + ' | Cancel Reason: ' : 'Cancel Reason: ') + reason.slice(0, 500);
+      booking.notes = appendEventBookingNotes(booking, `Cancel Reason: ${reason.trim().slice(0, 400)}`);
+    }
+    if (refundDue > 0) {
+      booking.notes = appendEventBookingNotes(booking, `Advance of ${cur} ${refundDue.toFixed(2)} received before cancellation is refundable to the customer.`);
     }
 
     db.save();
 
-    db.logAudit(user.id, user.name, user.role, 'FUNCTION_BOOKING_CANCELLED', 'FUNCTION_BOOKING', booking.id, `Cancelled event booking ${booking.bookingNumber} at "${booking.hallName}". Reason: ${reason ? String(reason).slice(0, 500) : 'N/A'}`);
+    db.logAudit(user.id, user.name, user.role, 'FUNCTION_BOOKING_CANCELLED', 'FUNCTION_BOOKING', booking.id, `Cancelled event booking ${booking.bookingNumber} at "${booking.hallName}" (${booking.customerName}). Reason: ${reason ? String(reason).slice(0, 500) : 'N/A'}. ${refundDue > 0 ? `Refundable advance: ${cur} ${refundDue.toFixed(2)}.` : 'No advance had been received.'}`);
 
-    res.json({ success: true, booking, message: `Booking ${booking.bookingNumber} cancelled.` });
+    res.json({
+      success: true,
+      booking,
+      refundDue,
+      message: `Booking ${booking.bookingNumber} cancelled.${refundDue > 0 ? ` Refund ${cur} ${refundDue.toFixed(2)} of advance to the customer.` : ''}`
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to cancel function booking.' });
   }
@@ -6119,26 +6543,40 @@ app.post('/api/function-bookings/:id/payment', authMiddleware, (req: Request, re
       return res.status(400).json({ error: 'Cannot add payment to a completed or cancelled booking' });
     }
 
-    const payAmt = Number(amount) || 0;
+    const payAmt = Number(amount);
     if (!Number.isFinite(payAmt) || payAmt <= 0 || payAmt > 10000000) {
       return res.status(400).json({ error: 'Payment amount must be between 1 and 10,000,000.' });
     }
-    if (payAmt > booking.balanceDue) {
-      return res.status(400).json({ error: `Payment exceeds balance due (Rs. ${booking.balanceDue})` });
+    // Compare against the LIVE balance, re-derived from the stored totals: a
+    // booking whose balanceDue had drifted (extra charges, an edit) could
+    // otherwise be over-paid, or refuse a payment that was actually still due.
+    const liveBalance = Number(Math.max(0, Number(booking.grandTotal || 0) - Number(booking.advancePaid || 0)).toFixed(2));
+    if (payAmt > liveBalance + 0.01) {
+      return res.status(400).json({
+        error: liveBalance <= 0
+          ? 'This booking is already fully paid — nothing more is due.'
+          : `Payment exceeds balance due (${db.raw.settings.currencySymbol || 'Rs.'} ${liveBalance.toFixed(2)}).`
+      });
     }
 
-    booking.advancePaid = Number((booking.advancePaid + payAmt).toFixed(2));
-    booking.balanceDue = Number(Math.max(0, booking.grandTotal - booking.advancePaid).toFixed(2));
-    if (paymentMethod) booking.paymentMethod = paymentMethod;
+    const method = normalizeEventPaymentMethod(paymentMethod, booking.paymentMethod);
+    const paidAt = new Date().toISOString();
+    booking.advancePaid = Number((Number(booking.advancePaid || 0) + payAmt).toFixed(2));
+    booking.balanceDue = Number(Math.max(0, Number(booking.grandTotal || 0) - booking.advancePaid).toFixed(2));
+    booking.paymentMethod = method;
+    booking.updatedAt = paidAt;
+    const slipRef = req.body?.reference ? String(req.body.reference).trim().slice(0, 64) : '';
     if (notes && typeof notes === 'string') {
-      booking.notes = (booking.notes ? booking.notes + ' | Payment: ' : 'Payment: ') + `${payAmt} (${paymentMethod || 'Cash'}) - ${notes.slice(0, 500)}`;
+      booking.notes = appendEventBookingNotes(booking, `Payment: ${payAmt} (${method})${slipRef ? ` ref ${slipRef}` : ''} - ${notes.trim().slice(0, 300)}`);
+    } else if (slipRef) {
+      booking.notes = appendEventBookingNotes(booking, `Payment: ${payAmt} (${method}) ref ${slipRef}`);
     }
 
     db.save();
 
-    db.logAudit(user.id, user.name, user.role, 'FUNCTION_BOOKING_PAYMENT', 'FUNCTION_BOOKING', booking.id, `Received payment of Rs. ${payAmt} for event ${booking.bookingNumber} at "${booking.hallName}"`);
+    db.logAudit(user.id, user.name, user.role, 'FUNCTION_BOOKING_PAYMENT', 'FUNCTION_BOOKING', booking.id, `Received payment of ${db.raw.settings.currencySymbol || 'Rs.'} ${payAmt.toFixed(2)} (${method}${slipRef ? `, ref ${slipRef}` : ''}) for event ${booking.bookingNumber} at "${booking.hallName}" (${booking.customerName}). Balance left: ${db.raw.settings.currencySymbol || 'Rs.'} ${booking.balanceDue.toFixed(2)}.`);
 
-    res.json({ success: true, booking, message: `Payment of Rs. ${payAmt} recorded.` });
+    res.json({ success: true, booking, message: `Payment of ${db.raw.settings.currencySymbol || 'Rs.'} ${payAmt.toFixed(2)} recorded.` });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to record payment.' });
   }

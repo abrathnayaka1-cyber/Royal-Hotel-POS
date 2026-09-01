@@ -110,9 +110,11 @@ interface POSContextType {
   // Hotel Functions & Events (v1.4.0)
   isFunctionBookingModalOpen: boolean;
   selectedHallForBooking: FunctionHall | null;
+  /** Booking being corrected / rescheduled in the same modal (null = new booking). */
+  editingFunctionBooking: FunctionBooking | null;
   recentFunctionTicket: FunctionBooking | null;
   isFunctionTicketModalOpen: boolean;
-  openFunctionBookingModal: (hall?: FunctionHall | null) => void;
+  openFunctionBookingModal: (hall?: FunctionHall | null, booking?: FunctionBooking | null) => void;
   closeFunctionBookingModal: () => void;
   openFunctionTicketModal: (booking: FunctionBooking) => void;
   closeFunctionTicketModal: () => void;
@@ -122,10 +124,18 @@ interface POSContextType {
   updateFunctionHall: (hallId: string, hallData: Partial<FunctionHall>) => Promise<FunctionHall>;
   deleteFunctionHall: (hallId: string) => Promise<void>;
   createFunctionBooking: (payload: Record<string, unknown>) => Promise<FunctionBooking>;
+  updateFunctionBooking: (bookingId: string, payload: Record<string, unknown>) => Promise<FunctionBooking>;
   completeFunctionBooking: (bookingId: string, checkoutData: Record<string, unknown>) => Promise<FunctionBooking>;
-  cancelFunctionBooking: (bookingId: string, reason?: string) => Promise<void>;
+  cancelFunctionBooking: (bookingId: string, reason?: string) => Promise<FunctionCancelResult>;
   addFunctionPayment: (bookingId: string, paymentData: Record<string, unknown>) => Promise<FunctionBooking>;
   printFunctionTicket: (booking: FunctionBooking) => Promise<boolean>;
+}
+
+/** What a cancellation returned: the refund that is owed back, if any. */
+export interface FunctionCancelResult {
+  booking: FunctionBooking;
+  refundDue: number;
+  message: string;
 }
 
 const POSContext = createContext<POSContextType | undefined>(undefined);
@@ -174,6 +184,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [isFunctionBookingModalOpen, setIsFunctionBookingModalOpen] = useState<boolean>(false);
   const [selectedHallForBooking, setSelectedHallForBooking] = useState<FunctionHall | null>(null);
+  const [editingFunctionBooking, setEditingFunctionBooking] = useState<FunctionBooking | null>(null);
   const [recentFunctionTicket, setRecentFunctionTicket] = useState<FunctionBooking | null>(null);
   const [isFunctionTicketModalOpen, setIsFunctionTicketModalOpen] = useState<boolean>(false);
 
@@ -380,14 +391,16 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setFunctionBookings(bData || []);
   };
 
-  const openFunctionBookingModal = (hall?: FunctionHall | null) => {
+  const openFunctionBookingModal = (hall?: FunctionHall | null, booking?: FunctionBooking | null) => {
     setSelectedHallForBooking(hall || null);
+    setEditingFunctionBooking(booking || null);
     setIsFunctionBookingModalOpen(true);
   };
 
   const closeFunctionBookingModal = () => {
     setIsFunctionBookingModalOpen(false);
     setSelectedHallForBooking(null);
+    setEditingFunctionBooking(null);
   };
 
   const openFunctionTicketModal = (booking: FunctionBooking) => {
@@ -431,7 +444,9 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       body: JSON.stringify(payload),
     });
 
-    await refreshFunctionBookings();
+    // Hall cards carry derived counts (upcoming events, open balance) — every
+    // booking mutation moves them, so the halls list has to reload with it.
+    await Promise.all([refreshFunctionBookings(), refreshFunctionHalls()]);
 
     setRecentFunctionTicket(res.booking);
     setIsFunctionBookingModalOpen(false);
@@ -446,23 +461,45 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return res.booking;
   };
 
+  /**
+   * Correct / reschedule a confirmed booking (wrong phone number, event
+   * postponed, extra plates). The ticket number and the advance already
+   * collected are kept by the server — this used to be a cancel + re-enter,
+   * which destroyed both and issued a brand new ticket number.
+   */
+  const updateFunctionBooking = async (bookingId: string, payload: Record<string, unknown>): Promise<FunctionBooking> => {
+    const res = await fetchApi<{ success: boolean; booking: FunctionBooking; message?: string }>(`/function-bookings/${bookingId}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+
+    await Promise.all([refreshFunctionBookings(), refreshFunctionHalls()]);
+    // Keep the printed ticket in sync if it is currently on screen.
+    setRecentFunctionTicket(prev => (prev && prev.id === bookingId ? res.booking : prev));
+    return res.booking;
+  };
+
   const completeFunctionBooking = async (bookingId: string, checkoutData: Record<string, unknown>): Promise<FunctionBooking> => {
     const res = await fetchApi<{ success: boolean; booking: FunctionBooking }>(`/function-bookings/${bookingId}/checkout`, {
       method: 'PUT',
       body: JSON.stringify(checkoutData),
     });
 
-    await refreshFunctionBookings();
+    await Promise.all([refreshFunctionBookings(), refreshFunctionHalls()]);
     return res.booking;
   };
 
-  const cancelFunctionBooking = async (bookingId: string, reason?: string): Promise<void> => {
-    await fetchApi(`/function-bookings/${bookingId}/cancel`, {
+  const cancelFunctionBooking = async (
+    bookingId: string,
+    reason?: string
+  ): Promise<FunctionCancelResult> => {
+    const res = await fetchApi<FunctionCancelResult>(`/function-bookings/${bookingId}/cancel`, {
       method: 'PUT',
       body: JSON.stringify({ reason }),
     });
 
-    await refreshFunctionBookings();
+    await Promise.all([refreshFunctionBookings(), refreshFunctionHalls()]);
+    return res;
   };
 
   const addFunctionPayment = async (bookingId: string, paymentData: Record<string, unknown>): Promise<FunctionBooking> => {
@@ -471,7 +508,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       body: JSON.stringify(paymentData),
     });
 
-    await refreshFunctionBookings();
+    await Promise.all([refreshFunctionBookings(), refreshFunctionHalls()]);
     return res.booking;
   };
 
@@ -1002,6 +1039,8 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateFunctionHall,
         deleteFunctionHall,
         createFunctionBooking,
+        updateFunctionBooking,
+        editingFunctionBooking,
         completeFunctionBooking,
         cancelFunctionBooking,
         addFunctionPayment,

@@ -180,6 +180,8 @@ export type FunctionEventType =
   | 'other';
 
 export type FunctionBookingStatus = 'confirmed' | 'completed' | 'cancelled';
+/** Event money is never split and never posted to a room bill — only these 4. */
+export type FunctionPaymentMethod = 'cash' | 'card' | 'bank_transfer' | 'other';
 export type FunctionHallStatus = 'available' | 'maintenance';
 export type FunctionSession = 'day' | 'evening' | 'full_day';
 
@@ -195,6 +197,12 @@ export interface FunctionHall {
   notes?: string;
   isActive: boolean;
   createdAt: string;
+  /** Derived on GET /api/function-halls — open (confirmed) events still to come. */
+  upcomingCount?: number;
+  /** Derived on GET /api/function-halls — ISO date of the next confirmed event. */
+  nextEventDate?: string | null;
+  /** Derived on GET /api/function-halls — uncollected balance across open events. */
+  openBalance?: number;
 }
 
 export interface FunctionBooking {
@@ -220,14 +228,16 @@ export interface FunctionBooking {
   grandTotal: number;
   advancePaid: number;
   balanceDue: number;
-  paymentMethod: PaymentMethod;
-  paymentDetails?: any;
+  paymentMethod: FunctionPaymentMethod;
+  paymentDetails?: { reference?: string; bank?: string } | null;
   status: FunctionBookingStatus;
   cashierId: string;
   cashierName: string;
   notes?: string;
   createdAt: string;
   completedAt?: string;
+  /** Set when an open booking is edited / rescheduled (PUT /api/function-bookings/:id). */
+  updatedAt?: string;
 }
 
 export interface HeldBill {
