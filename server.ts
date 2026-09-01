@@ -693,8 +693,11 @@ function collectHealthSnapshot() {
     .map(v => ({ product: (activeProducts.find(p => p.id === v.productId)?.name || '?'), size: v.size, stock: v.stock, sku: v.sku }));
 
   const bills = db.raw.bills || [];
-  const today = new Date().toISOString().split('T')[0];
-  const todayBills = bills.filter(b => (b.paidAt || b.createdAt).split('T')[0] === today);
+  // Match the dashboard/stats endpoint: "today" is local-day (not UTC), so a
+  // hotel in UTC+05:30 doesn't get its post-midnight sales counted as yesterday.
+  const snapshotNow = new Date();
+  const snapshotTodayStart = new Date(snapshotNow.getFullYear(), snapshotNow.getMonth(), snapshotNow.getDate()).getTime();
+  const todayBills = bills.filter(b => new Date(b.paidAt || b.createdAt).getTime() >= snapshotTodayStart);
   const todayRevenue = todayBills.reduce((s, b) => s + Number(b.grandTotal || 0), 0);
 
   const bookings = db.raw.roomBookings || [];
@@ -779,7 +782,8 @@ function buildRuleBasedReport(snapshot: ReturnType<typeof collectHealthSnapshot>
   } else if (overallStatus === 'attention') {
     summary = `System is running but has ${issues.filter(i => i.severity === 'warning').length} warning(s). Review the flagged items.`;
   } else {
-    summary = `All systems healthy: ${snapshot.metadata.activeProducts} products, ${snapshot.metadata.activeVariants} variants in stock, ${snapshot.metadata.todayBillsCount} bill(s) today (Rs. ${snapshot.metadata.todayRevenue}).`;
+    const currencySymbol = db.raw.settings?.currencySymbol || 'Rs.';
+    summary = `All systems healthy: ${snapshot.metadata.activeProducts} products, ${snapshot.metadata.activeVariants} variants in stock, ${snapshot.metadata.todayBillsCount} bill(s) today (${currencySymbol} ${snapshot.metadata.todayRevenue}).`;
   }
 
   return { overallStatus, summary, issues, recommendations: recs };
@@ -839,12 +843,40 @@ async function askGeminiForReport(snapshot: ReturnType<typeof collectHealthSnaps
 
 app.get('/api/ai/health-check', authMiddleware, requireRole('super_admin'), (req: Request, res: Response) => {
   try {
-    const latest = db.getLatestHealthReport();
+    const configured = Boolean(GEMINI_API_KEY);
+    // In rule-based mode (no API key) we always recompute a FRESH report from
+    // the live snapshot, so the health card never contradicts the sales KPIs
+    // (a server-start "0 bills today" report would otherwise stay stale). When
+    // Gemini is configured we return the latest AI-generated report and only
+    // fall back to a live rule-based one if none has been generated yet.
+    let report: HealthReport | null = null;
+    if (configured) {
+      const latest = db.getLatestHealthReport();
+      if (latest && latest.generatedBy === 'gemini') {
+        report = latest;
+      }
+    }
+    if (!report) {
+      const snapshot = collectHealthSnapshot();
+      const analysis = buildRuleBasedReport(snapshot);
+      report = {
+        id: `health-${Date.now()}-live`,
+        createdAt: new Date().toISOString(),
+        generatedBy: 'rule-based',
+        aiConfigured: configured,
+        model: GEMINI_MODEL,
+        overallStatus: analysis.overallStatus,
+        summary: analysis.summary,
+        issues: analysis.issues,
+        recommendations: analysis.recommendations,
+        metrics: snapshot.metadata,
+      };
+    }
     res.json({
-      configured: Boolean(GEMINI_API_KEY),
+      configured,
       model: GEMINI_MODEL,
-      report: latest || null,
-      canAnalyze: Boolean(GEMINI_API_KEY),
+      report,
+      canAnalyze: configured,
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to fetch health report.' });
@@ -5869,16 +5901,31 @@ app.get('/api/dashboard/stats', authMiddleware, requireRole('super_admin'), (req
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
 
   const allPaidBills = db.raw.bills.filter(b => b.status === 'paid');
+  // "Recent POS Transactions" must show the LATEST bills, but db.raw.bills is
+  // stored in insertion order, so .slice() alone returns the oldest. Sort by
+  // when the bill was paid/created (descending) before taking the latest ones.
+  const recentBills = [...allPaidBills]
+    .sort((a, b) => {
+      const ta = new Date(a.paidAt || a.createdAt).getTime() || 0;
+      const tb = new Date(b.paidAt || b.createdAt).getTime() || 0;
+      return tb - ta;
+    })
+    .slice(0, 10);
+
   const todayBills = allPaidBills.filter(b => new Date(b.paidAt || b.createdAt).getTime() >= todayStart);
 
   const todayRevenue = todayBills.reduce((sum, b) => sum + b.grandTotal, 0);
   const totalRevenue = allPaidBills.reduce((sum, b) => sum + b.grandTotal, 0);
 
+  // Pre-seed every supported payment method so split / room_charge are never
+  // silently lumped into "other" (and appear on the frontend breakdown chart).
   const todayPaymentBreakdown: Record<string, { count: number; total: number }> = {
     cash: { count: 0, total: 0 },
     card: { count: 0, total: 0 },
     bank_transfer: { count: 0, total: 0 },
-    other: { count: 0, total: 0 }
+    other: { count: 0, total: 0 },
+    split: { count: 0, total: 0 },
+    room_charge: { count: 0, total: 0 }
   };
   todayBills.forEach(b => {
     const method = b.paymentMethod || 'cash';
@@ -5933,7 +5980,7 @@ app.get('/api/dashboard/stats', authMiddleware, requireRole('super_admin'), (req
     lowStockCount,
     outOfStockCount,
     lowStockItems: lowStockItems.slice(0, 8),
-    recentBills: allPaidBills.slice(0, 10),
+    recentBills,
     todayPaymentBreakdown,
     activeCashiers: db.raw.users.filter(u => u.role === 'cashier' && u.isActive).map(({ passwordHash, ...u }) => u)
   });
