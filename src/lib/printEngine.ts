@@ -588,8 +588,8 @@ export async function printRoomBookingTicket(
   const phone = settings?.phone || '+94 32 226 5500';
   const email = settings?.email || 'royalgreengardenputtalam@gmail.com';
   const footerText = settings?.receiptFooter || 'Thank you for staying at Royal Hotel! Have a wonderful stay.';
-  const itemChargesTotal = (booking.itemCharges || []).reduce((sum, charge) => sum + charge.total, 0);
-  const otherExtraCharges = Math.max(0, booking.extraCharges - itemChargesTotal);
+  const itemChargesTotal = (booking.itemCharges || []).reduce((sum, charge) => sum + Number(charge.total || 0), 0);
+  const otherExtraCharges = Math.max(0, Number(booking.extraCharges || 0) - itemChargesTotal);
 
   const is58mm = (settings?.thermalWidth || '80mm') === '58mm';
   const pageWidth = is58mm ? '58mm' : '80mm';
@@ -619,7 +619,7 @@ export async function printRoomBookingTicket(
     year: 'numeric'
   });
 
-  const statusLabel = booking.status.toUpperCase().replace('_', ' ');
+  const statusLabel = String(booking.status || '').toUpperCase().replace('_', ' ');
 
   const html = `
     <!DOCTYPE html>
@@ -873,7 +873,7 @@ export async function printRoomBookingTicket(
           </tr>
           <tr>
             <td>Payment Method:</td>
-            <td class="text-right">${escapeHtml(booking.paymentMethod.toUpperCase().replace('_', ' '))}</td>
+            <td class="text-right">${escapeHtml(String(booking.paymentMethod || 'cash').toUpperCase().replace('_', ' '))}</td>
           </tr>
         </table>
 

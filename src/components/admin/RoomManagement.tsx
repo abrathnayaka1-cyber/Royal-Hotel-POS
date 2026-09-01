@@ -42,6 +42,7 @@ export const RoomManagement: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [floorFilter, setFloorFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [bookingStatusFilter, setBookingStatusFilter] = useState<string>('all');
 
   // Edit / Add Room Modal State
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
@@ -56,6 +57,9 @@ export const RoomManagement: React.FC = () => {
   const [amenitiesInput, setAmenitiesInput] = useState<string>('AC, TV, Attached Bath, Free Wi-Fi');
   const [status, setStatus] = useState<Room['status']>('available');
   const [notes, setNotes] = useState<string>('');
+  // `isActive` exists in the data model and gates bookability, but there was no
+  // way to see or change it — a retired room could never be retired.
+  const [isActive, setIsActive] = useState<boolean>(true);
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
@@ -70,6 +74,7 @@ export const RoomManagement: React.FC = () => {
     setAmenitiesInput('AC, King Bed, Attached Bath, TV, Free Wi-Fi');
     setStatus('available');
     setNotes('');
+    setIsActive(true);
     setFormError(null);
     setIsModalOpen(true);
   };
@@ -85,6 +90,7 @@ export const RoomManagement: React.FC = () => {
     setAmenitiesInput(room.amenities ? room.amenities.join(', ') : '');
     setStatus(room.status);
     setNotes(room.notes || '');
+    setIsActive(room.isActive !== false);
     setFormError(null);
     setIsModalOpen(true);
   };
@@ -101,8 +107,26 @@ export const RoomManagement: React.FC = () => {
       setFormError('Room Number is required.');
       return;
     }
-    if (!ratePerDay || ratePerDay <= 0) {
-      setFormError('Please enter a valid rate per day.');
+    if (!roomType.trim()) {
+      setFormError('Room Type is required.');
+      return;
+    }
+    if (!ratePerDay || ratePerDay <= 0 || ratePerDay > 1000000) {
+      setFormError('Please enter a valid rate per day (1 - 1,000,000).');
+      return;
+    }
+    if (!capacity || capacity < 1 || capacity > 20) {
+      setFormError('Guest capacity must be between 1 and 20.');
+      return;
+    }
+    // Duplicate room numbers were only caught by the server; catch it here so
+    // the cashier gets the message before the round-trip.
+    const dupe = rooms.find(
+      r => r.id !== editingRoom?.id
+        && String(r.roomNumber).trim().toLowerCase() === roomNumber.trim().toLowerCase()
+    );
+    if (dupe) {
+      setFormError(`Room number ${roomNumber.trim()} already exists.`);
       return;
     }
 
@@ -115,21 +139,27 @@ export const RoomManagement: React.FC = () => {
         .map(s => s.trim())
         .filter(s => s.length > 0);
 
-      const payload = {
+      const payload: Record<string, unknown> = {
         roomNumber: roomNumber.trim(),
         roomType: roomType.trim(),
         floor: floor.trim(),
         capacity: Number(capacity) || 2,
         ratePerDay: Number(ratePerDay),
         amenities: amenitiesArray,
-        status,
-        notes: notes.trim()
+        notes: notes.trim(),
+        isActive
       };
 
       if (editingRoom) {
+        // Occupied / reserved states are owned by the booking engine — sending
+        // them back on every save fought the server's own status sync.
+        if (status === 'available' || status === 'cleaning' || status === 'maintenance') {
+          payload.status = status;
+        }
         await updateRoom(editingRoom.id, payload);
       } else {
-        await createRoom(payload);
+        payload.status = status === 'occupied' || status === 'reserved' ? 'available' : status;
+        await createRoom(payload as any);
       }
 
       handleCloseModal();
@@ -178,19 +208,33 @@ export const RoomManagement: React.FC = () => {
     return true;
   });
 
-  const filteredBookings = roomBookings.filter(b => {
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      const matchTicket = String(b.bookingNumber || '').toLowerCase().includes(q);
-      const matchGuest = String(b.guestName || '').toLowerCase().includes(q);
-      const matchPhone = String(b.guestPhone || '').toLowerCase().includes(q);
-      const matchRoom = String(b.roomNumber || '').toLowerCase().includes(q);
-      if (!matchTicket && !matchGuest && !matchPhone && !matchRoom) return false;
-    }
-    return true;
-  });
+  const filteredBookings = roomBookings
+    .filter(b => {
+      // The booking tab reused the ROOM status filter values, so it silently
+      // had no status filter at all. It now has its own.
+      if (bookingStatusFilter !== 'all' && b.status !== bookingStatusFilter) return false;
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        const matchTicket = String(b.bookingNumber || '').toLowerCase().includes(q);
+        const matchGuest = String(b.guestName || '').toLowerCase().includes(q);
+        const matchPhone = String(b.guestPhone || '').toLowerCase().includes(q);
+        const matchRoom = String(b.roomNumber || '').toLowerCase().includes(q);
+        const matchNic = String(b.guestIdOrPassport || '').toLowerCase().includes(q);
+        if (!matchTicket && !matchGuest && !matchPhone && !matchRoom && !matchNic) return false;
+      }
+      return true;
+    })
+    // Newest first — the list came back in raw array order, so the oldest
+    // bookings sat at the top of "Booking History".
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-  const uniqueFloors = Array.from(new Set(rooms.map(r => r.floor)));
+  const uniqueFloors = Array.from(new Set(rooms.map(r => r.floor))).sort();
+
+  // Outstanding balance across every live booking — a Super Admin had no way to
+  // see how much money was still uncollected.
+  const outstandingDue = roomBookings
+    .filter(b => b.status === 'confirmed' || b.status === 'checked_in')
+    .reduce((sum, b) => sum + Number(b.balanceDue || 0), 0);
 
   return (
     <div id="admin-room-management-view" className="p-6 max-w-7xl mx-auto space-y-6">
@@ -261,6 +305,28 @@ export const RoomManagement: React.FC = () => {
           />
         </div>
 
+        {activeTab === 'bookings' && (
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-xs text-slate-400">
+              Outstanding Due:{' '}
+              <strong className={outstandingDue > 0 ? 'text-rose-400 font-mono' : 'text-slate-300 font-mono'}>
+                {currencySymbol} {outstandingDue.toLocaleString()}
+              </strong>
+            </span>
+            <select
+              value={bookingStatusFilter}
+              onChange={(e) => setBookingStatusFilter(e.target.value)}
+              className="bg-slate-950 border border-slate-700 text-slate-300 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-emerald-500"
+            >
+              <option value="all">All Bookings</option>
+              <option value="confirmed">🟡 Reserved / Confirmed</option>
+              <option value="checked_in">🟢 Checked In</option>
+              <option value="checked_out">⚪ Checked Out</option>
+              <option value="cancelled">🔴 Cancelled</option>
+            </select>
+          </div>
+        )}
+
         {activeTab === 'rooms' && (
           <div className="flex flex-wrap items-center gap-2">
             <select
@@ -270,6 +336,7 @@ export const RoomManagement: React.FC = () => {
             >
               <option value="all">All Statuses</option>
               <option value="available">🟢 Available</option>
+              <option value="reserved">🔵 Reserved</option>
               <option value="occupied">🔴 Occupied</option>
               <option value="cleaning">🧹 Cleaning</option>
               <option value="maintenance">🛠️ Maintenance</option>
@@ -329,7 +396,7 @@ export const RoomManagement: React.FC = () => {
                         {room.capacity} Guests
                       </td>
                       <td className="py-3.5 px-4 font-mono font-bold text-emerald-400 text-sm">
-                        {currencySymbol} {room.ratePerDay.toLocaleString()}
+                        {currencySymbol} {Number(room.ratePerDay || 0).toLocaleString()}
                       </td>
                       <td className="py-3.5 px-4">
                         <div className="flex flex-wrap gap-1 max-w-xs">
@@ -346,11 +413,13 @@ export const RoomManagement: React.FC = () => {
                             ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
                             : room.status === 'occupied'
                             ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                            : room.status === 'reserved'
+                            ? 'bg-sky-500/20 text-sky-300 border-sky-500/30'
                             : room.status === 'cleaning'
                             ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
                             : 'bg-purple-500/20 text-purple-300 border-purple-500/30'
                         }`}>
-                          {room.status.toUpperCase()}
+                          {String(room.status || '').toUpperCase()}{room.isActive === false ? ' · RETIRED' : ''}
                         </span>
                       </td>
                       <td className="py-3.5 px-4 text-right">
@@ -430,12 +499,12 @@ export const RoomManagement: React.FC = () => {
                         {b.durationDays}d
                       </td>
                       <td className="py-3.5 px-4 font-mono font-bold text-white text-sm">
-                        {currencySymbol} {b.grandTotal.toLocaleString()}
+                        {currencySymbol} {Number(b.grandTotal || 0).toLocaleString()}
                       </td>
                       <td className="py-3.5 px-4 font-mono text-[11px]">
-                        <div className="text-emerald-400 font-bold">Paid: {currencySymbol} {b.advancePaid.toLocaleString()}</div>
-                        <div className={b.balanceDue > 0 ? 'text-rose-400 font-bold' : 'text-slate-400'}>
-                          Due: {currencySymbol} {b.balanceDue.toLocaleString()}
+                        <div className="text-emerald-400 font-bold">Paid: {currencySymbol} {Number(b.advancePaid || 0).toLocaleString()}</div>
+                        <div className={Number(b.balanceDue || 0) > 0 ? 'text-rose-400 font-bold' : 'text-slate-400'}>
+                          Due: {currencySymbol} {Number(b.balanceDue || 0).toLocaleString()}
                         </div>
                       </td>
                       <td className="py-3.5 px-4">
@@ -448,7 +517,7 @@ export const RoomManagement: React.FC = () => {
                             ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
                             : 'bg-rose-500/20 text-rose-300 border-rose-500/30'
                         }`}>
-                          {b.status.replace('_', ' ')}
+                          {String(b.status || '').replace('_', ' ')}
                         </span>
                       </td>
                       <td className="py-3.5 px-4 text-right">
@@ -596,7 +665,8 @@ export const RoomManagement: React.FC = () => {
                     className="w-full bg-slate-950 border border-slate-700 text-white rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
                   >
                     <option value="available">🟢 Available</option>
-                    <option value="occupied">🔴 Occupied</option>
+                    <option value="reserved" disabled>🔵 Reserved (set by bookings)</option>
+                    <option value="occupied" disabled>🔴 Occupied (set by check-in)</option>
                     <option value="cleaning">🧹 Cleaning</option>
                     <option value="maintenance">🛠️ Maintenance</option>
                   </select>
@@ -613,6 +683,20 @@ export const RoomManagement: React.FC = () => {
                     placeholder="e.g. Garden View, Extra Bed Allowed"
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
                   />
+                </div>
+
+                <div className="col-span-2 flex items-center gap-2 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5">
+                  <input
+                    type="checkbox"
+                    id="room-active-toggle"
+                    checked={isActive}
+                    onChange={(e) => setIsActive(e.target.checked)}
+                    className="w-4 h-4 accent-emerald-500"
+                  />
+                  <label htmlFor="room-active-toggle" className="text-xs text-slate-300 cursor-pointer">
+                    <strong>Active</strong> — un-tick to retire this room. Retired rooms stay in the
+                    history but disappear from the POS room plan and cannot be booked.
+                  </label>
                 </div>
 
                 <div className="col-span-2">

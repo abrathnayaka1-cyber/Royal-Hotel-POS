@@ -36,8 +36,8 @@ export const RoomBookingTicketModal: React.FC = () => {
   const phone = settings?.phone || '032 226 52 66 / 0772256569';
 
   const matchedRoom = rooms.find(r => r.id === recentBookingTicket.roomId);
-  const itemChargesTotal = (recentBookingTicket.itemCharges || []).reduce((sum, charge) => sum + charge.total, 0);
-  const otherExtraCharges = Math.max(0, recentBookingTicket.extraCharges - itemChargesTotal);
+  const itemChargesTotal = (recentBookingTicket.itemCharges || []).reduce((sum, charge) => sum + Number(charge.total || 0), 0);
+  const otherExtraCharges = Math.max(0, Number(recentBookingTicket.extraCharges || 0) - itemChargesTotal);
 
   const formattedCreated = new Date(recentBookingTicket.createdAt).toLocaleString('en-US', {
     month: 'short',
@@ -87,7 +87,7 @@ export const RoomBookingTicketModal: React.FC = () => {
               <h3 className="font-bold text-white text-base flex items-center gap-2">
                 Room Booking Ticket
                 <span className="text-xs px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30">
-                  {recentBookingTicket.status.toUpperCase().replace('_', ' ')}
+                  {String(recentBookingTicket.status || '').toUpperCase().replace('_', ' ')}
                 </span>
               </h3>
               <p className="text-xs text-slate-400">Ready for Thermal / Paper Print</p>
@@ -216,7 +216,7 @@ export const RoomBookingTicketModal: React.FC = () => {
               
               <div className="flex justify-between font-black text-[13px] pt-1.5 border-t border-gray-300">
                 <span>TOTAL AMOUNT:</span>
-                <span>{currencySymbol} {recentBookingTicket.grandTotal.toLocaleString()}</span>
+                <span>{currencySymbol} {Number(recentBookingTicket.grandTotal || 0).toLocaleString()}</span>
               </div>
               <div className="flex justify-between font-bold text-[12px] text-emerald-800">
                 <span>ADVANCE PAID:</span>
@@ -224,7 +224,7 @@ export const RoomBookingTicketModal: React.FC = () => {
               </div>
               <div className={`flex justify-between font-black text-[12px] ${recentBookingTicket.balanceDue > 0 ? 'text-rose-900 bg-rose-50 px-1 rounded' : 'text-gray-800'}`}>
                 <span>BALANCE DUE:</span>
-                <span>{currencySymbol} {recentBookingTicket.balanceDue.toLocaleString()}</span>
+                <span>{currencySymbol} {Number(recentBookingTicket.balanceDue || 0).toLocaleString()}</span>
               </div>
               <div className="flex justify-between text-[10px] text-gray-600">
                 <span>Payment Method:</span>

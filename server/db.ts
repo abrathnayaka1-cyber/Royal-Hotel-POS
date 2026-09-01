@@ -228,7 +228,7 @@ export interface Room {
   ratePerDay: number;
   rateHalfDay?: number;
   amenities: string[];
-  status: 'available' | 'occupied' | 'reserved' | 'cleaning' | 'maintenance';
+  status: RoomStatus;
   currentBookingId?: string;
   currentGuestName?: string;
   currentGuestPhone?: string;
@@ -236,6 +236,9 @@ export interface Room {
   isActive: boolean;
   createdAt: string;
 }
+
+export type RoomStatus = 'available' | 'occupied' | 'reserved' | 'cleaning' | 'maintenance';
+export type RoomBookingStatus = 'confirmed' | 'checked_in' | 'checked_out' | 'cancelled';
 
 export interface RoomBooking {
   id: string;
@@ -259,9 +262,10 @@ export interface RoomBooking {
   grandTotal: number;
   advancePaid: number;
   balanceDue: number;
-  paymentMethod: 'cash' | 'card' | 'bank_transfer' | 'other';
+  // Kept in sync with src/types.ts PaymentMethod (a room settlement can be split).
+  paymentMethod: 'cash' | 'card' | 'bank_transfer' | 'other' | 'split';
   paymentDetails?: any;
-  status: 'confirmed' | 'checked_in' | 'checked_out' | 'cancelled';
+  status: RoomBookingStatus;
   cashierId: string;
   cashierName: string;
   notes?: string;

@@ -99,6 +99,7 @@ interface POSContextType {
   refreshRooms: () => Promise<void>;
   refreshRoomBookings: () => Promise<void>;
   createRoomBooking: (payload: Record<string, unknown>) => Promise<RoomBooking>;
+  checkInRoomBooking: (bookingId: string) => Promise<RoomBooking>;
   checkoutRoomBooking: (bookingId: string, checkoutData: Record<string, unknown>) => Promise<RoomBooking>;
   cancelRoomBooking: (bookingId: string, reason?: string) => Promise<void>;
   addRoomPayment: (bookingId: string, paymentData: Record<string, unknown>) => Promise<RoomBooking>;
@@ -314,6 +315,18 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }, 300);
     }
 
+    return res.booking;
+  };
+
+  /** Turn a CONFIRMED reservation into an in-house stay when the guest arrives. */
+  const checkInRoomBooking = async (bookingId: string): Promise<RoomBooking> => {
+    const res = await fetchApi<{ success: boolean; booking: RoomBooking; room: Room }>(`/room-bookings/${bookingId}/check-in`, {
+      method: 'PUT',
+      body: JSON.stringify({}),
+    });
+
+    await refreshRooms();
+    await refreshRoomBookings();
     return res.booking;
   };
 
@@ -967,6 +980,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         refreshRooms,
         refreshRoomBookings,
         createRoomBooking,
+        checkInRoomBooking,
         checkoutRoomBooking,
         cancelRoomBooking,
         addRoomPayment,

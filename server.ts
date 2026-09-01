@@ -32,6 +32,7 @@ import {
   StockMovement,
   Room,
   RoomBooking,
+  RoomBookingStatus,
   FunctionHall,
   FunctionBooking,
   StockImport,
@@ -4912,9 +4913,14 @@ app.get('/api/reports/daily-sales-summary', authMiddleware, requireRole('super_a
 
 app.get('/api/rooms', authMiddleware, (req: Request, res: Response) => {
   try {
-    const { status, floor, type } = req.query;
+    const { status, floor, type, activeOnly } = req.query;
     let rooms = db.raw.rooms || [];
 
+    // Retired rooms (isActive === false) can be filtered out with ?activeOnly=true.
+    // The Super Admin directory still lists them so they can be re-activated.
+    if (String(activeOnly) === 'true') {
+      rooms = rooms.filter(r => r.isActive !== false);
+    }
     if (status && status !== 'all') {
       rooms = rooms.filter(r => r.status === status);
     }
@@ -4936,13 +4942,21 @@ app.post('/api/rooms', authMiddleware, requireRole('super_admin'), (req: Request
     const user = (req as any).user as User;
     const { roomNumber, roomType, floor, capacity, ratePerDay, rateHalfDay, amenities, status, notes } = req.body;
 
-    if (!roomNumber || typeof roomNumber !== 'string' || !roomNumber.trim() || !roomType || !ratePerDay) {
+    if (!roomNumber || typeof roomNumber !== 'string' || !roomNumber.trim()
+      || typeof roomType !== 'string' || !roomType.trim() || !ratePerDay) {
       return res.status(400).json({ error: 'Room number, type, and daily rate are required.' });
     }
 
     const rate = Number(ratePerDay);
     if (isNaN(rate) || rate <= 0 || rate > 1000000) {
       return res.status(400).json({ error: 'Invalid daily rate (must be 1-1,000,000)' });
+    }
+
+    if (rateHalfDay !== undefined && rateHalfDay !== null && rateHalfDay !== '') {
+      const half = Number(rateHalfDay);
+      if (!Number.isFinite(half) || half < 0 || half > 1000000) {
+        return res.status(400).json({ error: 'Invalid half-day rate (must be 0-1,000,000).' });
+      }
     }
 
     const existing = db.raw.rooms.find(r => r.roomNumber.trim().toLowerCase() === roomNumber.trim().toLowerCase());
@@ -4968,7 +4982,7 @@ app.post('/api/rooms', authMiddleware, requireRole('super_admin'), (req: Request
     db.raw.rooms.push(newRoom);
     db.save();
 
-    db.logAudit(user.id, user.name, user.role, 'CREATE_ROOM', 'ROOM', newRoom.id, `Created Room ${newRoom.roomNumber} (${newRoom.roomType}) at Rs. ${newRoom.ratePerDay}/day`);
+    db.logAudit(user.id, user.name, user.role, 'CREATE_ROOM', 'ROOM', newRoom.id, `Created Room ${newRoom.roomNumber} (${newRoom.roomType}) at ${db.raw.settings.currencySymbol || 'Rs.'} ${newRoom.ratePerDay}/day`);
 
     res.status(201).json(newRoom);
   } catch (err: any) {
@@ -5009,14 +5023,73 @@ app.put('/api/rooms/:id', authMiddleware, (req: Request, res: Response) => {
     if (floor !== undefined && typeof floor === 'string') room.floor = floor.trim().slice(0, 64);
     if (capacity !== undefined) room.capacity = Math.max(1, Math.min(20, Number(capacity) || 2));
     if (ratePerDay !== undefined) {
+      // A silently-ignored bad rate used to look like a successful save in the
+      // Admin UI while the old tariff stayed in the database.
       const rate = Number(ratePerDay);
-      if (!isNaN(rate) && rate > 0 && rate <= 1000000) room.ratePerDay = rate;
+      if (!Number.isFinite(rate) || rate <= 0 || rate > 1000000) {
+        return res.status(400).json({ error: 'Invalid daily rate (must be 1-1,000,000).' });
+      }
+      room.ratePerDay = rate;
     }
-    if (rateHalfDay !== undefined) room.rateHalfDay = rateHalfDay ? Math.max(0, Number(rateHalfDay)) : undefined;
+    if (rateHalfDay !== undefined) {
+      if (rateHalfDay === null || rateHalfDay === '') {
+        room.rateHalfDay = undefined;
+      } else {
+        const half = Number(rateHalfDay);
+        if (!Number.isFinite(half) || half < 0 || half > 1000000) {
+          return res.status(400).json({ error: 'Invalid half-day rate (must be 0-1,000,000).' });
+        }
+        room.rateHalfDay = half;
+      }
+    }
     if (amenities !== undefined && Array.isArray(amenities)) room.amenities = amenities.map((a: any) => String(a).slice(0, 64)).slice(0, 20);
-    if (status !== undefined && ['available', 'occupied', 'reserved', 'cleaning', 'maintenance'].includes(status)) room.status = status;
+    if (status !== undefined) {
+      if (!['available', 'occupied', 'reserved', 'cleaning', 'maintenance'].includes(status)) {
+        return res.status(400).json({ error: 'Invalid room status.' });
+      }
+      // Housekeeping must never be able to "free" a room that still has an
+      // in-house guest — the guest silently vanished from the room plan while
+      // their booking stayed open (and the room could then be double-booked).
+      const inHouse = (db.raw.roomBookings || []).find(
+        b => b.roomId === room.id && b.status === 'checked_in'
+      );
+      if (inHouse && status !== 'occupied') {
+        return res.status(400).json({
+          error: `Room ${room.roomNumber} has an in-house guest (${inHouse.guestName}, ${inHouse.bookingNumber}). Check the guest out before changing the room status.`
+        });
+      }
+      room.status = status;
+      if (status === 'available' || status === 'maintenance') {
+        room.currentBookingId = undefined;
+        room.currentGuestName = undefined;
+        room.currentGuestPhone = undefined;
+      }
+    }
     if (notes !== undefined && typeof notes === 'string') room.notes = notes.slice(0, 1000);
-    if (isActive !== undefined) room.isActive = Boolean(isActive);
+    if (isActive !== undefined) {
+      const nextActive = Boolean(isActive);
+      if (!nextActive) {
+        const active = (db.raw.roomBookings || []).filter(
+          b => b.roomId === room.id && (b.status === 'confirmed' || b.status === 'checked_in')
+        );
+        if (active.length > 0) {
+          return res.status(400).json({
+            error: `Room ${room.roomNumber} still has ${active.length} active booking(s). Cancel or check them out before de-activating the room.`
+          });
+        }
+      }
+      room.isActive = nextActive;
+    }
+
+    // Renaming/retyping a room used to leave every existing booking (and its
+    // printed ticket) showing the OLD room number — the booking list and the
+    // room plan then disagreed. Keep active bookings in sync.
+    for (const b of db.raw.roomBookings || []) {
+      if (b.roomId === room.id && (b.status === 'confirmed' || b.status === 'checked_in')) {
+        b.roomNumber = room.roomNumber;
+        b.roomType = room.roomType;
+      }
+    }
 
     db.save();
 
@@ -5042,6 +5115,17 @@ app.delete('/api/rooms/:id', authMiddleware, requireRole('super_admin'), (req: R
     if (room.status === 'occupied') {
       return res.status(400).json({ error: 'Cannot delete an occupied room. Check-out the guest first.' });
     }
+    // Deleting a room that still has a confirmed reservation orphaned the
+    // booking: it stayed in the history pointing at a room that no longer
+    // exists, and syncRoomStatus could never release it again.
+    const activeBookings = (db.raw.roomBookings || []).filter(
+      b => b.roomId === id && (b.status === 'confirmed' || b.status === 'checked_in')
+    );
+    if (activeBookings.length > 0) {
+      return res.status(400).json({
+        error: `Room ${room.roomNumber} has ${activeBookings.length} active booking(s) (e.g. ${activeBookings[0].bookingNumber}). Cancel or check them out first, or de-activate the room instead.`
+      });
+    }
 
     db.raw.rooms.splice(index, 1);
     db.save();
@@ -5053,6 +5137,18 @@ app.delete('/api/rooms/:id', authMiddleware, requireRole('super_admin'), (req: R
     res.status(500).json({ error: err.message || 'Failed to delete room.' });
   }
 });
+
+/**
+ * Local (hotel timezone) YYYY-MM-DD key. `toISOString()` is UTC, so in a
+ * UTC+05:30 hotel every evening rolled over to "tomorrow" — reservations taken
+ * after 18:30 were mis-classified and room revenue landed on the wrong day.
+ */
+function localDateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 
 /**
  * Re-derives a room's status from its remaining bookings, so cancelling one
@@ -5076,14 +5172,24 @@ function syncRoomStatus(roomId: string): void {
     return;
   }
   if (active.length > 0) {
-    room.status = 'reserved';
-    room.currentBookingId = active[0].id;
+    // Point at the NEXT arrival, not at whichever booking happens to sit first
+    // in the array (bookings are unshifted, so that was the newest one — a
+    // reservation for next month hid the guest arriving tomorrow).
+    const next = active
+      .slice()
+      .sort((a, b) => new Date(a.checkInDate).getTime() - new Date(b.checkInDate).getTime())[0];
+    // Never overwrite a housekeeping state: a room being cleaned or under
+    // maintenance must stay that way even though it has a future reservation.
+    if (room.status !== 'cleaning' && room.status !== 'maintenance') {
+      room.status = 'reserved';
+    }
+    room.currentBookingId = next.id;
     room.currentGuestName = undefined;
     room.currentGuestPhone = undefined;
     return;
   }
   if (room.status === 'occupied' || room.status === 'reserved' || room.currentBookingId) {
-    room.status = 'available';
+    if (room.status === 'occupied' || room.status === 'reserved') room.status = 'available';
     room.currentBookingId = undefined;
     room.currentGuestName = undefined;
     room.currentGuestPhone = undefined;
@@ -5134,9 +5240,25 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
       return res.status(400).json({ error: 'Room, Guest Name, and Phone Number are required.' });
     }
 
+    // A booking is a legal document — an empty/garbage phone number made the
+    // guest un-contactable and passed validation as long as it was truthy.
+    const phoneStr = String(guestPhone).trim();
+    if (phoneStr.replace(/\D/g, '').length < 7) {
+      return res.status(400).json({ error: 'Please enter a valid guest phone number (at least 7 digits).' });
+    }
+
+    if (paymentMethod !== undefined && paymentMethod !== null && paymentMethod !== ''
+      && !['cash', 'card', 'bank_transfer', 'other', 'split'].includes(paymentMethod)) {
+      return res.status(400).json({ error: 'Invalid payment method.' });
+    }
+
     const room = db.raw.rooms.find(r => r.id === roomId);
     if (!room) {
       return res.status(404).json({ error: 'Selected room not found.' });
+    }
+
+    if (room.isActive === false) {
+      return res.status(400).json({ error: `Room ${room.roomNumber} is de-activated and cannot be booked.` });
     }
 
     if (room.status === 'maintenance') {
@@ -5151,6 +5273,19 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
     }
     if (checkOut <= checkIn) {
       return res.status(400).json({ error: 'Check-out date must be after check-in date' });
+    }
+    // A stay longer than a year is always a typo (e.g. a mis-typed year in the
+    // check-out date) and used to be billed at nights × rate — hundreds of
+    // thousands of rupees on a single ticket.
+    const MAX_STAY_DAYS = 365;
+    if ((checkOut.getTime() - checkIn.getTime()) / 86400000 > MAX_STAY_DAYS) {
+      return res.status(400).json({ error: `A single booking cannot exceed ${MAX_STAY_DAYS} nights. Please check the dates.` });
+    }
+    // Back-dated reservations corrupt occupancy reports (a booking that
+    // "started" last month can never be checked in). Allow today and future
+    // only, with a 1-day grace window for late data entry / timezones.
+    if (checkOut.getTime() < Date.now() - 86400000) {
+      return res.status(400).json({ error: 'Check-out date is in the past. Please correct the stay dates.' });
     }
 
     // Guard against double-booking: compare the actual DATE RANGES instead of
@@ -5168,8 +5303,8 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
       return bIn < checkOut.getTime() && checkIn.getTime() < bOut;
     });
     if (overlapping) {
-      const from = new Date(overlapping.checkInDate).toISOString().slice(0, 10);
-      const to = new Date(overlapping.checkOutDate).toISOString().slice(0, 10);
+      const from = localDateKey(new Date(overlapping.checkInDate));
+      const to = localDateKey(new Date(overlapping.checkOutDate));
       return res.status(400).json({
         error: `Room ${room.roomNumber} is already booked for ${from} → ${to} (${overlapping.bookingNumber} — ${overlapping.guestName}). Pick another room or change the dates.`
       });
@@ -5235,14 +5370,26 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
     }
     const balanceDue = Math.max(0, grandTotal - advance);
 
+    // The room's capacity was collected in the UI but never enforced: 12 guests
+    // could be checked into a 2-person room.
+    const guestCount = Math.max(1, Math.min(20, Number(numberOfGuests) || 2));
+    if (guestCount > room.capacity) {
+      return res.status(400).json({ error: `Room ${room.roomNumber} holds a maximum of ${room.capacity} guest(s).` });
+    }
+
     // A stay that starts on a FUTURE date is a reservation, never a check-in:
     // marking it "checked_in" used to flip the room to OCCUPIED the moment the
     // booking was taken (weeks before the guest arrives) and list the guest as
     // an in-house guest on the dashboard.
-    const startsToday = checkIn.getTime() <= Date.now()
-      || checkIn.toISOString().split('T')[0] <= new Date().toISOString().split('T')[0];
-    const requestedStatus = status && ['confirmed', 'checked_in', 'checked_out', 'cancelled'].includes(status) ? status : 'checked_in';
-    const bookingStatus = (requestedStatus === 'checked_in' && !startsToday) ? 'confirmed' : requestedStatus;
+    // The day comparison must be LOCAL: with the old UTC `toISOString()` split
+    // a same-day check-in taken after 18:30 in a UTC+05:30 hotel was read as
+    // "tomorrow" and silently downgraded to a reservation.
+    const startsToday = checkIn.getTime() <= Date.now() || localDateKey(checkIn) <= localDateKey(new Date());
+    // A booking can only be created as a reservation or a check-in. Accepting
+    // "checked_out"/"cancelled" here created a dead booking that instantly
+    // blocked the room's dates while showing as closed.
+    const requestedStatus = status === 'confirmed' ? 'confirmed' : 'checked_in';
+    const bookingStatus: RoomBookingStatus = (requestedStatus === 'checked_in' && !startsToday) ? 'confirmed' : requestedStatus;
     const bookingNumber = db.getNextBookingNumber();
 
     const booking: RoomBooking = {
@@ -5252,10 +5399,10 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
       roomNumber: room.roomNumber,
       roomType: room.roomType,
       guestName: guestName.trim().slice(0, 128),
-      guestPhone: String(guestPhone).trim().slice(0, 32),
+      guestPhone: phoneStr.slice(0, 32),
       guestIdOrPassport: (guestIdOrPassport || '').trim().slice(0, 64),
       guestAddress: (guestAddress || '').trim().slice(0, 500),
-      numberOfGuests: Math.max(1, Math.min(20, Number(numberOfGuests) || 2)),
+      numberOfGuests: guestCount,
       checkInDate: checkIn.toISOString(),
       checkOutDate: checkOut.toISOString(),
       durationDays: days,
@@ -5302,11 +5449,67 @@ app.post('/api/room-bookings', authMiddleware, (req: Request, res: Response) => 
 
     db.save();
 
-    db.logAudit(user.id, user.name, user.role, 'ROOM_BOOKING_CREATED', 'ROOM_BOOKING', booking.id, `Created Booking ${booking.bookingNumber} for Room ${room.roomNumber} - Guest: ${booking.guestName} (Total: Rs. ${booking.grandTotal}, Advance: Rs. ${booking.advancePaid})`);
+    db.logAudit(user.id, user.name, user.role, 'ROOM_BOOKING_CREATED', 'ROOM_BOOKING', booking.id, `Created Booking ${booking.bookingNumber} for Room ${room.roomNumber} - Guest: ${booking.guestName} (Total: ${db.raw.settings.currencySymbol || 'Rs.'} ${booking.grandTotal}, Advance: ${db.raw.settings.currencySymbol || 'Rs.'} ${booking.advancePaid})`);
 
     res.status(201).json({ success: true, booking, room });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to create room booking.' });
+  }
+});
+
+/**
+ * Check a CONFIRMED reservation in when the guest actually arrives.
+ * This step was missing entirely: a reservation could only ever be cancelled or
+ * (illegally) checked out, so the room stayed "reserved" for the whole stay,
+ * room-service charges could not be posted properly and the guest never showed
+ * up as in-house on the dashboard.
+ */
+app.put('/api/room-bookings/:id/check-in', authMiddleware, (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user as User;
+    const { id } = req.params;
+
+    const booking = (db.raw.roomBookings || []).find(b => b.id === id);
+    if (!booking) {
+      return res.status(404).json({ error: 'Room booking not found.' });
+    }
+    if (booking.status === 'checked_in') {
+      return res.status(400).json({ error: 'This guest is already checked in.' });
+    }
+    if (booking.status !== 'confirmed') {
+      return res.status(400).json({ error: `A ${booking.status.replace('_', ' ')} booking cannot be checked in.` });
+    }
+
+    const room = db.raw.rooms.find(r => r.id === booking.roomId);
+    if (!room) {
+      return res.status(404).json({ error: 'The room for this booking no longer exists.' });
+    }
+    const otherInHouse = (db.raw.roomBookings || []).find(
+      b => b.roomId === room.id && b.id !== booking.id && b.status === 'checked_in'
+    );
+    if (otherInHouse) {
+      return res.status(400).json({
+        error: `Room ${room.roomNumber} is still occupied by ${otherInHouse.guestName} (${otherInHouse.bookingNumber}). Check that guest out first.`
+      });
+    }
+    if (room.status === 'maintenance') {
+      return res.status(400).json({ error: `Room ${room.roomNumber} is under maintenance. Release it before checking the guest in.` });
+    }
+
+    booking.status = 'checked_in';
+    booking.checkedInAt = new Date().toISOString();
+
+    room.status = 'occupied';
+    room.currentBookingId = booking.id;
+    room.currentGuestName = booking.guestName;
+    room.currentGuestPhone = booking.guestPhone;
+
+    db.save();
+    db.logAudit(user.id, user.name, user.role, 'ROOM_CHECK_IN', 'ROOM_BOOKING', booking.id, `Guest ${booking.guestName} checked in to Room ${booking.roomNumber} (${booking.bookingNumber}).`);
+
+    res.json({ success: true, booking, room, message: `Guest checked in to Room ${room.roomNumber}.` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to check in.' });
   }
 });
 
@@ -5329,6 +5532,20 @@ app.put('/api/room-bookings/:id/checkout', authMiddleware, (req: Request, res: R
       return res.status(400).json({ error: 'This booking was cancelled and cannot be checked out.' });
     }
 
+    // Only a guest who actually checked in can check out. A plain "confirmed"
+    // reservation used to be settleable, which collected money for a stay that
+    // never happened and left the room stuck in "reserved".
+    if (booking.status !== 'checked_in') {
+      return res.status(400).json({ error: 'This guest has not checked in yet. Check the guest in before checking out.' });
+    }
+
+    // An unknown payment method used to be written straight onto the booking,
+    // so the settlement never showed up in any payment breakdown.
+    if (paymentMethod !== undefined && paymentMethod !== null && paymentMethod !== ''
+      && !['cash', 'card', 'bank_transfer', 'other', 'split'].includes(paymentMethod)) {
+      return res.status(400).json({ error: 'Invalid settlement payment method.' });
+    }
+
     // Validate everything BEFORE mutating the booking.
     // Previously extra charges were applied and then the request could still be rejected,
     // leaving the booking totals corrupted in memory.
@@ -5341,13 +5558,13 @@ app.put('/api/room-bookings/:id/checkout', authMiddleware, (req: Request, res: R
     const rawFinal = Number(finalPaymentAmount);
     const finalPay = Number.isFinite(rawFinal) && rawFinal > 0 ? Number(rawFinal.toFixed(2)) : newBalanceDue;
     if (finalPay > newBalanceDue + 0.01) {
-      return res.status(400).json({ error: `Final payment cannot exceed balance due (Rs. ${newBalanceDue.toFixed(2)}).` });
+      return res.status(400).json({ error: `Final payment cannot exceed balance due (${db.raw.settings.currencySymbol || 'Rs.'} ${newBalanceDue.toFixed(2)}).` });
     }
     // Check-out is a FULL settlement. A positive but short final payment would
     // close the booking with an un-collected balance; record a partial payment
     // first (POST /:id/payment) and only then check out.
     if (finalPay + 0.01 < newBalanceDue) {
-      return res.status(400).json({ error: `Final payment cannot be less than balance due (Rs. ${newBalanceDue.toFixed(2)}). Record a partial payment before settling in full.` });
+      return res.status(400).json({ error: `Final payment cannot be less than balance due (${db.raw.settings.currencySymbol || 'Rs.'} ${newBalanceDue.toFixed(2)}). Record a partial payment before settling in full.` });
     }
 
     booking.extraCharges = Number((booking.extraCharges + add).toFixed(2));
@@ -5374,11 +5591,18 @@ app.put('/api/room-bookings/:id/checkout', authMiddleware, (req: Request, res: R
       room.currentBookingId = undefined;
       room.currentGuestName = undefined;
       room.currentGuestPhone = undefined;
+      // A room that still has upcoming reservations must keep pointing at the
+      // next arrival once housekeeping releases it, so re-derive the link.
+      const upcoming = (db.raw.roomBookings || [])
+        .filter(b => b.roomId === room.id && b.id !== booking.id && b.status === 'confirmed')
+        .sort((a, b) => new Date(a.checkInDate).getTime() - new Date(b.checkInDate).getTime())[0];
+      if (upcoming) room.currentBookingId = upcoming.id;
     }
 
     db.save();
 
-    db.logAudit(user.id, user.name, user.role, 'ROOM_CHECKOUT', 'ROOM_BOOKING', booking.id, `Guest ${booking.guestName} checked out from Room ${booking.roomNumber}. Final Settlement: Rs. ${finalPay}. Room marked for cleaning.`);
+    const currency = db.raw.settings.currencySymbol || 'Rs.';
+    db.logAudit(user.id, user.name, user.role, 'ROOM_CHECKOUT', 'ROOM_BOOKING', booking.id, `Guest ${booking.guestName} checked out from Room ${booking.roomNumber}. Final Settlement: ${currency} ${finalPay}. Room marked for cleaning.`);
 
     res.json({ success: true, booking, room, message: `Room ${booking.roomNumber} checkout completed successfully.` });
   } catch (err: any) {
@@ -5400,6 +5624,11 @@ app.put('/api/room-bookings/:id/cancel', authMiddleware, (req: Request, res: Res
     if (booking.status === 'checked_out') {
       return res.status(400).json({ error: 'Cannot cancel already checked out booking' });
     }
+    // Cancelling twice silently re-ran the whole flow and appended another
+    // "Cancel Reason" to the notes.
+    if (booking.status === 'cancelled') {
+      return res.status(400).json({ error: 'This booking is already cancelled.' });
+    }
     const activeItemCharges = (booking.itemCharges || []).filter(charge => {
       const bill = db.raw.bills.find(b => b.id === charge.billId);
       return bill && bill.status !== 'voided' && bill.status !== 'cancelled';
@@ -5408,9 +5637,18 @@ app.put('/api/room-bookings/:id/cancel', authMiddleware, (req: Request, res: Res
       return res.status(400).json({ error: `This booking has ${activeItemCharges.length} room-charge bill(s). Void those bills before cancelling the booking.` });
     }
 
+    const refundDue = Number(Math.max(0, booking.advancePaid).toFixed(2));
+
     booking.status = 'cancelled';
+    // A cancelled stay is not owed anything any more: leaving balanceDue set
+    // kept the cancelled booking in the "outstanding dues" figures forever.
+    booking.balanceDue = 0;
     if (reason && typeof reason === 'string') {
       booking.notes = (booking.notes ? booking.notes + ' | Cancel Reason: ' : 'Cancel Reason: ') + reason.slice(0, 500);
+    }
+    if (refundDue > 0) {
+      const cur = db.raw.settings.currencySymbol || 'Rs.';
+      booking.notes = (booking.notes ? booking.notes + ' | ' : '') + `Advance of ${cur} ${refundDue.toFixed(2)} is refundable to the guest.`;
     }
 
     // Re-derive the room's status from the bookings that are still active.
@@ -5423,7 +5661,7 @@ app.put('/api/room-bookings/:id/cancel', authMiddleware, (req: Request, res: Res
 
     db.logAudit(user.id, user.name, user.role, 'ROOM_BOOKING_CANCELLED', 'ROOM_BOOKING', booking.id, `Cancelled booking ${booking.bookingNumber} for Room ${booking.roomNumber}. Reason: ${reason ? String(reason).slice(0, 500) : 'N/A'}`);
 
-    res.json({ success: true, booking, room, message: `Booking ${booking.bookingNumber} cancelled.` });
+    res.json({ success: true, booking, room, refundDue, message: `Booking ${booking.bookingNumber} cancelled.${refundDue > 0 ? ` Refund ${refundDue.toFixed(2)} advance to the guest.` : ''}` });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to cancel booking.' });
   }
@@ -5444,25 +5682,35 @@ app.post('/api/room-bookings/:id/payment', authMiddleware, (req: Request, res: R
       return res.status(400).json({ error: 'Cannot add payment to checked out or cancelled booking' });
     }
 
-    const payAmt = Number(amount) || 0;
-    if (!Number.isFinite(payAmt) || payAmt <= 0 || payAmt > 1000000) {
-      return res.status(400).json({ error: 'Payment amount must be between 1 and 1,000,000.' });
-    }
-    if (payAmt > booking.balanceDue) {
-      return res.status(400).json({ error: `Payment exceeds balance due (Rs. ${booking.balanceDue})` });
+    if (paymentMethod !== undefined && paymentMethod !== null && paymentMethod !== ''
+      && !['cash', 'card', 'bank_transfer', 'other', 'split'].includes(paymentMethod)) {
+      return res.status(400).json({ error: 'Invalid payment method.' });
     }
 
-    booking.advancePaid = Number((booking.advancePaid + payAmt).toFixed(2));
+    const rawPay = Number(amount);
+    if (!Number.isFinite(rawPay) || rawPay <= 0 || rawPay > 1000000) {
+      return res.status(400).json({ error: 'Payment amount must be between 1 and 1,000,000.' });
+    }
+    const payAmt = Number(rawPay.toFixed(2));
+    const currency = db.raw.settings.currencySymbol || 'Rs.';
+    // Compare with a 1-cent tolerance: paying the exact displayed balance was
+    // rejected whenever floating-point noise made it a fraction too large.
+    if (payAmt > booking.balanceDue + 0.01) {
+      return res.status(400).json({ error: `Payment exceeds balance due (${currency} ${booking.balanceDue.toFixed(2)})` });
+    }
+    const applied = Math.min(payAmt, booking.balanceDue);
+
+    booking.advancePaid = Number((booking.advancePaid + applied).toFixed(2));
     booking.balanceDue = Number(Math.max(0, booking.grandTotal - booking.advancePaid).toFixed(2));
     if (notes && typeof notes === 'string') {
-      booking.notes = (booking.notes ? booking.notes + ' | Payment: ' : 'Payment: ') + `${payAmt} (${paymentMethod || 'Cash'}) - ${notes.slice(0, 500)}`;
+      booking.notes = (booking.notes ? booking.notes + ' | Payment: ' : 'Payment: ') + `${applied} (${paymentMethod || 'Cash'}) - ${notes.slice(0, 500)}`;
     }
 
     db.save();
 
-    db.logAudit(user.id, user.name, user.role, 'ROOM_BOOKING_PAYMENT', 'ROOM_BOOKING', booking.id, `Received payment of Rs. ${payAmt} for Room ${booking.roomNumber} (${booking.bookingNumber})`);
+    db.logAudit(user.id, user.name, user.role, 'ROOM_BOOKING_PAYMENT', 'ROOM_BOOKING', booking.id, `Received payment of ${currency} ${applied} for Room ${booking.roomNumber} (${booking.bookingNumber})`);
 
-    res.json({ success: true, booking, message: `Payment of Rs. ${payAmt} recorded.` });
+    res.json({ success: true, booking, message: `Payment of ${currency} ${applied} recorded.` });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to record payment.' });
   }

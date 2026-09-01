@@ -31,6 +31,7 @@ export const RoomsView: React.FC = () => {
     openRoomBookingModal,
     openBookingTicketModal,
     updateRoom,
+    checkInRoomBooking,
     refreshRooms,
     refreshRoomBookings
   } = usePOS();
@@ -42,16 +43,25 @@ export const RoomsView: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [checkoutModalRoom, setCheckoutModalRoom] = useState<Room | null>(null);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [busyBookingId, setBusyBookingId] = useState<string | null>(null);
+  // Failures used to go to console.error only — the cashier saw nothing happen.
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Status counts
-  const totalCount = rooms.length;
-  const availableCount = rooms.filter(r => r.status === 'available').length;
-  const occupiedCount = rooms.filter(r => r.status === 'occupied').length;
-  const cleaningCount = rooms.filter(r => r.status === 'cleaning').length;
-  const maintenanceCount = rooms.filter(r => r.status === 'maintenance').length;
+  // De-activated (retired) rooms must not appear in the POS room plan at all.
+  const activeRooms = rooms.filter(r => r.isActive !== false);
+
+  const totalCount = activeRooms.length;
+  const availableCount = activeRooms.filter(r => r.status === 'available').length;
+  const occupiedCount = activeRooms.filter(r => r.status === 'occupied').length;
+  // "reserved" existed in the data model but had no badge, no count pill and no
+  // filter — reserved rooms silently disappeared from every status tally.
+  const reservedCount = activeRooms.filter(r => r.status === 'reserved').length;
+  const cleaningCount = activeRooms.filter(r => r.status === 'cleaning').length;
+  const maintenanceCount = activeRooms.filter(r => r.status === 'maintenance').length;
 
   // Filtered rooms
-  const filteredRooms = rooms.filter(room => {
+  const filteredRooms = activeRooms.filter(room => {
     if (statusFilter !== 'all' && room.status !== statusFilter) return false;
     if (floorFilter !== 'all' && room.floor !== floorFilter) return false;
     if (searchQuery.trim()) {
@@ -64,19 +74,39 @@ export const RoomsView: React.FC = () => {
     return true;
   });
 
-  const uniqueFloors = Array.from(new Set(rooms.map(r => r.floor)));
+  const uniqueFloors = Array.from(new Set(activeRooms.map(r => r.floor))).sort();
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
-    await Promise.all([refreshRooms(), refreshRoomBookings()]);
-    setIsRefreshing(false);
+    setActionError(null);
+    try {
+      // A failed refresh used to leave the spinner spinning forever.
+      await Promise.all([refreshRooms(), refreshRoomBookings()]);
+    } catch (err: any) {
+      setActionError(err?.message || 'Failed to refresh room status.');
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
   const handleQuickStatusChange = async (roomId: string, newStatus: Room['status']) => {
+    setActionError(null);
     try {
       await updateRoom(roomId, { status: newStatus });
-    } catch (err) {
-      console.error('Failed to change status:', err);
+    } catch (err: any) {
+      setActionError(err?.message || 'Failed to change the room status.');
+    }
+  };
+
+  const handleCheckIn = async (booking: RoomBooking) => {
+    setActionError(null);
+    setBusyBookingId(booking.id);
+    try {
+      await checkInRoomBooking(booking.id);
+    } catch (err: any) {
+      setActionError(err?.message || 'Failed to check the guest in.');
+    } finally {
+      setBusyBookingId(null);
     }
   };
 
@@ -94,6 +124,13 @@ export const RoomsView: React.FC = () => {
           <span className="px-2.5 py-1 text-xs font-bold rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-rose-400"></span>
             Occupied
+          </span>
+        );
+      case 'reserved':
+        return (
+          <span className="px-2.5 py-1 text-xs font-bold rounded-full bg-sky-500/20 text-sky-300 border border-sky-500/30 flex items-center gap-1.5">
+            <Clock className="w-3 h-3 text-sky-400" />
+            Reserved
           </span>
         );
       case 'cleaning':
@@ -173,6 +210,16 @@ export const RoomsView: React.FC = () => {
             🔴 Occupied ({occupiedCount})
           </button>
           <button
+            onClick={() => setStatusFilter('reserved')}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all border ${
+              statusFilter === 'reserved'
+                ? 'bg-sky-600 text-white border-sky-400'
+                : 'bg-sky-950/40 text-sky-300 border-sky-900/40 hover:bg-sky-900/50'
+            }`}
+          >
+            🔵 Reserved ({reservedCount})
+          </button>
+          <button
             onClick={() => setStatusFilter('cleaning')}
             className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all border ${
               statusFilter === 'cleaning'
@@ -183,6 +230,17 @@ export const RoomsView: React.FC = () => {
             🧹 Cleaning ({cleaningCount})
           </button>
           
+          <button
+            onClick={() => setStatusFilter('maintenance')}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all border ${
+              statusFilter === 'maintenance'
+                ? 'bg-purple-600 text-white border-purple-400'
+                : 'bg-purple-950/40 text-purple-300 border-purple-900/40 hover:bg-purple-900/50'
+            }`}
+          >
+            🛠️ Maintenance ({maintenanceCount})
+          </button>
+
           <div className="flex items-center gap-2 pl-2">
             <button
               onClick={handleRefresh}
@@ -248,6 +306,13 @@ export const RoomsView: React.FC = () => {
         )}
       </div>
 
+      {actionError && (
+        <div className="flex items-start gap-2 bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs rounded-xl px-3 py-2.5">
+          <span className="flex-1">{actionError}</span>
+          <button onClick={() => setActionError(null)} className="text-rose-400 hover:text-rose-200 font-bold">✕</button>
+        </div>
+      )}
+
       {/* Rooms Grid */}
       <div className="flex-1 overflow-y-auto pr-1">
         {filteredRooms.length === 0 ? (
@@ -261,13 +326,22 @@ export const RoomsView: React.FC = () => {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {filteredRooms.map(room => {
-              // Find active booking if occupied
-              const activeBooking = roomBookings.find(
-                b => b.roomId === room.id && (b.status === 'checked_in' || b.status === 'confirmed')
-              ) || (room.currentBookingId ? roomBookings.find(b => b.id === room.currentBookingId) : null);
+              // The in-house guest ALWAYS wins. The old lookup took whichever
+              // booking came first in the array, so a future reservation could
+              // display its guest / balance on a room that was actually occupied
+              // by somebody else.
+              const roomBookingsForRoom = roomBookings.filter(b => b.roomId === room.id);
+              const inHouseBooking = roomBookingsForRoom.find(b => b.status === 'checked_in') || null;
+              const nextReservation = roomBookingsForRoom
+                .filter(b => b.status === 'confirmed')
+                .sort((a, b) => new Date(a.checkInDate).getTime() - new Date(b.checkInDate).getTime())[0] || null;
+              const activeBooking = inHouseBooking || nextReservation
+                || (room.currentBookingId ? roomBookingsForRoom.find(b => b.id === room.currentBookingId) : null)
+                || null;
 
               const isOccupied = room.status === 'occupied';
               const isAvailable = room.status === 'available';
+              const isReserved = room.status === 'reserved';
               const isCleaning = room.status === 'cleaning';
 
               return (
@@ -279,6 +353,8 @@ export const RoomsView: React.FC = () => {
                       ? 'bg-gradient-to-b from-rose-950/20 to-slate-900/90 border-rose-800/40 hover:border-rose-700'
                       : isAvailable
                       ? 'bg-gradient-to-b from-emerald-950/20 to-slate-900/90 border-emerald-800/40 hover:border-emerald-700'
+                      : isReserved
+                      ? 'bg-gradient-to-b from-sky-950/20 to-slate-900/90 border-sky-800/40 hover:border-sky-700'
                       : isCleaning
                       ? 'bg-gradient-to-b from-amber-950/20 to-slate-900/90 border-amber-800/40 hover:border-amber-700'
                       : 'bg-slate-900/90 border-slate-800 hover:border-slate-700'
@@ -309,7 +385,7 @@ export const RoomsView: React.FC = () => {
                         <span>Up to {room.capacity} Guests</span>
                       </div>
                       <div className="font-mono font-bold text-emerald-400 text-sm">
-                        {currencySymbol} {room.ratePerDay.toLocaleString()}<span className="text-[10px] text-slate-400 font-normal">/day</span>
+                        {currencySymbol} {Number(room.ratePerDay || 0).toLocaleString()}<span className="text-[10px] text-slate-400 font-normal">/day</span>
                       </div>
                     </div>
 
@@ -331,7 +407,7 @@ export const RoomsView: React.FC = () => {
                   </div>
 
                   {/* Active Booking Card Body (if occupied) */}
-                  {isOccupied && activeBooking ? (
+                  {(isOccupied || isReserved) && activeBooking ? (
                     <div className="p-3.5 bg-rose-950/30 border-b border-rose-900/30 text-xs space-y-1.5 font-mono">
                       <div className="flex justify-between items-center text-slate-300 font-sans">
                         <span className="font-bold flex items-center gap-1 text-white">
@@ -358,7 +434,7 @@ export const RoomsView: React.FC = () => {
                       <div className="flex justify-between text-slate-400 text-[11px] pt-1 border-t border-rose-900/40">
                         <span>Balance Due:</span>
                         <span className="font-bold text-rose-300">
-                          {currencySymbol} {activeBooking.balanceDue.toLocaleString()}
+                          {currencySymbol} {Number(activeBooking.balanceDue || 0).toLocaleString()}
                         </span>
                       </div>
                     </div>
@@ -369,11 +445,17 @@ export const RoomsView: React.FC = () => {
                     {/* Status Dropdown */}
                     <select
                       value={room.status}
-                      onChange={(e) => handleQuickStatusChange(room.id, e.target.value as any)}
-                      className="bg-slate-900 border border-slate-800 text-slate-300 text-[11px] rounded-lg px-2 py-1.5 focus:outline-none focus:border-emerald-500 font-medium"
+                      // Housekeeping can only move a room between free states.
+                      // Flipping an occupied room to "available" from here used
+                      // to orphan the in-house guest (server now refuses it too).
+                      disabled={!!inHouseBooking}
+                      title={inHouseBooking ? `Room has an in-house guest (${inHouseBooking.guestName}). Check out first.` : 'Change housekeeping status'}
+                      onChange={(e) => handleQuickStatusChange(room.id, e.target.value as Room['status'])}
+                      className={`bg-slate-900 border border-slate-800 text-slate-300 text-[11px] rounded-lg px-2 py-1.5 focus:outline-none focus:border-emerald-500 font-medium ${inHouseBooking ? 'opacity-60 cursor-not-allowed' : ''}`}
                     >
                       <option value="available">🟢 Available</option>
-                      <option value="occupied">🔴 Occupied</option>
+                      <option value="reserved" disabled>🔵 Reserved</option>
+                      <option value="occupied" disabled>🔴 Occupied</option>
                       <option value="cleaning">🧹 Cleaning</option>
                       <option value="maintenance">🛠️ Maint.</option>
                     </select>
@@ -388,6 +470,27 @@ export const RoomsView: React.FC = () => {
                           <Plus className="w-3.5 h-3.5" />
                           <span>Book / Check-In</span>
                         </button>
+                      )}
+
+                      {isReserved && activeBooking && (
+                        <>
+                          <button
+                            onClick={() => openBookingTicketModal(activeBooking)}
+                            className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs transition-colors border border-slate-700"
+                            title="View & Print Booking Ticket"
+                          >
+                            <Printer className="w-4 h-4 text-emerald-400" />
+                          </button>
+                          <button
+                            id={`checkin-room-${room.roomNumber}-btn`}
+                            onClick={() => handleCheckIn(activeBooking)}
+                            disabled={busyBookingId === activeBooking.id}
+                            className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold shadow-md shadow-sky-900/30 flex items-center gap-1 transition-all active:scale-95"
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>{busyBookingId === activeBooking.id ? 'Checking In...' : 'Check-In Guest'}</span>
+                          </button>
+                        </>
                       )}
 
                       {isOccupied && (
