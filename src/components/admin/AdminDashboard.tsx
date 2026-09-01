@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { fetchApi } from '../../lib/api.ts';
 import { SystemSettings, Bill } from '../../types.ts';
 import {
@@ -9,29 +9,20 @@ import {
   Clock,
   Users,
   Utensils,
-  Wine,
   ArrowUpRight,
   RefreshCw,
-  CreditCard,
-  Banknote,
-  Receipt,
   FileSpreadsheet,
   Sparkles,
   Activity,
   Bot,
-  ShieldAlert
+  ShieldAlert,
+  PiggyBank
 } from 'lucide-react';
 import {
   ResponsiveContainer,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
   PieChart,
   Pie,
-  Cell,
-  CartesianGrid
+  Cell
 } from 'recharts';
 
 interface DashboardData {
@@ -108,8 +99,11 @@ export const AdminDashboard: React.FC<{ settings: SystemSettings | null; onNavig
   useEffect(() => {
     loadDashboard();
     loadAiHealth();
-    // Auto refresh every 30 seconds for live monitoring
-    const interval = setInterval(loadDashboard, 30000);
+    // Auto refresh every 30 seconds for live monitoring (sales + health report)
+    const interval = setInterval(() => {
+      loadDashboard();
+      loadAiHealth();
+    }, 30000);
     return () => clearInterval(interval);
   }, []);
 
@@ -139,25 +133,37 @@ export const AdminDashboard: React.FC<{ settings: SystemSettings | null; onNavig
     }
   };
 
-  const COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899'];
+  const COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4'];
 
   const avgBillToday =
     data && data.todayBillsCount > 0 ? Math.round(data.todayRevenue / data.todayBillsCount) : 0;
 
-  // Aggregate payment methods for today (or fallback to recent bills)
-  const paymentData = data?.todayPaymentBreakdown
-    ? [
-        { name: 'Cash', value: data.todayPaymentBreakdown.cash?.total || 0 },
-        { name: 'Card', value: data.todayPaymentBreakdown.card?.total || 0 },
-        { name: 'Bank Transfer', value: data.todayPaymentBreakdown.bank_transfer?.total || 0 },
-        { name: 'Other', value: data.todayPaymentBreakdown.other?.total || 0 },
-      ].filter(p => p.value > 0)
-    : [
-        { name: 'Cash', value: data?.recentBills.filter(b => b.paymentMethod === 'cash').reduce((s, b) => s + b.grandTotal, 0) || 0 },
-        { name: 'Card', value: data?.recentBills.filter(b => b.paymentMethod === 'card').reduce((s, b) => s + b.grandTotal, 0) || 0 },
-        { name: 'Bank Transfer', value: data?.recentBills.filter(b => b.paymentMethod === 'bank_transfer').reduce((s, b) => s + b.grandTotal, 0) || 0 },
-        { name: 'Other', value: data?.recentBills.filter(b => b.paymentMethod === 'other').reduce((s, b) => s + b.grandTotal, 0) || 0 },
-      ].filter(p => p.value > 0);
+  const PAYMENT_LABELS: Record<string, string> = {
+    cash: 'Cash',
+    card: 'Card',
+    bank_transfer: 'Bank Transfer',
+    other: 'Other',
+    split: 'Split',
+    room_charge: 'Room Charge',
+  };
+
+  // Aggregate today's payment methods into a chart-friendly array. Values are
+  // coerced with Number() and null-guarded so legacy/NaN data never produces a
+  // broken chart. Only methods with a non-zero total are shown.
+  const paymentData = useMemo(() => {
+    const breakdown = data?.todayPaymentBreakdown;
+    if (!breakdown) return [];
+    return Object.entries(breakdown)
+      .map(([method, val]) => ({
+        method,
+        name: PAYMENT_LABELS[method] || method,
+        value: Number(val?.total) || 0,
+        count: Number(val?.count) || 0,
+      }))
+      .filter(p => p.value > 0);
+  }, [data?.todayPaymentBreakdown]);
+
+  const paymentTotal = paymentData.reduce((s, p) => s + p.value, 0);
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto">
@@ -244,6 +250,7 @@ export const AdminDashboard: React.FC<{ settings: SystemSettings | null; onNavig
             </div>
             <div className="text-xs text-slate-500 mt-1">
               Lifetime Sales: {currencySymbol} {(data?.totalRevenue || 0).toLocaleString()}
+              {data?.totalBillsCount ? ` · ${data.totalBillsCount} bills` : ''}
             </div>
           </div>
         </div>
@@ -359,13 +366,13 @@ export const AdminDashboard: React.FC<{ settings: SystemSettings | null; onNavig
               </div>
             </div>
 
-            {aiHealth.report.issues.length > 0 && (
+            {(aiHealth.report.issues || []).length > 0 && (
               <div>
                 <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-2">
-                  Issues ({aiHealth.report.issues.length})
+                  Issues ({(aiHealth.report.issues || []).length})
                 </div>
                 <ul className="space-y-2">
-                  {aiHealth.report.issues.map((issue, i) => (
+                  {(aiHealth.report.issues || []).map((issue, i) => (
                     <li key={i} className="flex items-start gap-2.5 text-sm">
                       <span className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${
                         issue.severity === 'critical' ? 'bg-rose-500' : issue.severity === 'warning' ? 'bg-amber-500' : 'bg-sky-500'
@@ -380,13 +387,13 @@ export const AdminDashboard: React.FC<{ settings: SystemSettings | null; onNavig
               </div>
             )}
 
-            {aiHealth.report.recommendations.length > 0 && (
+            {(aiHealth.report.recommendations || []).length > 0 && (
               <div>
                 <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-2">
                   Recommended Actions
                 </div>
                 <ul className="space-y-1.5">
-                  {aiHealth.report.recommendations.map((rec, i) => (
+                  {(aiHealth.report.recommendations || []).map((rec, i) => (
                     <li key={i} className="flex items-start gap-2 text-[13px] text-slate-600 dark:text-slate-300">
                       <span className="text-indigo-500 font-black mt-0.5 shrink-0">→</span>
                       <span>{rec}</span>
@@ -399,6 +406,87 @@ export const AdminDashboard: React.FC<{ settings: SystemSettings | null; onNavig
         ) : (
           <div className="mt-4 p-4 bg-slate-50 dark:bg-slate-800/50 border border-dashed border-slate-300 dark:border-slate-700 rounded-xl text-center text-xs text-slate-500">
             {aiRunning ? 'Running system health check…' : 'No health report yet. Run a health check to see the system status.'}
+          </div>
+        )}
+      </div>
+
+      {/* Today's Payment Method Breakdown */}
+      <div className="p-5 sm:p-6 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-2xl shadow-xs">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 dark:bg-emerald-950/50 dark:text-emerald-400 flex items-center justify-center">
+              <PiggyBank className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-sm font-black text-slate-900 dark:text-white tracking-tight">
+                Today's Payment Methods
+              </h2>
+              <p className="text-[11px] text-slate-500">
+                {data?.todayBillsCount || 0} paid bill(s) today totalling {currencySymbol}{' '}
+                {(data?.todayRevenue || 0).toLocaleString()}
+              </p>
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="text-2xl font-black text-slate-900 dark:text-white">
+              {currencySymbol} {(data?.todayRevenue || 0).toLocaleString()}
+            </div>
+            <div className="text-[11px] text-slate-500">Total Collected Today</div>
+          </div>
+        </div>
+
+        {paymentData.length > 0 ? (
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-6 items-center">
+            <div className="h-48">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={paymentData}
+                    dataKey="value"
+                    nameKey="name"
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={48}
+                    outerRadius={80}
+                    paddingAngle={2}
+                    stroke="none"
+                  >
+                    {paymentData.map((entry, i) => (
+                      <Cell key={`${entry.method}-${i}`} fill={COLORS[i % COLORS.length]} />
+                    ))}
+                  </Pie>
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="space-y-2">
+              {paymentData.map((p, i) => (
+                <div
+                  key={p.method}
+                  className="flex items-center justify-between text-xs py-1.5 border-b border-slate-100 dark:border-slate-800 last:border-0"
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="w-2.5 h-2.5 rounded-full shrink-0"
+                      style={{ backgroundColor: COLORS[i % COLORS.length] }}
+                    />
+                    <span className="font-semibold text-slate-700 dark:text-slate-300">{p.name}</span>
+                    <span className="text-[10px] text-slate-400">({p.count})</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="font-black text-slate-900 dark:text-white">
+                      {currencySymbol} {p.value.toLocaleString()}
+                    </span>
+                    <span className="ml-2 text-[10px] text-slate-400">
+                      {paymentTotal > 0 ? Math.round((p.value / paymentTotal) * 100) : 0}%
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-4 p-4 bg-slate-50 dark:bg-slate-800/50 border border-dashed border-slate-300 dark:border-slate-700 rounded-xl text-center text-xs text-slate-500">
+            No payments recorded yet today.
           </div>
         )}
       </div>
@@ -435,34 +523,34 @@ export const AdminDashboard: React.FC<{ settings: SystemSettings | null; onNavig
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {data?.recentBills && data.recentBills.length > 0 ? (
                   data.recentBills.slice(0, 7).map(b => (
-                    <tr key={b.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                    <tr key={b.id || b.billNumber} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                       <td className="py-3 px-3 font-bold text-slate-900 dark:text-white">
-                        <div>{b.billNumber}</div>
-                        <div className="text-[10px] text-slate-400 font-normal">{b.invoiceNumber}</div>
+                        <div>{b.billNumber || '—'}</div>
+                        <div className="text-[10px] text-slate-400 font-normal">{b.invoiceNumber || b.billNumber || ''}</div>
                       </td>
                       <td className="py-3 px-3 text-slate-500">
                         {new Date(b.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                       </td>
                       <td className="py-3 px-3 font-medium text-slate-700 dark:text-slate-300">
-                        {b.cashierName}
+                        {b.cashierName || '—'}
                       </td>
                       <td className="py-3 px-3">
                         <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
-                          {b.orderType.toUpperCase()}
+                          {String(b.orderType || '').toUpperCase() || '—'}
                         </span>
                       </td>
                       <td className="py-3 px-3 uppercase font-semibold text-slate-600 dark:text-slate-400">
-                        {b.paymentMethod}
+                        {b.paymentMethod || '—'}
                       </td>
                       <td className="py-3 px-3 text-right font-black text-slate-900 dark:text-white">
-                        {currencySymbol} {b.grandTotal.toLocaleString()}
+                        {currencySymbol} {Number(b.grandTotal || 0).toLocaleString()}
                       </td>
                     </tr>
                   ))
                 ) : (
                   <tr>
                     <td colSpan={6} className="py-8 text-center text-slate-400">
-                      No transactions recorded yet today.
+                      No transactions recorded yet.
                     </td>
                   </tr>
                 )}
@@ -495,11 +583,11 @@ export const AdminDashboard: React.FC<{ settings: SystemSettings | null; onNavig
                     key={i}
                     className="p-2.5 bg-slate-50 dark:bg-slate-800/50 rounded-xl flex items-center justify-between text-xs"
                   >
-                    <div>
-                      <div className="font-bold text-slate-900 dark:text-white">{item.productName}</div>
-                      <div className="text-[11px] text-slate-500">{item.size}</div>
+                    <div className="min-w-0">
+                      <div className="font-bold text-slate-900 dark:text-white truncate">{item.productName || 'Product'}</div>
+                      <div className="text-[11px] text-slate-500">{item.size || ''}</div>
                     </div>
-                    <div className="text-right">
+                    <div className="text-right shrink-0">
                       <span
                         className={`px-2 py-0.5 rounded-full font-bold text-[10px] ${
                           item.status === 'OUT_OF_STOCK'
@@ -507,7 +595,7 @@ export const AdminDashboard: React.FC<{ settings: SystemSettings | null; onNavig
                             : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
                         }`}
                       >
-                        {item.stock} left (Min: {item.minStock})
+                        {Number(item.stock || 0)} left (Min: {Number(item.minStock || 0)})
                       </span>
                     </div>
                   </div>
@@ -536,20 +624,26 @@ export const AdminDashboard: React.FC<{ settings: SystemSettings | null; onNavig
             </div>
 
             <div className="space-y-2">
-              {data?.activeCashiers?.map(c => (
-                <div
-                  key={c.id}
-                  className="p-2.5 bg-slate-50 dark:bg-slate-800/40 rounded-xl flex items-center justify-between text-xs"
-                >
-                  <div>
-                    <div className="font-bold text-slate-900 dark:text-white">{c.name}</div>
-                    <div className="text-[11px] text-slate-400">@{c.username}</div>
+              {data?.activeCashiers && data.activeCashiers.length > 0 ? (
+                data.activeCashiers.map(c => (
+                  <div
+                    key={c.id || c.username}
+                    className="p-2.5 bg-slate-50 dark:bg-slate-800/40 rounded-xl flex items-center justify-between text-xs"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-bold text-slate-900 dark:text-white truncate">{c.name || c.username || 'Cashier'}</div>
+                      <div className="text-[11px] text-slate-400">{c.username ? `@${c.username}` : ''}</div>
+                    </div>
+                    <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 text-[10px] font-bold rounded-md">
+                      ACTIVE
+                    </span>
                   </div>
-                  <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 text-[10px] font-bold rounded-md">
-                    ACTIVE
-                  </span>
+                ))
+              ) : (
+                <div className="text-center py-6 text-xs text-slate-500">
+                  No cashier accounts configured yet.
                 </div>
-              ))}
+              )}
             </div>
           </div>
         </div>
