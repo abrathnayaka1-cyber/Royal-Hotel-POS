@@ -16,6 +16,9 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
+    "check:php": "node tools/check-php.mjs",
+    "test": "vitest run",
+    "test:excel": "node tests/excel-test.mjs",
     "format": "prettier --write \"src/**/*.{ts,tsx,js,jsx}\""
   },
   "keywords": [
@@ -50,19 +53,28 @@
     "jspdf-autotable": "^5.0.8",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
+    "papaparse": "^5.7.0",
     "pdf-parse": "^1.1.1",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "read-excel-file": "^9.3.10",
     "recharts": "^3.10.1",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.3",
-    "xlsx": "^0.18.5",
+    "write-excel-file": "^4.1.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/papaparse": "^5.5.2",
     "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.4"
+    "@types/react-dom": "^19.2.4",
+    "@testing-library/jest-dom": "^6.4.2",
+    "@testing-library/react": "^16.0.0",
+    "@testing-library/user-event": "^14.5.2",
+    "jsdom": "^24.1.0",
+    "php-parser": "^3.7.0",
+    "vitest": "^4.1.11"
   }
 }

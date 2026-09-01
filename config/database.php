@@ -5,7 +5,7 @@
  */
 
 // Prevent direct execution or file path leakage
-if (basename($_SERVER['PHP_SELF']) === basename(__FILE__)) {
+if (basename($_SERVER['PHP_SELF'] ?? '') === basename(__FILE__)) {
     http_response_code(403);
     die(json_encode(['error' => 'Direct access forbidden.']));
 }

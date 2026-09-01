@@ -7,28 +7,40 @@
 require_once __DIR__ . '/../config/database.php';
 
 // Set global JSON header and CORS headers
+function isSameHostOrigin(string $origin): bool {
+    $host = strtolower((string)($_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? ''));
+    if ($host === '' || $origin === '') {
+        return false;
+    }
+    $originHost = strtolower((string)parse_url($origin, PHP_URL_HOST));
+    if ($originHost === '') {
+        return false;
+    }
+    // Strip any port from the Host header before comparing
+    $host = preg_replace('/:\d+$/', '', $host);
+    return $originHost === $host;
+}
+
 function initApiHeaders(): void {
     header('Content-Type: application/json; charset=utf-8');
     header('X-Content-Type-Options: nosniff');
     header('X-Frame-Options: SAMEORIGIN');
     header('X-XSS-Protection: 1; mode=block');
 
-    // Strict CORS: NEVER reflect an arbitrary Origin (the old code echoed
-    // $_SERVER['HTTP_ORIGIN'] straight into Access-Control-Allow-Origin while
-    // also sending Access-Control-Allow-Credentials, which lets any website
-    // make credentialed cross-origin requests). Only origins explicitly
-    // listed in CORS_ORIGINS (comma-separated) are allowed. With no allowlist
-    // configured the API is same-origin only, which is the safe default.
-    $allowlist = array_values(array_filter(array_map('trim', explode(',', (string)getenv('CORS_ORIGINS')))));
+    // Reflecting an arbitrary Origin together with credentials lets any website make
+    // authenticated requests with the user's cookie. Only same-host origins (or origins
+    // explicitly whitelisted through CORS_ALLOWED_ORIGINS) are allowed.
     $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
-    if ($origin !== '' && in_array($origin, $allowlist, true)) {
+    $allowed = array_filter(array_map('trim', explode(',', (string)getenv('CORS_ALLOWED_ORIGINS'))));
+
+    if ($origin !== '' && (isSameHostOrigin($origin) || in_array($origin, $allowed, true))) {
         header("Access-Control-Allow-Origin: {$origin}");
         header('Vary: Origin');
         header('Access-Control-Allow-Credentials: true');
     }
 
     header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
-    header('Access-Control-Allow-Headers: Authorization, Content-Type, X-Requested-With');
+    header('Access-Control-Allow-Headers: Authorization, Content-Type, X-Requested-With, X-HTTP-Method-Override, X-Request-ID');
 
     if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
         http_response_code(204);
@@ -360,27 +372,37 @@ function getSystemSettings(): array {
 }
 
 /**
- * Generate sequential numbers for Bills, Invoices, and KOTs
+ * Generate sequential numbers for Bills, Invoices, and KOTs.
+ *
+ * The sequence is derived from the highest existing number instead of COUNT(*),
+ * otherwise deleting or voiding a row reuses a number and the next insert dies on
+ * the unique index (uk_bills_bill_number / uk_bills_invoice_number).
  */
+function nextSequenceNumber(PDO $pdo, string $table, string $column, string $prefix, int $pad): string {
+    $like = addcslashes($prefix, '%_\\');
+    $stmt = $pdo->prepare("SELECT `{$column}` FROM `{$table}` WHERE `{$column}` LIKE ? ORDER BY LENGTH(`{$column}`) DESC, `{$column}` DESC LIMIT 1");
+    $stmt->execute([$like . '%']);
+    $row = $stmt->fetch(PDO::FETCH_NUM);
+
+    $max = 0;
+    if ($row && isset($row[0])) {
+        $digits = preg_replace('/\D/', '', substr((string)$row[0], strlen($prefix)));
+        $max = (int)$digits;
+    }
+
+    return sprintf("%s%0{$pad}d", $prefix, $max + 1);
+}
+
 function generateNextNumber(string $type): string {
     $pdo = Database::getConnection();
     $settings = getSystemSettings();
 
     if ($type === 'bill') {
-        $prefix = $settings['billPrefix'] ?? 'BILL-';
-        $stmt = $pdo->query("SELECT COUNT(*) as cnt FROM bills");
-        $count = (int)$stmt->fetch()['cnt'] + 1;
-        return sprintf("%s%05d", $prefix, $count);
+        return nextSequenceNumber($pdo, 'bills', 'bill_number', $settings['billPrefix'] ?? 'BILL-', 5);
     } elseif ($type === 'invoice') {
-        $prefix = $settings['invoicePrefix'] ?? 'INV-';
-        $stmt = $pdo->query("SELECT COUNT(*) as cnt FROM bills");
-        $count = (int)$stmt->fetch()['cnt'] + 1;
-        return sprintf("%s%05d", $prefix, $count);
+        return nextSequenceNumber($pdo, 'bills', 'invoice_number', $settings['invoicePrefix'] ?? 'INV-', 5);
     } elseif ($type === 'kot') {
-        $prefix = $settings['kotPrefix'] ?? 'KOT-';
-        $stmt = $pdo->query("SELECT COUNT(*) as cnt FROM kots");
-        $count = (int)$stmt->fetch()['cnt'] + 1;
-        return sprintf("%s%04d", $prefix, $count);
+        return nextSequenceNumber($pdo, 'kots', 'kot_number', $settings['kotPrefix'] ?? 'KOT-', 4);
     }
 
     return strtoupper($type) . '-' . time();

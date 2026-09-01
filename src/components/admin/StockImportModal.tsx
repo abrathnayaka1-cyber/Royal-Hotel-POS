@@ -1,5 +1,7 @@
-import React, { useEffect, useState } from 'react';
-import * as XLSX from 'xlsx';
+import React, { useEffect, useRef, useState } from 'react';
+import readXlsxFile from 'read-excel-file/universal';
+import writeXlsxFile, { type SheetData } from 'write-excel-file/browser';
+import Papa from 'papaparse';
 import { fetchApi } from '../../lib/api.ts';
 import {
   X,
@@ -187,9 +189,9 @@ function normalizeHeader(h: string): string {
   return h.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-function mapSheetRows(json: Record<string, unknown>[]): RawImportRow[] {
+function mapSheetRows(json: Record<string, unknown>[], headerRow = 0): RawImportRow[] {
   return json.map((obj, i) => {
-    const row: RawImportRow = { rowNumber: i + 2 };
+    const row: RawImportRow = { rowNumber: headerRow + i + 2 };
     for (const [key, value] of Object.entries(obj)) {
       const field = HEADER_ALIASES[normalizeHeader(key)];
       if (!field || value === undefined || value === null || String(value).trim() === '') continue;
@@ -253,6 +255,7 @@ export const StockImportModal: React.FC<{
   const [rawRows, setRawRows] = useState<RawImportRow[]>([]);
   const [parseNote, setParseNote] = useState<string | null>(null);
   const [isParsing, setIsParsing] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Preview
   const [previewRows, setPreviewRows] = useState<ImportPreviewRow[]>([]);
@@ -336,8 +339,8 @@ export const StockImportModal: React.FC<{
     onClose();
   };
 
-  // ---- Template download (uses the existing xlsx dependency) ----
-  const downloadTemplate = () => {
+  // ---- Template download (write-excel-file, zero-vulnerability xlsx writer) ----
+  const downloadTemplate = async () => {
     const template = [
       {
         'SKU': 'LION-LAG-625', 'Barcode': '4791111222333', 'Category': 'Beer',
@@ -352,10 +355,15 @@ export const StockImportModal: React.FC<{
         'Supplier': '', 'Invoice Number': '', 'Invoice Date': '',
       },
     ];
-    const ws = XLSX.utils.json_to_sheet(template);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Stock Import');
-    XLSX.writeFile(wb, 'royal_pos_stock_import_template.xlsx');
+    const headers = Object.keys(template[0]);
+    const headerRow = headers.map(h => ({ value: h, fontWeight: 'bold' as const }));
+    const dataRows = template.map(row => headers.map(h => {
+      const val = (row as Record<string, unknown>)[h];
+      if (typeof val === 'number') return { type: Number, value: val };
+      return { type: String, value: val ? String(val) : '' };
+    }));
+    const sheetData: SheetData = [headerRow, ...dataRows];
+    await writeXlsxFile(sheetData, { sheet: 'Stock Import' }).toFile('royal_pos_stock_import_template.xlsx');
   };
 
   // ---- File parsing ----
@@ -389,20 +397,75 @@ export const StockImportModal: React.FC<{
         });
         setRawRows((result.rows || []).map((r, i) => ({ ...r, rowNumber: i + 1 })));
         setParseNote(result.note || 'PDF rows extracted — verify quantities and prices carefully in the preview.');
+      } else if (ext === 'csv') {
+        const text = new TextDecoder().decode(buffer);
+        const parsed = Papa.parse<Record<string, unknown>>(text, {
+          header: true,
+          skipEmptyLines: true,
+          dynamicTyping: true,
+        });
+        const rows = mapSheetRows(parsed.data || []).filter(r =>
+          r.productName || r.sku || r.barcode || r.size ||
+          (r.quantity !== undefined && String(r.quantity).trim() !== '')
+        );
+        if (rows.length === 0) {
+          setErrorMsg('No valid product rows found. Check the column headers — download the template for the expected format.');
+          return;
+        }
+        setRawRows(rows);
+        setParseNote(`${rows.length} row(s) detected in "${file.name}".`);
+        // Auto-fill invoice metadata from the file when present
+        const first = rows.find(r => r.supplier || r.invoiceNumber || r.invoiceDate);
+        if (first) {
+          if (!supplier && first.supplier) setSupplier(String(first.supplier));
+          if (!invoiceNumber && first.invoiceNumber) setInvoiceNumber(String(first.invoiceNumber));
+          if (!invoiceDate && first.invoiceDate) setInvoiceDate(String(first.invoiceDate));
+        }
       } else {
-        const wb = XLSX.read(buffer, { type: 'array' });
-        if (wb.SheetNames.length === 0) throw new Error('No sheets found');
-        // Scan EVERY sheet and use the first one that actually contains product
+        // read-excel-file's default export returns EVERY sheet (name + rows).
+        // Scan all of them and use the first one that actually contains product
         // rows. Supplier workbooks often start with a cover / terms / summary
         // sheet — reading only sheet #1 used to reject those files with
         // "No valid product rows found".
+        const sheets = await readXlsxFile(buffer);
+        if (!sheets || sheets.length === 0) throw new Error('No sheets found');
+
         let rows: RawImportRow[] = [];
         let usedSheet = '';
-        for (const sheetName of wb.SheetNames) {
-          const ws = wb.Sheets[sheetName];
-          if (!ws) continue;
-          const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '' });
-          const candidate = mapSheetRows(json).filter(r =>
+        for (const { sheet: sheetName, data: sheetData } of sheets) {
+          if (!sheetData || sheetData.length === 0) continue;
+
+          // Supplier sheets often have a title or invoice details above the
+          // table. Locate the first plausible header row instead of assuming
+          // row 1.
+          const headerRow = sheetData.slice(0, 25).findIndex(cells => {
+            const recognised = (cells || []).filter(cell => HEADER_ALIASES[normalizeHeader(String(cell ?? ''))]);
+            const hasIdentity = (cells || []).some(cell => {
+              const field = HEADER_ALIASES[normalizeHeader(String(cell ?? ''))];
+              return field === 'productName' || field === 'sku' || field === 'barcode';
+            });
+            return hasIdentity && recognised.length >= 2;
+          });
+          if (headerRow < 0) continue;
+
+          const headers = (sheetData[headerRow] || []).map(h => String(h ?? '').trim());
+          const jsonRows: Record<string, unknown>[] = [];
+          for (let i = headerRow + 1; i < sheetData.length; i++) {
+            const rowData = sheetData[i];
+            if (!rowData || rowData.length === 0) continue;
+            const obj: Record<string, unknown> = {};
+            let hasVal = false;
+            headers.forEach((header, colIdx) => {
+              const cellVal = rowData[colIdx];
+              if (header && cellVal !== null && cellVal !== undefined && cellVal !== '') {
+                obj[header] = cellVal;
+                hasVal = true;
+              }
+            });
+            if (hasVal) jsonRows.push(obj);
+          }
+
+          const candidate = mapSheetRows(jsonRows, headerRow).filter(r =>
             r.productName || r.sku || r.barcode || r.size ||
             (r.quantity !== undefined && String(r.quantity).trim() !== '')
           );
@@ -417,7 +480,7 @@ export const StockImportModal: React.FC<{
           return;
         }
         setRawRows(rows);
-        setParseNote(usedSheet && wb.SheetNames.length > 1
+        setParseNote(usedSheet && sheets.length > 1
           ? `${rows.length} row(s) detected in sheet "${usedSheet}" of "${file.name}".`
           : `${rows.length} row(s) detected in "${file.name}".`);
         // Auto-fill invoice metadata from the file when present
@@ -795,8 +858,8 @@ export const StockImportModal: React.FC<{
                     Download Excel Template
                   </button>
                 </div>
-                <label
-                  className="flex flex-col items-center justify-center gap-2 p-8 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-2xl bg-slate-50 dark:bg-slate-800/40 cursor-pointer hover:border-blue-400 transition-colors"
+                <div
+                  className="flex flex-col items-center justify-center gap-2 p-8 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-2xl bg-slate-50 dark:bg-slate-800/40 hover:border-blue-400 transition-colors"
                   onDragOver={e => e.preventDefault()}
                   onDrop={e => {
                     e.preventDefault();
@@ -805,9 +868,10 @@ export const StockImportModal: React.FC<{
                   }}
                 >
                   <input
+                    ref={fileInputRef}
                     type="file"
-                    accept=".xlsx,.xls,.csv,.pdf"
-                    className="hidden"
+                    accept=".xlsx,.xls,.csv,.pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,application/pdf"
+                    className="sr-only"
                     onChange={e => {
                       const f = e.target.files?.[0];
                       if (f) handleFile(f);
@@ -820,13 +884,21 @@ export const StockImportModal: React.FC<{
                     <UploadCloud className="w-8 h-8 text-slate-400" />
                   )}
                   <span className="text-xs font-bold text-slate-600 dark:text-slate-300">
-                    {isParsing ? 'Reading file...' : 'Click or drop a file here'}
+                    {isParsing ? 'Reading file...' : 'Drop a file here, or choose one below'}
                   </span>
+                  <button
+                    type="button"
+                    disabled={isParsing}
+                    onClick={() => fileInputRef.current?.click()}
+                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white text-xs font-bold cursor-pointer disabled:cursor-not-allowed"
+                  >
+                    Choose Excel / CSV / PDF File
+                  </button>
                   <span className="text-[10px] text-slate-400 flex items-center gap-2">
                     <FileSpreadsheet className="w-3 h-3" /> .xlsx .xls .csv
-                    <FileText className="w-3 h-3 ml-1" /> .pdf (invoice)
+                    <FileText className="w-3 h-3 ml-1" /> .pdf (invoice) · max 3.5 MB
                   </span>
-                </label>
+                </div>
 
                 {fileName && rawRows.length > 0 && (
                   <div className="mt-2 p-3 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 rounded-xl text-xs text-emerald-700 dark:text-emerald-300 font-semibold flex items-center gap-2">

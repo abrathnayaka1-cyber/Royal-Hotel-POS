@@ -36,6 +36,8 @@ export const RoomBookingTicketModal: React.FC = () => {
   const phone = settings?.phone || '032 226 52 66 / 0772256569';
 
   const matchedRoom = rooms.find(r => r.id === recentBookingTicket.roomId);
+  const itemChargesTotal = (recentBookingTicket.itemCharges || []).reduce((sum, charge) => sum + charge.total, 0);
+  const otherExtraCharges = Math.max(0, recentBookingTicket.extraCharges - itemChargesTotal);
 
   const formattedCreated = new Date(recentBookingTicket.createdAt).toLocaleString('en-US', {
     month: 'short',
@@ -187,12 +189,18 @@ export const RoomBookingTicketModal: React.FC = () => {
                 <span>Room Charge ({recentBookingTicket.durationDays}d):</span>
                 <span>{currencySymbol} {recentBookingTicket.totalRoomCharge.toLocaleString()}</span>
               </div>
-              {recentBookingTicket.extraCharges > 0 && (
+              {otherExtraCharges > 0 && (
                 <div className="flex justify-between">
                   <span>Extra Bed / Services:</span>
-                  <span>{currencySymbol} {recentBookingTicket.extraCharges.toLocaleString()}</span>
+                  <span>{currencySymbol} {otherExtraCharges.toLocaleString()}</span>
                 </div>
               )}
+              {(recentBookingTicket.itemCharges || []).flatMap(charge => charge.items.map((item, index) => (
+                <div key={`${charge.billId}-${index}`} className="flex justify-between gap-2">
+                  <span>{item.productName} ({item.size}) × {item.quantity}</span>
+                  <span className="shrink-0">{currencySymbol} {item.total.toLocaleString()}</span>
+                </div>
+              )))}
               {recentBookingTicket.discount > 0 && (
                 <div className="flex justify-between text-gray-700">
                   <span>Discount:</span>

@@ -172,9 +172,11 @@ export interface Bill {
   grandTotal: number;
   amountReceived: number;
   changeAmount: number;
-  paymentMethod: 'cash' | 'card' | 'bank_transfer' | 'other' | 'split';
+  paymentMethod: 'cash' | 'card' | 'bank_transfer' | 'other' | 'split' | 'room_charge';
   paymentDetails?: any;
-  status: 'paid' | 'held' | 'cancelled' | 'voided';
+  roomBookingId?: string;
+  roomNumber?: string;
+  status: 'paid' | 'held' | 'charged_to_room' | 'cancelled' | 'voided';
   notes?: string;
   /** Kitchen ingredient deductions made for this bill (snapshot at sale time). */
   kitchenDeductions?: KitchenDeductionSnapshot[];
@@ -266,6 +268,13 @@ export interface RoomBooking {
   createdAt: string;
   checkedInAt?: string;
   checkedOutAt?: string;
+  itemCharges?: Array<{
+    billId: string;
+    billNumber: string;
+    items: OrderItem[];
+    total: number;
+    chargedAt: string;
+  }>;
 }
 
 // ==========================================
