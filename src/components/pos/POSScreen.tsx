@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { CategorySidebar } from './CategorySidebar.tsx';
 import { CategoryTabs } from './CategoryTabs.tsx';
 import { ProductGrid } from './ProductGrid.tsx';
@@ -19,7 +19,49 @@ import { usePOS } from '../../context/POSContext.tsx';
 import { Loader2, CheckCircle2, AlertTriangle, XCircle, X } from 'lucide-react';
 
 export const POSScreen: React.FC = () => {
-  const { isLoading, selectedCategory, scanNotice, clearScanNotice } = usePOS();
+  const { isLoading, selectedCategory, scanNotice, clearScanNotice, refreshProducts } = usePOS();
+
+  // ---------------------------------------------------------------
+  // LIVE STOCK SYNC — keep the product grid's stock numbers fresh.
+  // Previously the POS only reloaded products after a checkout, so
+  // stock changed in Admin Inventory / Stock Import (or sold on a
+  // second POS terminal) kept showing stale numbers until a sale or
+  // a full page reload. Now we refresh:
+  //   1. On mount — covers the Admin -> POS view switch,
+  //   2. When the browser tab/window regains focus,
+  //   3. On a light 30s poll while the tab is visible (multi-terminal).
+  // The checkout API still re-validates stock server-side, so this is
+  // purely a display sync — sales can never oversell.
+  // ---------------------------------------------------------------
+  const refreshProductsRef = useRef(refreshProducts);
+  useEffect(() => {
+    refreshProductsRef.current = refreshProducts;
+  });
+
+  useEffect(() => {
+    const syncStock = () => {
+      refreshProductsRef.current().catch(() => {});
+    };
+
+    syncStock(); // POS screen opened (incl. the Admin -> POS switch)
+
+    const onFocusOrVisible = () => {
+      if (document.visibilityState === 'visible') syncStock();
+    };
+
+    window.addEventListener('focus', onFocusOrVisible);
+    document.addEventListener('visibilitychange', onFocusOrVisible);
+
+    const poll = setInterval(() => {
+      if (document.visibilityState === 'visible') syncStock();
+    }, 30000);
+
+    return () => {
+      window.removeEventListener('focus', onFocusOrVisible);
+      document.removeEventListener('visibilitychange', onFocusOrVisible);
+      clearInterval(poll);
+    };
+  }, []);
 
   if (isLoading) {
     return (

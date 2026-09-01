@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { fetchApi } from '../../lib/api.ts';
+import { usePOS } from '../../context/POSContext.tsx';
 import { Product, ProductVariant, Category, Company, SystemSettings } from '../../types.ts';
 import { BarcodePrintModal } from './BarcodePrintModal.tsx';
 import {
@@ -21,6 +22,7 @@ import {
 } from 'lucide-react';
 
 export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = ({ settings }) => {
+  const { refreshProducts } = usePOS();
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -211,6 +213,9 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
 
       setIsModalOpen(false);
       await loadData();
+      // Product saves can change variant stock/prices — push them to the
+      // shared POS context so the live register updates immediately.
+      refreshProducts().catch(() => {});
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to save product.');
     }
@@ -228,6 +233,8 @@ export const ProductManagement: React.FC<{ settings: SystemSettings | null }> = 
     try {
       await fetchApi(`/products/${product.id}`, { method: 'DELETE' });
       await loadData();
+      // Remove the archived item from the live POS view immediately.
+      refreshProducts().catch(() => {});
     } catch (err: any) {
       alert(err.message || 'Failed to archive product.');
     }

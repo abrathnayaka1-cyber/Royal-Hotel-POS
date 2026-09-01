@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { fetchApi } from '../../lib/api.ts';
+import { usePOS } from '../../context/POSContext.tsx';
 import { SystemSettings, Product } from '../../types.ts';
 import { StockImportModal } from './StockImportModal.tsx';
 import { BarcodePrintModal } from './BarcodePrintModal.tsx';
@@ -48,6 +49,7 @@ interface VariantInventoryItem {
 }
 
 export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> = ({ settings }) => {
+  const { refreshProducts } = usePOS();
   const [items, setItems] = useState<VariantInventoryItem[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [search, setSearch] = useState<string>('');
@@ -137,6 +139,9 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
 
       setModalType(null);
       await loadInventory();
+      // Push the new stock level into the shared POS context immediately so
+      // the live register grid reflects the change without a page reload.
+      refreshProducts().catch(() => {});
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to update stock.');
     }
@@ -177,6 +182,8 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
       );
       setResetConfirmText('');
       await loadInventory();
+      // Keep the live POS register in sync after the full stock reset.
+      refreshProducts().catch(() => {});
     } catch (err: any) {
       setResetError(err.message || 'Failed to reset stock.');
     } finally {
@@ -704,7 +711,12 @@ export const InventoryManagement: React.FC<{ settings: SystemSettings | null }> 
       <StockImportModal
         isOpen={isImportModalOpen}
         onClose={() => setIsImportModalOpen(false)}
-        onImported={loadInventory}
+        onImported={() => {
+          // Reload this grid AND the shared POS context so imported stock
+          // shows up on the live register straight away.
+          loadInventory();
+          refreshProducts().catch(() => {});
+        }}
         currencySymbol={currencySymbol}
       />
 
