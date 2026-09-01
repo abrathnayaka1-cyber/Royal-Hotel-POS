@@ -49,8 +49,13 @@ export const RoomBookingModal: React.FC = () => {
   const [numberOfGuests, setNumberOfGuests] = useState<number>(2);
   
   // Dates
-  const todayStr = new Date().toISOString().split('T')[0];
-  const tomorrowStr = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+  // Local YYYY-MM-DD. `toISOString()` is UTC, so before 05:30 in a UTC+05:30
+  // hotel the default check-in date rendered as YESTERDAY and the server then
+  // rejected / downgraded the booking.
+  const toDateKey = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const todayStr = toDateKey(new Date());
+  const tomorrowStr = toDateKey(new Date(Date.now() + 86400000));
   const [checkInDate, setCheckInDate] = useState<string>(todayStr);
   const [checkOutDate, setCheckOutDate] = useState<string>(tomorrowStr);
   const [durationDays, setDurationDays] = useState<number>(1);
@@ -84,6 +89,7 @@ export const RoomBookingModal: React.FC = () => {
       setDiscount(0);
       setTaxRate(settings?.taxRate || 0);
       setAdvancePaid(targetRoom ? targetRoom.ratePerDay : 0);
+      setIsSubmitting(false);
       setPaymentMethod('cash');
       setStatus('checked_in');
       setGuestName('');
@@ -92,7 +98,11 @@ export const RoomBookingModal: React.FC = () => {
       setGuestAddress('');
       setNotes('');
     }
-  }, [isBookingModalOpen, selectedRoomForBooking, rooms, settings]);
+    // NOTE: `rooms` / `settings` are deliberately NOT dependencies. A background
+    // refresh replaced their array identity and re-ran this effect, wiping a
+    // half-typed booking form (guest name, dates, advance) mid-entry.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isBookingModalOpen, selectedRoomForBooking]);
 
   // Update daily rate when room changes
   const handleRoomChange = (roomId: string) => {
@@ -100,36 +110,51 @@ export const RoomBookingModal: React.FC = () => {
     const r = rooms.find(item => item.id === roomId);
     if (r) {
       setRatePerDay(r.ratePerDay);
-      setNumberOfGuests(Math.min(r.capacity, 2));
+      // Never carry a guest count that exceeds the new room's capacity — the
+      // server rejects it and the cashier had no idea why.
+      setNumberOfGuests(prev => Math.min(r.capacity, Math.max(1, prev || 2)));
       // Auto adjust advance recommendation
-      const total = r.ratePerDay * durationDays;
-      setAdvancePaid(total);
+      setAdvancePaid(r.ratePerDay * durationDays);
     }
   };
 
   // Recalculate duration when dates change
+  /** Nights between two YYYY-MM-DD keys, parsed as LOCAL midnights. */
+  const nightsBetween = (from: string, to: string): number => {
+    const start = new Date(`${from}T00:00:00`).getTime();
+    const end = new Date(`${to}T00:00:00`).getTime();
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return 1;
+    return Math.min(365, Math.max(1, Math.round((end - start) / 86400000)));
+  };
+
   const handleCheckInChange = (date: string) => {
     setCheckInDate(date);
-    const start = new Date(date).getTime();
-    const end = new Date(checkOutDate).getTime();
-    const diff = Math.max(1, Math.ceil((end - start) / (1000 * 60 * 60 * 24)));
-    setDurationDays(diff);
+    // Check-out must always stay after check-in; it used to be left behind,
+    // showing a negative stay that the server then rejected on submit.
+    let nextOut = checkOutDate;
+    if (new Date(`${date}T00:00:00`).getTime() >= new Date(`${checkOutDate}T00:00:00`).getTime()) {
+      const d = new Date(`${date}T00:00:00`);
+      d.setDate(d.getDate() + 1);
+      nextOut = toDateKey(d);
+      setCheckOutDate(nextOut);
+    }
+    setDurationDays(nightsBetween(date, nextOut));
   };
 
   const handleCheckOutChange = (date: string) => {
     setCheckOutDate(date);
-    const start = new Date(checkInDate).getTime();
-    const end = new Date(date).getTime();
-    const diff = Math.max(1, Math.ceil((end - start) / (1000 * 60 * 60 * 24)));
-    setDurationDays(diff);
+    setDurationDays(nightsBetween(checkInDate, date));
   };
 
   const handleDurationChange = (days: number) => {
-    const val = Math.max(1, days);
+    // Clamp to the same 1..365 window the server enforces so a typo cannot
+    // silently produce a rejected (or enormous) booking.
+    const val = Math.min(365, Math.max(1, Math.floor(Number(days) || 1)));
     setDurationDays(val);
-    const start = new Date(checkInDate);
+    const start = new Date(`${checkInDate}T00:00:00`);
+    if (isNaN(start.getTime())) return;
     start.setDate(start.getDate() + val);
-    setCheckOutDate(start.toISOString().split('T')[0]);
+    setCheckOutDate(toDateKey(start));
   };
 
   // Computed Totals
@@ -138,10 +163,17 @@ export const RoomBookingModal: React.FC = () => {
   // The server enforces the same ceiling — this only keeps the UI honest.
   const maxDiscountAllowed = Math.max(0, Number((((totalRoomCharge + extraCharges) * Math.min(maxDiscountPct, 100)) / 100).toFixed(2)));
   const effectiveDiscount = discountsEnabled ? Math.min(discount, maxDiscountAllowed) : 0;
-  const grandTotal = Math.max(0, totalRoomCharge + extraCharges + taxAmount - effectiveDiscount);
-  const balanceDue = Math.max(0, grandTotal - advancePaid);
+  const grandTotal = Number(Math.max(0, totalRoomCharge + extraCharges + taxAmount - effectiveDiscount).toFixed(2));
+  // The server rejects an advance above the grand total. Clamping here keeps
+  // the summary honest instead of showing a negative-looking balance and then
+  // failing on submit.
+  const effectiveAdvance = Math.min(Math.max(0, advancePaid), grandTotal);
+  const balanceDue = Number(Math.max(0, grandTotal - effectiveAdvance).toFixed(2));
 
   const selectedRoomObj = rooms.find(r => r.id === selectedRoomId);
+  // De-activated rooms were listed and fully bookable in the dropdown.
+  const bookableRooms = rooms.filter(r => r.isActive !== false || r.id === selectedRoomId);
+  const overCapacity = !!selectedRoomObj && numberOfGuests > selectedRoomObj.capacity;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -153,8 +185,20 @@ export const RoomBookingModal: React.FC = () => {
       setErrorMsg('Please enter guest full name.');
       return;
     }
-    if (!guestPhone.trim()) {
-      setErrorMsg('Please enter guest contact phone number.');
+    if (guestPhone.replace(/\D/g, '').length < 7) {
+      setErrorMsg('Please enter a valid guest phone number (at least 7 digits).');
+      return;
+    }
+    if (overCapacity) {
+      setErrorMsg(`Room ${selectedRoomObj?.roomNumber} holds a maximum of ${selectedRoomObj?.capacity} guest(s).`);
+      return;
+    }
+    if (new Date(`${checkOutDate}T00:00:00`).getTime() <= new Date(`${checkInDate}T00:00:00`).getTime()) {
+      setErrorMsg('Check-out date must be after the check-in date.');
+      return;
+    }
+    if (ratePerDay <= 0) {
+      setErrorMsg('Daily rate must be greater than zero.');
       return;
     }
 
@@ -176,7 +220,7 @@ export const RoomBookingModal: React.FC = () => {
         extraCharges,
         discount: effectiveDiscount,
         tax: taxAmount,
-        advancePaid,
+        advancePaid: effectiveAdvance,
         paymentMethod,
         status,
         notes
@@ -248,13 +292,15 @@ export const RoomBookingModal: React.FC = () => {
                 required
               >
                 <option value="" disabled>-- Select a Room --</option>
-                {rooms.map(room => (
-                  <option 
-                    key={room.id} 
+                {bookableRooms.map(room => (
+                  <option
+                    key={room.id}
                     value={room.id}
-                    disabled={room.status === 'occupied' && room.id !== selectedRoomForBooking?.id}
+                    // Maintenance rooms are refused by the server; occupied ones can
+                    // still be RESERVED for a later date, so they stay selectable.
+                    disabled={room.status === 'maintenance' && room.id !== selectedRoomForBooking?.id}
                   >
-                    Room {room.roomNumber} - {room.roomType} ({room.floor}) &bull; Rs. {room.ratePerDay.toLocaleString()}/day {room.status !== 'available' ? `[${room.status.toUpperCase()}]` : '[AVAILABLE]'}
+                    Room {room.roomNumber} - {room.roomType} ({room.floor}) &bull; {currencySymbol} {room.ratePerDay.toLocaleString()}/day [{room.status.toUpperCase()}]
                   </option>
                 ))}
               </select>
@@ -265,7 +311,7 @@ export const RoomBookingModal: React.FC = () => {
                     Max: {selectedRoomObj.capacity} Guests
                   </span>
                   <span className="text-xs px-2.5 py-1 rounded-lg bg-emerald-950/60 text-emerald-300 font-mono border border-emerald-800/40">
-                    Rate: Rs. {selectedRoomObj.ratePerDay.toLocaleString()} / day
+                    Rate: {currencySymbol} {selectedRoomObj.ratePerDay.toLocaleString()} / day
                   </span>
                   {selectedRoomObj.amenities?.map((am, i) => (
                     <span key={i} className="text-[11px] px-2 py-0.5 bg-slate-800/60 text-slate-400 rounded">
@@ -395,13 +441,18 @@ export const RoomBookingModal: React.FC = () => {
                   <input
                     type="number"
                     min="1"
-                    max="10"
+                    max={selectedRoomObj?.capacity || 20}
                     id="guest-count-input"
                     value={numberOfGuests}
-                    onChange={(e) => setNumberOfGuests(Math.max(1, Number(e.target.value)))}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-9 pr-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 font-mono"
+                    onChange={(e) => setNumberOfGuests(Math.max(1, Math.floor(Number(e.target.value)) || 1))}
+                    className={`w-full bg-slate-900 border rounded-xl pl-9 pr-3 py-2 text-sm text-white focus:outline-none font-mono ${overCapacity ? 'border-rose-500 focus:border-rose-400' : 'border-slate-700 focus:border-emerald-500'}`}
                   />
                 </div>
+                {overCapacity && (
+                  <p className="mt-1 text-[10px] text-rose-400">
+                    Room {selectedRoomObj?.roomNumber} holds a maximum of {selectedRoomObj?.capacity} guest(s).
+                  </p>
+                )}
               </div>
 
               <div>
@@ -449,6 +500,7 @@ export const RoomBookingModal: React.FC = () => {
                   type="date"
                   id="checkin-date-input"
                   value={checkInDate}
+                  min={todayStr}
                   onChange={(e) => handleCheckInChange(e.target.value)}
                   className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 font-mono"
                 />
@@ -476,7 +528,7 @@ export const RoomBookingModal: React.FC = () => {
                   <input
                     type="number"
                     min="1"
-                    max="60"
+                    max="365"
                     id="duration-days-input"
                     value={durationDays}
                     onChange={(e) => handleDurationChange(Number(e.target.value))}
@@ -612,7 +664,7 @@ export const RoomBookingModal: React.FC = () => {
               <div className="p-2 bg-emerald-950/40 border border-emerald-800/40 rounded-lg">
                 <div className="text-[11px] text-emerald-400 uppercase font-sans">Advance Received</div>
                 <div className="text-base font-black text-emerald-300 mt-0.5">
-                  {currencySymbol} {advancePaid.toLocaleString()}
+                  {currencySymbol} {effectiveAdvance.toLocaleString()}
                 </div>
               </div>
               <div className="p-2 bg-amber-950/40 border border-amber-800/40 rounded-lg">
@@ -637,7 +689,7 @@ export const RoomBookingModal: React.FC = () => {
             <button
               type="submit"
               id="confirm-room-booking-btn"
-              disabled={isSubmitting}
+              disabled={isSubmitting || overCapacity || !selectedRoomId}
               className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-sm font-bold shadow-lg shadow-emerald-900/40 flex items-center gap-2 transition-all transform active:scale-95 disabled:opacity-50"
             >
               {isSubmitting ? (

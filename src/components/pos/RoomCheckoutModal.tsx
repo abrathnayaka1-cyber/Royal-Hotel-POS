@@ -44,19 +44,27 @@ export const RoomCheckoutModal: React.FC<RoomCheckoutModalProps> = ({ room, isOp
       setPaymentMethod('cash');
       setNotes('');
 
-      // Find active booking for this room
+      // ONLY an in-house (checked_in) booking can be checked out. The old
+      // lookup also accepted a future "confirmed" reservation, so checking out
+      // an occupied room could settle (and close) the WRONG guest's booking —
+      // the real in-house guest stayed open and the reservation was destroyed.
       const active = roomBookings.find(
-        b => b.roomId === room.id && (b.status === 'checked_in' || b.status === 'confirmed')
-      ) || (room.currentBookingId ? roomBookings.find(b => b.id === room.currentBookingId) : null);
+        b => b.roomId === room.id && b.status === 'checked_in'
+      ) || null;
 
-      setBooking(active || null);
+      setBooking(active);
     }
   }, [isOpen, room, roomBookings]);
 
   if (!isOpen || !room) return null;
 
-  const currentGrandTotal = booking ? booking.grandTotal + Number(additionalCharges || 0) : 0;
-  const currentBalanceDue = booking ? Math.max(0, currentGrandTotal - booking.advancePaid) : 0;
+  const safeAdditional = Number.isFinite(Number(additionalCharges)) ? Math.max(0, Number(additionalCharges)) : 0;
+  const currentGrandTotal = booking ? Number((booking.grandTotal + safeAdditional).toFixed(2)) : 0;
+  const currentBalanceDue = booking ? Number(Math.max(0, currentGrandTotal - booking.advancePaid).toFixed(2)) : 0;
+  // Room-service bills charged to the room are already folded into grandTotal;
+  // show them separately so the guest can see what they are paying for.
+  const itemCharges = booking?.itemCharges || [];
+  const itemChargesTotal = itemCharges.reduce((sum, c) => sum + Number(c.total || 0), 0);
 
   const handleCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -71,7 +79,7 @@ export const RoomCheckoutModal: React.FC<RoomCheckoutModalProps> = ({ room, isOp
 
       const updated = await checkoutRoomBooking(booking.id, {
         paymentMethod,
-        additionalCharges: Number(additionalCharges) || 0,
+        additionalCharges: safeAdditional,
         finalPaymentAmount: currentBalanceDue,
         notes: notes.trim()
       });
@@ -145,13 +153,34 @@ export const RoomCheckoutModal: React.FC<RoomCheckoutModalProps> = ({ room, isOp
                 <span className="font-mono text-slate-200">{booking.durationDays} Night(s) / Day(s)</span>
               </div>
               <div className="flex justify-between">
+                <span className="text-slate-400">Room Charge:</span>
+                <span className="font-mono text-slate-200">{currencySymbol} {booking.totalRoomCharge.toLocaleString()}</span>
+              </div>
+              {itemChargesTotal > 0 && (
+                <div className="pt-2 mt-1 border-t border-slate-800 space-y-1">
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Room-Service Bills ({itemCharges.length}):</span>
+                    <span className="font-mono text-amber-300 font-bold">
+                      {currencySymbol} {itemChargesTotal.toLocaleString()}
+                    </span>
+                  </div>
+                  {itemCharges.map(c => (
+                    <div key={c.billId} className="flex justify-between text-[11px] text-slate-500 font-mono">
+                      <span>#{c.billNumber}</span>
+                      <span>{currencySymbol} {Number(c.total || 0).toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex justify-between pt-2 border-t border-slate-800">
                 <span className="text-slate-400">Advance Paid:</span>
                 <span className="font-mono text-emerald-400 font-bold">{currencySymbol} {booking.advancePaid.toLocaleString()}</span>
               </div>
             </div>
           ) : (
             <div className="p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-300 text-sm">
-              No active booking found. You can clear the room directly to available/cleaning status.
+              No in-house guest found for Room {room.roomNumber}. Only a checked-in guest can be
+              checked out — use the status selector on the room card to send it to Cleaning instead.
             </div>
           )}
 
@@ -240,7 +269,7 @@ export const RoomCheckoutModal: React.FC<RoomCheckoutModalProps> = ({ room, isOp
             <button
               type="submit"
               id="confirm-checkout-btn"
-              disabled={isSubmitting}
+              disabled={isSubmitting || !booking}
               className="px-6 py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-sm font-bold shadow-lg shadow-amber-900/40 flex items-center gap-2 transition-all transform active:scale-95 disabled:opacity-50"
             >
               <LogOut className="w-4 h-4" />
