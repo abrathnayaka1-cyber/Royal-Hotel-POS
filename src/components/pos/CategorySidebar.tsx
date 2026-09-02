@@ -36,7 +36,10 @@ export const CategorySidebar: React.FC = () => {
   // ALL ITEMS, while the category itself is managed in the Super Admin panel only.
   const activeCategories = categories.filter(c => c.isActive && !c.hiddenInPOS);
   const occupiedRoomsCount = rooms.filter(r => r.status === 'occupied').length;
-  const upcomingFunctionCount = functionBookings.filter(b => b.status === 'confirmed').length;
+  // Every OPEN event needs somebody's attention — including one whose day has
+  // already passed and was never closed (that money is still un-collected).
+  // Counting only future dates hid exactly the bookings that were most overdue.
+  const openFunctionCount = functionBookings.filter(b => b.status === 'confirmed').length;
 
   return (
     <aside
@@ -97,9 +100,13 @@ export const CategorySidebar: React.FC = () => {
         <span className="text-[10px] font-black uppercase tracking-tight text-center leading-none">
           FUNCTIONS
         </span>
-        {upcomingFunctionCount > 0 && (
-          <span className="absolute -top-1 -right-1 px-1.5 py-0.2 bg-violet-500 text-white text-[9px] font-bold rounded-full border border-slate-900">
-            {upcomingFunctionCount}
+        {openFunctionCount > 0 && (
+          <span
+            id="cat-sidebar-functions-badge"
+            title={`${openFunctionCount} open event booking(s) — close or cancel them`}
+            className="absolute -top-1 -right-1 px-1.5 py-0.2 bg-violet-500 text-white text-[9px] font-bold rounded-full border border-slate-900"
+          >
+            {openFunctionCount}
           </span>
         )}
       </button>

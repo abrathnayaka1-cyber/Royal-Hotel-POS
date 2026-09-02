@@ -34,8 +34,15 @@ export const FunctionBookingTicketModal: React.FC = () => {
   const phone = settings?.phone || '032 226 52 66 / 0772256569';
 
   const matchedHall = functionHalls.find(h => h.id === recentFunctionTicket.hallId);
+  const currencySymbolSafe = (v: unknown) =>
+    `${currencySymbol} ${(Number(v) || 0).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 
-  const formattedCreated = new Date(recentFunctionTicket.createdAt).toLocaleString('en-US', {
+  // Guarded: these values come from stored bookings, and one legacy row without
+  // an eventDate used to throw inside render — taking the whole POS screen down
+  // with a blank page instead of just this ticket.
+  const formattedCreated = new Date(
+    recentFunctionTicket.createdAt || recentFunctionTicket.eventDate || Date.now()
+  ).toLocaleString('en-US', {
     month: 'short',
     day: '2-digit',
     year: 'numeric',
@@ -44,12 +51,18 @@ export const FunctionBookingTicketModal: React.FC = () => {
     hour12: true
   });
 
-  const formattedEventDate = new Date(recentFunctionTicket.eventDate).toLocaleDateString('en-US', {
-    weekday: 'short',
-    month: 'short',
-    day: '2-digit',
-    year: 'numeric'
-  });
+  const eventDayKey = String(recentFunctionTicket.eventDate || '').slice(0, 10);
+  const localTodayKey = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-${String(new Date().getDate()).padStart(2, '0')}`;
+  const isPastEvent = recentFunctionTicket.status === 'confirmed' && !!eventDayKey && eventDayKey < localTodayKey;
+
+  const formattedEventDate = eventDayKey
+    ? new Date(`${eventDayKey}T00:00:00`).toLocaleDateString('en-US', {
+        weekday: 'short',
+        month: 'short',
+        day: '2-digit',
+        year: 'numeric'
+      })
+    : '—';
 
   const sessionLabel =
     recentFunctionTicket.session === 'day'
@@ -57,6 +70,14 @@ export const FunctionBookingTicketModal: React.FC = () => {
       : recentFunctionTicket.session === 'evening'
       ? 'Evening Session (6 PM - 12 AM)'
       : 'Full Day Session';
+  // The printed policy always said "Hall opens 8:00 AM / Event ends 12:00 AM",
+  // even for a Day-session booking the customer had been quoted 9-5 on.
+  const sessionHours =
+    recentFunctionTicket.session === 'day'
+      ? { open: '8:30 AM', event: '9:00 AM - 5:00 PM', out: '6:00 PM' }
+      : recentFunctionTicket.session === 'evening'
+      ? { open: '5:00 PM', event: '6:00 PM - 12:00 AM', out: '1:00 AM' }
+      : { open: '8:00 AM', event: '9:00 AM - 12:00 AM', out: '1:00 AM' };
 
   const handlePrint = async () => {
     setIsPrinting(true);
@@ -84,8 +105,12 @@ export const FunctionBookingTicketModal: React.FC = () => {
             <div>
               <h3 className="font-bold text-white text-base flex items-center gap-2">
                 Function Booking Ticket
-                <span className="text-xs px-2 py-0.5 rounded bg-violet-500/20 text-violet-300 font-semibold border border-violet-500/30">
-                  {recentFunctionTicket.status.toUpperCase().replace('_', ' ')}
+                <span className={`text-xs px-2 py-0.5 rounded font-semibold border ${
+                  isPastEvent
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    : 'bg-violet-500/20 text-violet-300 border-violet-500/30'
+                }`}>
+                  {isPastEvent ? 'EVENT DAY PASSED — NOT CLOSED' : String(recentFunctionTicket.status || 'confirmed').toUpperCase().replace('_', ' ')}
                 </span>
               </h3>
               <p className="text-xs text-slate-400">Ready for Thermal / Paper Print</p>
@@ -124,7 +149,7 @@ export const FunctionBookingTicketModal: React.FC = () => {
                 {recentFunctionTicket.hallType} {matchedHall?.floor ? `(${matchedHall.floor})` : ''}
               </div>
               <div className="text-[11px] font-black mt-0.5">
-                {recentFunctionTicket.eventType.replace('_', ' ').toUpperCase()} EVENT
+                {String(recentFunctionTicket.eventType || 'other').replace('_', ' ').toUpperCase()} EVENT
               </div>
             </div>
 
@@ -146,7 +171,10 @@ export const FunctionBookingTicketModal: React.FC = () => {
               )}
               <div className="flex justify-between">
                 <span className="text-gray-700">Expected Guests:</span>
-                <span className="font-bold">{recentFunctionTicket.expectedGuests} Person(s)</span>
+                <span className="font-bold">
+                  {Number(recentFunctionTicket.expectedGuests) || 0} Person(s)
+                  {matchedHall?.capacity ? ` / hall max ${matchedHall.capacity}` : ''}
+                </span>
               </div>
             </div>
 
@@ -174,49 +202,63 @@ export const FunctionBookingTicketModal: React.FC = () => {
             <div className="py-2 border-b-2 border-solid border-black text-[11px] space-y-1">
               <div className="flex justify-between">
                 <span>Hall Charge:</span>
-                <span>{currencySymbol} {recentFunctionTicket.hallCharge.toLocaleString()}</span>
+                <span>{currencySymbolSafe(recentFunctionTicket.hallCharge)}</span>
               </div>
               {recentFunctionTicket.numberOfPlates > 0 && (
                 <div className="flex justify-between">
                   <span>Food ({recentFunctionTicket.numberOfPlates} plates):</span>
-                  <span>{currencySymbol} {recentFunctionTicket.plateCharge.toLocaleString()}</span>
+                  <span>{currencySymbolSafe(recentFunctionTicket.plateCharge)}</span>
                 </div>
               )}
               {recentFunctionTicket.extraServices > 0 && (
                 <div className="flex justify-between">
                   <span>Extra Services:</span>
-                  <span>{currencySymbol} {recentFunctionTicket.extraServices.toLocaleString()}</span>
+                  <span>{currencySymbolSafe(recentFunctionTicket.extraServices)}</span>
                 </div>
               )}
               {recentFunctionTicket.discount > 0 && (
                 <div className="flex justify-between text-gray-700">
                   <span>Discount:</span>
-                  <span>-{currencySymbol} {recentFunctionTicket.discount.toLocaleString()}</span>
+                  <span>-{currencySymbolSafe(recentFunctionTicket.discount)}</span>
                 </div>
               )}
               {recentFunctionTicket.tax > 0 && (
                 <div className="flex justify-between text-gray-700">
                   <span>Tax:</span>
-                  <span>{currencySymbol} {recentFunctionTicket.tax.toLocaleString()}</span>
+                  <span>{currencySymbolSafe(recentFunctionTicket.tax)}</span>
                 </div>
               )}
 
               <div className="flex justify-between font-black text-[13px] pt-1.5 border-t border-gray-300">
                 <span>TOTAL AMOUNT:</span>
-                <span>{currencySymbol} {recentFunctionTicket.grandTotal.toLocaleString()}</span>
+                <span>{currencySymbolSafe(recentFunctionTicket.grandTotal)}</span>
               </div>
               <div className="flex justify-between font-bold text-[12px] text-emerald-800">
                 <span>ADVANCE PAID:</span>
-                <span>{currencySymbol} {recentFunctionTicket.advancePaid.toLocaleString()}</span>
+                <span>{currencySymbolSafe(recentFunctionTicket.advancePaid)}</span>
               </div>
               <div className={`flex justify-between font-black text-[12px] ${recentFunctionTicket.balanceDue > 0 ? 'text-rose-900 bg-rose-50 px-1 rounded' : 'text-gray-800'}`}>
                 <span>BALANCE DUE:</span>
-                <span>{currencySymbol} {recentFunctionTicket.balanceDue.toLocaleString()}</span>
+                <span>{currencySymbolSafe(recentFunctionTicket.balanceDue)}</span>
               </div>
               <div className="flex justify-between text-[10px] text-gray-600">
                 <span>Payment Method:</span>
-                <span className="uppercase font-bold">{recentFunctionTicket.paymentMethod}</span>
+                <span className="uppercase font-bold">{String(recentFunctionTicket.paymentMethod || 'cash').replace('_', ' ')}</span>
               </div>
+              {(recentFunctionTicket.paymentDetails?.reference || recentFunctionTicket.paymentDetails?.bank) && (
+                <div className="flex justify-between text-[10px] text-gray-600">
+                  <span>Deposit Ref:</span>
+                  <span className="font-bold text-right">
+                    {String(recentFunctionTicket.paymentDetails?.reference || '')}
+                    {recentFunctionTicket.paymentDetails?.bank ? ` • ${recentFunctionTicket.paymentDetails.bank}` : ''}
+                  </span>
+                </div>
+              )}
+              {Number(recentFunctionTicket.advancePaid) > 0 && Number(recentFunctionTicket.balanceDue) > 0 && (
+                <div className="text-[9px] text-gray-600 pt-0.5">
+                  Advance received so far — the balance is collected before the hall is handed over.
+                </div>
+              )}
             </div>
 
             {recentFunctionTicket.notes && (
@@ -227,7 +269,8 @@ export const FunctionBookingTicketModal: React.FC = () => {
 
             {/* Policies */}
             <div className="py-2 text-[9px] text-gray-600 leading-tight space-y-0.5 border-b border-dashed border-gray-400">
-              <div>&bull; Hall opens: <strong>8:00 AM</strong> &bull; Event end: <strong>12:00 AM</strong></div>
+              <div>&bull; Hall opens: <strong>{sessionHours.open}</strong> &bull; Event: <strong>{sessionHours.event}</strong> &bull; Hand-over: <strong>{sessionHours.out}</strong></div>
+              <div>&bull; One event per hall per day &bull; Balance due before the event starts</div>
               <div>&bull; Outside catering/bands need prior approval</div>
               <div>&bull; Reservations Dial: <strong>Ext. 100 / Reception</strong></div>
             </div>

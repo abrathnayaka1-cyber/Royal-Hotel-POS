@@ -297,6 +297,12 @@ export interface FunctionHall {
   notes?: string;
   isActive: boolean;
   createdAt: string;
+  /** Derived on GET /api/function-halls — open (confirmed) events still to come. */
+  upcomingCount?: number;
+  /** Derived on GET /api/function-halls — ISO date of the next confirmed event. */
+  nextEventDate?: string | null;
+  /** Derived on GET /api/function-halls — uncollected balance across open events. */
+  openBalance?: number;
 }
 
 export interface FunctionBooking {
@@ -330,6 +336,8 @@ export interface FunctionBooking {
   notes?: string;
   createdAt: string;
   completedAt?: string;
+  /** Set when an open booking is edited / rescheduled (PUT /api/function-bookings/:id). */
+  updatedAt?: string;
 }
 
 export interface AuditLog {
